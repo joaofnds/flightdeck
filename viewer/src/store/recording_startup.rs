@@ -251,7 +251,7 @@ impl Startup {
             };
             apps.metadata.origin = crate::store::native::Origin::Saved(witness.manifest.losses);
             // No query or View borrows these pools before Primary; unread sampling cannot refuse.
-            assert!(held.take(&minute.found.run, second, TickApps::Loaded(&mut apps)));
+            assert!(held.take(&minute.found.run, second, TickApps::Awaiting(&mut apps)));
         }
         if !seconds.is_empty() {
             self.selected = Some(self.cursor.next_minute_index);
@@ -416,6 +416,8 @@ impl Startup {
         self.revalidate(input)?;
         input.operation.check()?;
         held.startup = crate::store::StartupState::Complete;
+        // A second whose Apps the load left out waits for none now, so its block packs.
+        held.apps.end_awaiting();
         held.owed = self.history_owed();
         self.cursor.decoder.predecessor = None;
         self.phase = Phase::Complete;
@@ -539,6 +541,7 @@ fn process_minute(
         .as_ref()
         .unwrap_or_else(|| unreachable!("machine witness"));
     let sealed = witness.open(input, &minute.found)?;
+    held.apps.launch_wait();
     if let Some(mut candidate) = pending.take() {
         // Only an older second waits, since a recent one always installs, and the span never
         // reaches back to an older second, so a waiting candidate is never recent.

@@ -348,8 +348,9 @@ fn a_view_identifies_the_second_publication_and_its_unattributed_process() {
     let selected = view.observation(&alternatives[1]).unwrap();
     let processes = selected.processes().unwrap();
     assert_eq!(processes.len(), 1);
-    assert_eq!(processes.at(0).row().pid, 7);
-    assert_eq!(processes.at(0).app_index(), None);
+    let process = processes.iter().next().unwrap();
+    assert_eq!(process.pid(), 7);
+    assert_eq!(process.app_index(), None);
     assert_eq!(selected.observation(), Some(alternatives[1]));
 }
 

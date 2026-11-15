@@ -439,7 +439,7 @@ fn load_continuity(window: &LoadWindow<'_>, found: &[Found]) -> Continuity {
 fn load_payload_admitted(apps: &TickApps<'_>) -> bool {
     match apps {
         TickApps::Missing(Missing::Budget) => false,
-        TickApps::Loaded(apps) => {
+        TickApps::Loaded(apps) | TickApps::Awaiting(apps) => {
             if matches!(&apps.missing, Some(Missing::Budget)) {
                 return false;
             }

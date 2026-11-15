@@ -71,7 +71,7 @@ fn a_store_lets_go_of_older_seconds_and_of_each_stretch_that_adds_up_an_expired_
     // Method: take in more seconds than the live span holds, one a second on both clocks, place
     // the cutoff inside a stretch, and read the View.
     let fixture = Fixture::new();
-    let mut held = Held::new(
+    let mut held = Held::keeping_packing_end(
         fixture.root.clone(),
         Arc::new(ByteBudget::new(256 * 1024 * 1024)),
     );
@@ -90,7 +90,7 @@ fn a_complete_store_lets_go_of_the_sample_beside_each_older_second() {
     // Method: as for a store that holds no samples, with a store that does.
     let fixture = Fixture::new();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::new(fixture.root.clone(), budget);
+    let mut held = Held::keeping_packing_end(fixture.root.clone(), budget);
 
     let view = past_the_live_span_view(&fixture, &mut held);
 
@@ -105,7 +105,7 @@ fn a_second_with_no_clock_stops_nothing_expiring_behind_it() {
     // Method: take in a hundred seconds, the tenth with no clock, place the cutoff at the
     // forty-fifth, and read the View.
     let fixture = Fixture::new();
-    let mut held = Held::new(
+    let mut held = Held::keeping_packing_end(
         fixture.root.clone(),
         Arc::new(ByteBudget::new(256 * 1024 * 1024)),
     );
@@ -138,7 +138,7 @@ fn a_store_reads_the_retention_records_once_while_none_changes() {
     // records stay as they are, and count the reads of the records.
     let fixture = Fixture::new();
     expire_boot_before(&fixture.root, RUN.boot, 0);
-    let mut held = Held::new(
+    let mut held = Held::keeping_packing_end(
         fixture.root.clone(),
         Arc::new(ByteBudget::new(256 * 1024 * 1024)),
     );

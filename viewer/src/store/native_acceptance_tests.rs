@@ -79,7 +79,8 @@ fn recent_publication(held: &Held, index: usize) -> u64 {
 #[test]
 fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
     // Goal: a retired private pool owner cannot obstruct admitted input after its reader leaves.
-    // Method: evict real native A with B and keep its reader across a denied sealed-input capture.
+    // Method: evict real native A with B and keep its reader across a denied sealed-input
+    // capture, then let the reader go, take the next tick and run the packing loop's body.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -119,6 +120,8 @@ fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
     assert_eq!(reader.processes.as_ref().unwrap().len(), 2);
     drop(reader);
     read_native(&mut held, &mut ring, &operation).unwrap();
+    // The packing thread frees what the retired buffer held, which gives its bytes back.
+    held.apps.answer_handed();
     let input = capture_ticks(&fixture, &budget).unwrap();
 
     assert_eq!(held.newest.unwrap().publication, 2);

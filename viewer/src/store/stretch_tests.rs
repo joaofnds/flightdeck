@@ -448,7 +448,7 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
     let mut fixture = recording_of(&minutes);
     seal_minutes(&mut fixture, 9 * 60 + 5, &[(59, 0..5)]);
     let whole = loaded(&fixture);
-    let mut held = Held::without_recording();
+    let mut held = Held::with_packing_thread(Arc::new(super::ByteBudget::new(super::BYTES_MAX)));
     launch(&fixture, &mut held);
     // The launch closed ten stretches and opened an eleventh, which wall second 10,000 closes.
     let closed = u64::try_from(STRETCHES_MAX).unwrap() - 11;
@@ -944,7 +944,7 @@ fn assert_owed_apps_add_up(fixture: &Fixture) {
     for expected in &whole.stretches {
         assert!(expected.holds_apps());
     }
-    let mut held = Held::without_recording();
+    let mut held = Held::with_packing_thread(Arc::new(super::ByteBudget::new(super::BYTES_MAX)));
     launch(fixture, &mut held);
     let owed = held.owed.take().unwrap();
 

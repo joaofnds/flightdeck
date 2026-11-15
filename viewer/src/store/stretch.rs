@@ -139,6 +139,11 @@ impl Stretches {
         self.closed.release(AppsStretch::clear);
     }
 
+    /// Clears each buffer no View holds once, as `release` does, until it is written again.
+    pub(super) fn release_once(&mut self) {
+        self.closed.release_once(AppsStretch::clear);
+    }
+
     pub(super) fn clear(&mut self) {
         self.closed.clear();
         self.release();

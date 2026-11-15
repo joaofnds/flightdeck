@@ -268,7 +268,9 @@ fn full_staged_retention_reuses_sample_spares_and_keeps_a_fixed_primary_immutabl
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
-    let mut stage = GuardStage::new(&fixture, &budget);
+    // The launch waits for the packing thread, which packs on a thread of its own.
+    let held = Held::with_packing_thread(Arc::clone(&budget));
+    let mut stage = GuardStage::over(held, &fixture, &budget);
     primary(&mut stage, &fixture, &budget);
     let primary = query_context(&mut stage.held, &mut stage.ring);
     let headers = primary_headers(&primary);

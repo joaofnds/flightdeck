@@ -9,7 +9,6 @@ use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::cohort;
 use crate::live_app_response::{KeyKind, Selected};
-use crate::store::ProcessAt;
 
 impl QueryContext {
     /// The shared CPU-mean process cohort, reduced directly from retained selected-App members.
@@ -100,7 +99,7 @@ fn response_groups_visit(
         cohort::visit_borrowed(
             &capture,
             app.row().members,
-            processes.map(ProcessAt::presentation),
+            processes.map(|process| process.presentation()),
             reduction,
             phase,
             operation,

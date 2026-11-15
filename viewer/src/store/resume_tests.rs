@@ -719,7 +719,7 @@ fn run_changed_during_load() -> (Fixture, super::Held, super::Ring, super::Share
     fixture.seal_minute(1);
     super::tests::empty_ticks_file(&fixture, 0);
     let budget = std::sync::Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::new(fixture.root.clone(), budget.clone());
+    let mut held = super::Held::keeping_packing_end(fixture.root.clone(), budget.clone());
     let ring = super::make_ring(&fixture.root, &budget);
     held.left_out = Some(super::Failure::ChangedIdentity);
 

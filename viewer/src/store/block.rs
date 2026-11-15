@@ -1,6 +1,7 @@
 //! The App seconds of the live span as a row of blocks of seconds, which readers reach only
 //! through a second's header, one App or process of a second, and a whole second's Apps.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -11,10 +12,17 @@ use super::attribution::{Attribution, Completeness, Resident, Totals};
 use super::native::Origin;
 use collector::ring::ProcessCreation;
 
+use super::apps::AppRows;
 use super::buffers::Buffers;
-use super::{AppDetails, AppRow, AppsSecond, Missing, Payload, ProcessRow};
+use super::packing::{
+    Answer, BATCH_BUFFERS_MAX, BATCHES_OUT_MAX, BLOCKS_OUT_MAX, Batch, Before, Handed, QUEUE_MAX,
+    StoreEnd,
+};
+use super::payload::packed::{KeptPlain, ProcessTable, pack_seconds};
+use super::{AppDetails, AppRow, AppsSecond, Missing, Payload, ProcessAt};
 use crate::app_attribution_history::AppAttributionMetric;
-use crate::live_app_response::json::{AppView, Header, ProcessView};
+use crate::byte_budget::{ByteBudget, ByteReservation};
+use crate::live_app_response::json::{AppView, Header};
 use crate::live_app_response::{Detail, KeyKind, Observation, Page, RankedApp, Ranks};
 
 #[cfg(test)]
@@ -28,6 +36,10 @@ pub(super) const BLOCK_SECONDS_MAX: usize = 64;
 /// second of the span until its last second leaves, so each holds a buffer past the span's.
 pub const BLOCK_DEPARTED_MAX: usize = BLOCK_SECONDS_MAX - 1;
 
+/// The packed blocks that left the row the store keeps at most until nothing else holds them,
+/// more than the store's four Views can hold between them, four spans' blocks.
+pub(super) const DEPARTED_KEPT_MAX: usize = 256;
+
 /// The wall seconds whose seconds one block holds, three of the stretches the store closes.
 const BLOCK_WALL_NS: u64 = 30 * 1_000_000_000;
 
@@ -36,43 +48,75 @@ const _: () = {
     // Two ticks can fall in one wall second, so a block of thirty wall seconds can hold more
     // than thirty seconds.
     assert!(BLOCK_SECONDS_MAX > 30);
+    // A block marks the seconds that wait for their Apps with one bit each.
+    // Compared as powers of two, since a constant changes integer type only through `as`.
+    assert!(1_u128 << BLOCK_SECONDS_MAX <= 1_u128 << u64::BITS);
 };
 
 /// Seconds of the live span that follow one another within thirty wall seconds, oldest
 /// first. A block never changes once made, so a View that holds it reads its seconds as they
-/// were. This is the plain kind, which holds each second as the store took it.
-#[derive(Debug, PartialEq)]
+/// were. A plain block holds each second as the store took it, and a packed block holds each
+/// second's header and Apps with the processes of all its seconds in one table.
+#[derive(Debug)]
 pub struct Block {
     /// The index of the thirty wall seconds the block's seconds fall in, counted from the
     /// epoch.
     half_minute_index: u64,
     seconds: Vec<Arc<AppsSecond>>,
+    form: Form,
+    /// The seconds whose Apps a launch has still to install, bit `index` for the second at
+    /// `index`. A block holding one is never packed, so an install always replaces a plain
+    /// second and reads the plain second before it.
+    awaiting: u64,
+    /// The charge of a packed block's own allocation in its `Arc` and of its list of seconds,
+    /// `None` for a plain block, which no budget charges. It is held only to be dropped with
+    /// the block, as `BufferOwner` holds its reservations in the persistence crate.
+    _reservation: Option<ByteReservation>,
+}
+
+/// How a block holds its seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    /// Each second as the store took it. The open block, a closed block waiting to be packed,
+    /// and a block a launch still installs into are plain.
+    Plain,
+    /// Each second's header and Apps, with the processes of every second in one table.
+    Packed,
+    /// Plain for good, for a cause the data or the machine brought about, and never tried again.
+    KeptPlain(KeptPlain),
 }
 
 impl Block {
-    /// A block holding `second` alone, which the store took at wall time `wall_ns`.
+    /// A plain block holding `second` alone, which the store took at wall time `wall_ns`, and
+    /// which waits for its Apps where `awaiting` is true.
     #[must_use]
-    fn starting(wall_ns: u64, second: Arc<AppsSecond>) -> Self {
+    fn starting(wall_ns: u64, second: Arc<AppsSecond>, awaiting: bool) -> Self {
         let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
         seconds.push(second);
 
         Self {
             half_minute_index: half_minute_index(wall_ns),
             seconds,
+            form: Form::Plain,
+            awaiting: u64::from(awaiting),
+            _reservation: None,
         }
     }
 
     /// A new block holding this block's seconds and `second` after them, which the store took
-    /// at wall time `wall_ns`, or `None` where this block is closed to it: it holds
-    /// `BLOCK_SECONDS_MAX` seconds, or `second` falls in other thirty wall seconds.
+    /// at wall time `wall_ns` and which waits for its Apps where `awaiting` is true, or `None`
+    /// where this block is closed to it: it holds `BLOCK_SECONDS_MAX` seconds, or `second`
+    /// falls in other thirty wall seconds.
     #[must_use]
-    fn joining(&self, wall_ns: u64, second: Arc<AppsSecond>) -> Option<Self> {
+    fn joining(&self, wall_ns: u64, second: Arc<AppsSecond>, awaiting: bool) -> Option<Self> {
         if self.seconds.len() == BLOCK_SECONDS_MAX {
             return None;
         }
         if half_minute_index(wall_ns) != self.half_minute_index {
             return None;
         }
+        // Only a closed block is packed, and a block open to a second is the newest.
+        assert_eq!(self.form, Form::Plain);
 
         let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
         seconds.extend(self.seconds.iter().map(Arc::clone));
@@ -80,14 +124,21 @@ impl Block {
 
         Some(Self {
             half_minute_index: self.half_minute_index,
+            awaiting: self.awaiting | (u64::from(awaiting) << self.seconds.len()),
             seconds,
+            form: Form::Plain,
+            _reservation: None,
         })
     }
 
-    /// A new block holding this block's seconds with `second` in place of the one at `index`.
+    /// A new plain block holding this block's seconds with `second` in place of the one at
+    /// `index`, which no longer waits for its Apps.
     #[must_use]
     fn replacing(&self, index: usize, second: Arc<AppsSecond>) -> Self {
         assert!(index < self.seconds.len());
+        // A block holding a second that waits for its Apps, or followed by one, never waits to
+        // be packed, so the launch installs only into plain blocks.
+        assert_eq!(self.form, Form::Plain);
 
         let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
         seconds.extend(self.seconds.iter().map(Arc::clone));
@@ -96,7 +147,83 @@ impl Block {
         Self {
             half_minute_index: self.half_minute_index,
             seconds,
+            form: Form::Plain,
+            awaiting: self.awaiting & !(1 << index),
+            _reservation: None,
         }
+    }
+
+    /// This block's seconds, none of them waiting for its Apps any more.
+    #[must_use]
+    fn awaiting_none(&self) -> Self {
+        assert_eq!(self.form, Form::Plain);
+
+        let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
+        seconds.extend(self.seconds.iter().map(Arc::clone));
+
+        Self {
+            half_minute_index: self.half_minute_index,
+            seconds,
+            form: Form::Plain,
+            awaiting: 0,
+            _reservation: None,
+        }
+    }
+
+    /// This block packed, sharing each process's first row with `before`, the process table of
+    /// the block before, where the two read the same, and charged to `budget`. Or this block
+    /// kept plain for good, with why.
+    #[must_use]
+    pub(super) fn packing(&self, before: Option<&ProcessTable>, budget: &Arc<ByteBudget>) -> Self {
+        assert_eq!(self.form, Form::Plain);
+        assert_eq!(self.awaiting, 0);
+
+        let packed = budget
+            .reserve(packing_bytes())
+            .ok_or(KeptPlain::Budget)
+            .and_then(|reservation| {
+                let seconds = pack_seconds(&self.seconds, before, budget)?;
+                Ok((seconds, reservation))
+            });
+        let (seconds, form, reservation) = match packed {
+            Ok((seconds, reservation)) => (seconds, Form::Packed, Some(reservation)),
+            Err(cause) => {
+                let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
+                seconds.extend(self.seconds.iter().map(Arc::clone));
+                (seconds, Form::KeptPlain(cause), None)
+            }
+        };
+        assert_eq!(seconds.len(), self.seconds.len());
+
+        Self {
+            half_minute_index: self.half_minute_index,
+            seconds,
+            form,
+            awaiting: 0,
+            _reservation: reservation,
+        }
+    }
+
+    /// The process table of a packed block, which a second holding processes carries, or
+    /// `None` for a plain block or one with no processes at any second.
+    #[must_use]
+    pub(super) fn table(&self) -> Option<&ProcessTable> {
+        if self.form != Form::Packed {
+            return None;
+        }
+
+        self.seconds.iter().find_map(|second| {
+            let payload = second.processes.as_ref().ok()?;
+            payload.table().map(AsRef::as_ref)
+        })
+    }
+
+    /// Whether the second at `index` waits for its Apps.
+    #[must_use]
+    fn awaits(&self, index: usize) -> bool {
+        assert!(index < self.seconds.len());
+
+        self.awaiting & (1 << index) != 0
     }
 
     /// How many seconds the block holds.
@@ -116,28 +243,77 @@ impl Block {
     }
 }
 
+/// The bytes of a packed block's own allocation in the `Arc` the packing thread puts it in, and
+/// of its list of seconds.
+fn packing_bytes() -> usize {
+    2 * size_of::<usize>() + size_of::<Block>() + BLOCK_SECONDS_MAX * size_of::<Arc<AppsSecond>>()
+}
+
 /// The index of the thirty wall seconds `wall_ns` falls in. The division floors, so every
 /// second of those thirty has one index.
 fn half_minute_index(wall_ns: u64) -> u64 {
     wall_ns / BLOCK_WALL_NS
 }
 
+/// The buffer the exchange leaves in place of `apps` once it moves out what `apps` holds: the
+/// room of its App rows where it holds room no launch reserved, and an empty buffer otherwise,
+/// as clearing the buffer in place would leave it.
+fn exchange_released(apps: &AppsSecond) -> AppsSecond {
+    if apps.apps.reserved_bytes() == 0 {
+        if apps.apps.capacity() > 0 {
+            return AppsSecond {
+                consecutive: apps.consecutive,
+                apps: AppRows::with_capacity(apps.apps.capacity()),
+                ..AppsSecond::default()
+            };
+        }
+    }
+
+    AppsSecond::default()
+}
+
+/// How the exchange names `before`, the block that stands before one it hands over: packed,
+/// plain, or kept plain, which shares no row.
+fn exchange_before(before: &Arc<Block>) -> Before {
+    match before.form {
+        Form::Packed => Before::Packed(Arc::clone(before)),
+        Form::Plain => Before::Plain(Arc::downgrade(before)),
+        Form::KeptPlain(_) => Before::Unshared,
+    }
+}
+
 /// The seconds of the live span as the store holds them, oldest first, at most `capacity` of
 /// them, each written into a buffer of its own and held in a row of blocks. The oldest block
 /// may hold seconds that have left the span, which no reader reaches, until its last second
-/// leaves.
+/// leaves. A closed block waits to be packed, which the packing thread does.
 pub(super) struct BlockSpan {
     buffers: Buffers<AppsSecond>,
     span: AppsSpan,
     capacity: usize,
+    /// The store's end of the queues to the packing thread.
+    packing: StoreEnd,
+    /// Each block handed over and not yet answered, oldest first, which the store keeps so an
+    /// answer takes the place of the very block it was handed and of no other.
+    out: Vec<Arc<Block>>,
+    /// The batches of what to free handed over and not yet answered.
+    batches_out: usize,
+    /// The packed blocks that left the row, oldest first, which the store keeps until nothing
+    /// else holds them and then hands over to be freed.
+    departed: VecDeque<Arc<Block>>,
+    /// How many packed blocks that left the row the store let go of past `DEPARTED_KEPT_MAX`,
+    /// each then freed by its last holder.
+    departed_let_go_count: u64,
+    /// The packing thread's end, which a test keeps to run the packing loop's body itself.
+    #[cfg(test)]
+    packing_end: Option<super::packing::PackingEnd>,
 }
 
 impl BlockSpan {
     /// A span of at most `capacity` seconds over `buffers`, which holds more buffers than
     /// seconds and the seconds that have left them, so a View the main thread holds for a moment
-    /// costs the store no new buffer.
+    /// costs the store no new buffer, handing its blocks to be packed through `packing`.
     #[must_use]
-    pub(super) fn new(capacity: usize, buffers: Buffers<AppsSecond>) -> Self {
+    pub(super) fn new(capacity: usize, buffers: Buffers<AppsSecond>, packing: StoreEnd) -> Self {
         assert!(capacity > 0);
         assert!(buffers.count() > capacity + BLOCK_DEPARTED_MAX);
 
@@ -145,13 +321,146 @@ impl BlockSpan {
             buffers,
             span: AppsSpan::with_capacity(capacity),
             capacity,
+            packing,
+            out: Vec::with_capacity(BLOCKS_OUT_MAX),
+            batches_out: 0,
+            departed: VecDeque::with_capacity(DEPARTED_KEPT_MAX),
+            departed_let_go_count: 0,
+            #[cfg(test)]
+            packing_end: None,
         }
     }
 
+    /// Takes each answer the packing thread has given and puts it in its plain block's place,
+    /// then hands over the oldest ready blocks while fewer than `BLOCKS_OUT_MAX` are out, and
+    /// what is to be freed. Waits for nothing.
+    pub(super) fn exchange(&mut self) {
+        for _ in 0..QUEUE_MAX {
+            let Some(answer) = self.packing.answer() else {
+                break;
+            };
+            self.exchange_answer(answer);
+        }
+        self.exchange_blocks();
+        self.exchange_freed();
+    }
+
+    /// Acts on `answer`, which came back for a block or a batch that is out.
+    fn exchange_answer(&mut self, answer: Answer) {
+        match answer {
+            Answer::Block { plain, replacement } => {
+                let place = self.out.iter().position(|out| Arc::ptr_eq(out, &plain));
+                let Some(place) = place else {
+                    unreachable!("an answer comes for a block that is out");
+                };
+                drop(self.out.remove(place));
+                // Packed or kept plain for a cause, the replacement takes the plain block's
+                // place, so a block kept plain waits no more and is never handed over again.
+                assert!(matches!(
+                    replacement.form,
+                    Form::Packed | Form::KeptPlain(_)
+                ));
+                // A block that has left the row since, or that a block of its seconds replaced,
+                // takes no replacement, which goes as a block that left the row goes.
+                let blocks = &mut self.span.blocks;
+                let index = blocks.iter().position(|block| Arc::ptr_eq(block, &plain));
+                if let Some(index) = index {
+                    blocks[index] = replacement;
+                } else {
+                    self.keep_departed(replacement);
+                }
+            }
+            Answer::Freed => {
+                assert!(self.batches_out > 0);
+                self.batches_out -= 1;
+            }
+        }
+    }
+
+    /// Hands over the oldest ready blocks not yet out while fewer than `BLOCKS_OUT_MAX` are,
+    /// each with the block that stands before it.
+    fn exchange_blocks(&mut self) {
+        for block_index in 0..self.span.blocks.len() {
+            if self.out.len() == BLOCKS_OUT_MAX {
+                break;
+            }
+            if !self.span.waits(block_index) {
+                continue;
+            }
+            let block = &self.span.blocks[block_index];
+            if self.out.iter().any(|out| Arc::ptr_eq(out, block)) {
+                continue;
+            }
+            let before = match block_index.checked_sub(1) {
+                Some(before_index) => exchange_before(&self.span.blocks[before_index]),
+                None => Before::Unshared,
+            };
+            self.out.push(Arc::clone(block));
+            self.packing.hand(Handed::Block {
+                block: Arc::clone(block),
+                before,
+            });
+        }
+    }
+
+    /// Hands over what is to be freed while fewer than `BATCHES_OUT_MAX` batches are out: the
+    /// readings of free buffers, then packed blocks that left the row and nothing else holds.
+    fn exchange_freed(&mut self) {
+        // A buffer the plain seconds leave free keeps no rows while it waits to be written, and
+        // the packing thread frees what it held.
+        for _ in self.batches_out..BATCHES_OUT_MAX {
+            let batch = self
+                .buffers
+                .release_once_batch(BATCH_BUFFERS_MAX, exchange_released);
+            if batch.is_empty() {
+                break;
+            }
+            self.batches_out += 1;
+            self.packing.hand(Handed::Batch(Batch::Seconds(batch)));
+        }
+        // A packed block that left the row goes once nothing else holds it, the oldest first.
+        for _ in self.batches_out..BATCHES_OUT_MAX {
+            let Some(index) = self
+                .departed
+                .iter()
+                .position(|block| Arc::strong_count(block) == 1)
+            else {
+                break;
+            };
+            let Some(block) = self.departed.remove(index) else {
+                unreachable!("the position is of a block the store keeps");
+            };
+            self.batches_out += 1;
+            self.packing.hand(Handed::Batch(Batch::Departed(block)));
+        }
+    }
+
+    /// Keeps `block`, which left the row, until nothing else holds it, where it is packed, so
+    /// the store's thread frees no block's rows. Past `DEPARTED_KEPT_MAX` it lets go of the
+    /// oldest it keeps, which its last holder then frees, and counts it. A plain block's
+    /// seconds are the store's buffers, which go as any free buffer goes.
+    fn keep_departed(&mut self, block: Arc<Block>) {
+        if block.form != Form::Packed {
+            return;
+        }
+        if self.departed.len() == DEPARTED_KEPT_MAX {
+            drop(self.departed.pop_front());
+            self.departed_let_go_count += 1;
+        }
+
+        self.departed.push_back(block);
+    }
+
     /// Adds the second `fill` writes after the newest, which the store took at wall time
-    /// `wall_ns`, letting go of the oldest when the span is full. A View holding the blocks
-    /// before keeps them, and stops nothing.
-    pub(super) fn push(&mut self, wall_ns: u64, fill: impl FnOnce(&mut AppsSecond)) {
+    /// `wall_ns` and which waits for a launch to install its Apps where `awaiting` is true,
+    /// letting go of the oldest when the span is full. A View holding the blocks before keeps
+    /// them, and stops nothing.
+    pub(super) fn push(
+        &mut self,
+        wall_ns: u64,
+        awaiting: bool,
+        fill: impl FnOnce(&mut AppsSecond),
+    ) {
         if self.span.len == self.capacity {
             self.remove_oldest();
         }
@@ -162,7 +471,45 @@ impl BlockSpan {
         assert!(self.span.blocks.len() < self.span.block_capacity());
 
         let second = self.buffers.write_replacing(fill);
-        self.span.push_second(wall_ns, second);
+        self.span.push_second(wall_ns, second, awaiting);
+        self.exchange();
+    }
+
+    /// Before a launch installs a minute, waits for answers while more than `BLOCKS_OUT_MAX`
+    /// ready blocks are plain, which keeps the launch's plain rows inside their bound. It waits
+    /// only while a block is out, so an answer is always coming.
+    pub(super) fn launch_wait(&mut self) {
+        // Each turn takes one answer, for a block or a batch, and each is handed once.
+        let bound = self.span.blocks.capacity() + self.buffers.count() + DEPARTED_KEPT_MAX + 1;
+        for _ in 0..bound {
+            self.exchange();
+            if self.ready_plain_count() <= BLOCKS_OUT_MAX {
+                return;
+            }
+            // The exchange hands over ready blocks until `BLOCKS_OUT_MAX` are out.
+            assert_eq!(self.out.len(), BLOCKS_OUT_MAX);
+            let answer = self.packing.answer_waiting();
+            self.exchange_answer(answer);
+        }
+        unreachable!("each answer packs a ready block or frees a batch handed once");
+    }
+
+    /// How many closed blocks are ready and still plain, handed over or not.
+    pub(super) fn ready_plain_count(&self) -> usize {
+        (0..self.span.blocks.len())
+            .filter(|&block_index| self.span.waits(block_index))
+            .count()
+    }
+
+    /// Lets every second go on as any other, once a launch installs no more Apps, so its
+    /// blocks wait to be packed.
+    pub(super) fn end_awaiting(&mut self) {
+        for block in &mut self.span.blocks {
+            if block.awaiting != 0 {
+                *block = Arc::new(block.awaiting_none());
+            }
+        }
+        self.exchange();
     }
 
     /// Lets go of the oldest second, which a View may go on holding. The oldest block counts
@@ -180,8 +527,9 @@ impl BlockSpan {
         if span.departed_count == oldest.len() {
             // The row holds a block for each thirty wall seconds of the span, so moving it
             // down one place costs a few dozen pointers once a block.
-            drop(span.blocks.remove(0));
+            let departed = span.blocks.remove(0);
             span.departed_count = 0;
+            self.keep_departed(departed);
         }
     }
 
@@ -195,6 +543,7 @@ impl BlockSpan {
         let second = self.buffers.write_replacing(fill);
 
         self.span.replace_second(index, second);
+        self.exchange();
     }
 
     /// Writes into `view` the blocks the span holds, each shared with the View, and how many
@@ -204,6 +553,7 @@ impl BlockSpan {
         view.blocks.extend(self.span.blocks.iter().map(Arc::clone));
         view.departed_count = self.span.departed_count;
         view.len = self.span.len;
+        view.departed_let_go_count = self.departed_let_go_count;
     }
 
     /// The seconds of the span, as a View holds them.
@@ -219,10 +569,20 @@ impl BlockSpan {
     }
 
     /// The second at `index` of the span as the store took it, which a launch reads the rates
-    /// of the next second from. Only the store's writers read a second this way.
+    /// and the rows of the next second from. Only the store's writers read a second this way.
     #[must_use]
     pub(super) fn stored(&self, index: usize) -> Option<&AppsSecond> {
-        (index < self.span.len).then(|| self.span.stored_at(index).as_ref())
+        if index >= self.span.len {
+            return None;
+        }
+        let (block_index, second_index) = self.span.place(index);
+        let block = &self.span.blocks[block_index];
+        // The launch installs a second only into a block that cannot wait to be packed, the one
+        // before it included, since a block is kept plain while the second after its last waits
+        // for its Apps.
+        assert!(matches!(block.form, Form::Plain | Form::KeptPlain(_)));
+
+        Some(&block.seconds[second_index])
     }
 
     /// The newest second's buffer, which the store reads the next second's rates from. The
@@ -234,9 +594,16 @@ impl BlockSpan {
         newest.seconds.last()
     }
 
-    /// Lets go of every second, keeping the buffers.
+    /// Lets go of every second, keeping the buffers, and keeps each packed block until nothing
+    /// else holds it.
     pub(super) fn clear(&mut self) {
+        let mut blocks = std::mem::take(&mut self.span.blocks);
+        for block in blocks.drain(..) {
+            self.keep_departed(block);
+        }
         self.span.clear();
+        // The row's room goes back, so clearing allocates nothing.
+        self.span.blocks = blocks;
     }
 
     /// Clears with `clear` each buffer that nothing else holds.
@@ -254,6 +621,9 @@ pub struct AppsSpan {
     departed_count: usize,
     /// How many seconds the span holds, those that have left not counted.
     len: usize,
+    /// How many packed blocks that left the row the store let go of past the blocks it keeps
+    /// until nothing else holds them, each freed by its last holder.
+    departed_let_go_count: u64,
 }
 
 /// The seconds of a View's span, oldest first, read from either end.
@@ -283,6 +653,7 @@ impl AppsSpan {
             blocks: Vec::with_capacity(seconds + 1),
             departed_count: 0,
             len: 0,
+            departed_let_go_count: 0,
         }
     }
 
@@ -290,6 +661,13 @@ impl AppsSpan {
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// How many packed blocks that left the row the store let go of past the blocks it keeps
+    /// until nothing else holds them, each freed by whatever held it last.
+    #[must_use]
+    pub fn departed_let_go_count(&self) -> u64 {
+        self.departed_let_go_count
     }
 
     #[must_use]
@@ -384,25 +762,71 @@ impl AppsSpan {
         unreachable!("the blocks hold the span's seconds")
     }
 
-    /// The second at `index` of the span, the oldest at 0, as the store took it.
+    /// How many blocks of the span are kept plain for `cause`, which a View counts so a reader
+    /// can tell a span that packs from one that does not.
+    #[must_use]
+    pub fn kept_plain_count(&self, cause: KeptPlain) -> usize {
+        self.blocks
+            .iter()
+            .filter(|block| block.form == Form::KeptPlain(cause))
+            .count()
+    }
+
+    /// How many blocks the span holds, the oldest counted while a second of it is in the span.
+    #[must_use]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// How many blocks of the span are packed.
+    #[must_use]
+    pub fn packed_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|block| block.form == Form::Packed)
+            .count()
+    }
+
+    /// Whether the block at `block_index` waits to be packed: it is closed and plain, and
+    /// neither one of its seconds nor the second after its last waits for its Apps, so a launch
+    /// never installs into a packed block nor reads the second before an install from one.
+    fn waits(&self, block_index: usize) -> bool {
+        let block = &self.blocks[block_index];
+        let Some(next) = self.blocks.get(block_index + 1) else {
+            return false;
+        };
+        if block.form != Form::Plain {
+            return false;
+        }
+        if block.awaiting != 0 {
+            return false;
+        }
+
+        !next.awaits(0)
+    }
+
+    /// The second at `index` of the span, the oldest at 0, as the span holds it.
+    #[cfg(any(test, feature = "fixtures"))]
     fn stored_at(&self, index: usize) -> &Arc<AppsSecond> {
         let (block_index, second_index) = self.place(index);
 
         &self.blocks[block_index].seconds[second_index]
     }
 
-    /// Adds `second`, which the store took at wall time `wall_ns`, after the newest: in a new
-    /// block in place of the newest where that block is open to it, and in a block of its own
-    /// where not.
-    fn push_second(&mut self, wall_ns: u64, second: Arc<AppsSecond>) {
+    /// Adds `second`, which the store took at wall time `wall_ns` and which waits for its Apps
+    /// where `awaiting` is true, after the newest: in a new block in place of the newest where
+    /// that block is open to it, and in a block of its own where not.
+    fn push_second(&mut self, wall_ns: u64, second: Arc<AppsSecond>, awaiting: bool) {
         let joined = self
             .blocks
             .last()
-            .and_then(|newest| newest.joining(wall_ns, Arc::clone(&second)));
+            .and_then(|newest| newest.joining(wall_ns, Arc::clone(&second), awaiting));
         match (joined, self.blocks.last_mut()) {
             (Some(joined), Some(newest)) => *newest = Arc::new(joined),
             (Some(_), None) => unreachable!("only a block of the row joins a second"),
-            (None, _) => self.blocks.push(Arc::new(Block::starting(wall_ns, second))),
+            (None, _) => self
+                .blocks
+                .push(Arc::new(Block::starting(wall_ns, second, awaiting))),
         }
         self.len += 1;
     }
@@ -606,7 +1030,13 @@ impl<'block> Second<'block> {
     pub(crate) fn presentation(self) -> Result<(Header, Processes<'block>)> {
         let (header, payload) = self.second.presentation()?;
 
-        Ok((header, Processes { payload }))
+        Ok((
+            header,
+            Processes {
+                payload,
+                apps: self.second.apps.as_slice(),
+            },
+        ))
     }
 
     /// The App `name` names at this second, where the second holds it.
@@ -634,7 +1064,10 @@ impl<'block> Second<'block> {
     /// The second's processes, or why the second holds none.
     pub fn processes(self) -> std::result::Result<Processes<'block>, &'block Missing> {
         match &self.second.processes {
-            Ok(payload) => Ok(Processes { payload }),
+            Ok(payload) => Ok(Processes {
+                payload,
+                apps: self.second.apps.as_slice(),
+            }),
             Err(missing) => Err(missing),
         }
     }
@@ -695,6 +1128,8 @@ impl<'block> AppAt<'block> {
 #[derive(Clone, Copy, Debug)]
 pub struct Processes<'block> {
     payload: &'block Payload,
+    /// The second's Apps, which name the App a reader asks for the members of.
+    apps: &'block [AppRow],
 }
 
 impl<'block> Processes<'block> {
@@ -709,21 +1144,10 @@ impl<'block> Processes<'block> {
         self.payload.is_empty()
     }
 
-    /// The process at `place` of the second's processes, in the sample's order.
-    #[must_use]
-    pub fn at(self, place: usize) -> ProcessAt<'block> {
-        assert!(place < self.payload.len());
-
-        ProcessAt {
-            row: &self.payload[place],
-            app_index: self.payload.app_index(place),
-        }
-    }
-
     /// Every process of the second, in the sample's order.
     #[must_use]
     pub fn iter(self) -> impl ExactSizeIterator<Item = ProcessAt<'block>> {
-        (0..self.payload.len()).map(move |place| self.at(place))
+        self.payload.processes()
     }
 
     /// The processes of the App at `app_index` of the second's Apps, or of no App where
@@ -732,16 +1156,13 @@ impl<'block> Processes<'block> {
         self,
         app_index: Option<u32>,
     ) -> impl Iterator<Item = ProcessAt<'block>> + Clone {
-        self.payload
-            .members(app_index)
-            .map(move |row| ProcessAt { row, app_index })
+        self.payload.members(app_index, self.apps)
     }
 
     /// The process of pid `pid` created at `creation`, where the second holds it.
     #[must_use]
     pub fn find(self, pid: i32, creation: Option<ProcessCreation>) -> Option<ProcessAt<'block>> {
-        self.iter()
-            .find(|process| process.row.pid == pid && process.row.creation == creation)
+        self.payload.find(pid, creation)
     }
 
     /// The additional measures of the App at `app_index` of the second's Apps.
@@ -760,35 +1181,6 @@ impl<'block> Processes<'block> {
     #[must_use]
     pub fn app_details_count(self) -> usize {
         self.payload.apps().len()
-    }
-}
-
-/// One process at one second: its row, and the App index the second gives it, so a reader
-/// never pairs a row with another row's index.
-#[derive(Clone, Copy, Debug)]
-pub struct ProcessAt<'block> {
-    row: &'block ProcessRow,
-    app_index: Option<u32>,
-}
-
-impl<'block> ProcessAt<'block> {
-    /// The process's readings at the second.
-    #[must_use]
-    pub fn row(self) -> &'block ProcessRow {
-        self.row
-    }
-
-    /// The App index the second gives the process: its App's place among the second's Apps, or
-    /// `None` where the process belongs to no App.
-    #[must_use]
-    pub fn app_index(self) -> Option<u32> {
-        self.app_index
-    }
-
-    /// The process as a page shows it, in its own App.
-    #[must_use]
-    pub(crate) fn presentation(self) -> ProcessView<'block> {
-        self.row.presentation(self.app_index)
     }
 }
 
@@ -831,7 +1223,7 @@ impl FromIterator<Arc<AppsSecond>> for AppsSpan {
                 .observation
                 .and_then(|observation| observation.wall_ns)
                 .unwrap_or(0);
-            span.push_second(wall_ns, second);
+            span.push_second(wall_ns, second, false);
         }
 
         span
@@ -861,6 +1253,7 @@ impl AppsSpan {
             blocks: self.blocks[block_index..].to_vec(),
             departed_count: second_index,
             len: self.len - count,
+            departed_let_go_count: self.departed_let_go_count,
         }
     }
 
@@ -901,7 +1294,123 @@ impl BlockSpan {
     pub(super) fn with_fewest_buffers(capacity: usize) -> Self {
         let buffers = Buffers::new(capacity + BLOCK_DEPARTED_MAX + 1, AppsSecond::default);
 
-        Self::new(capacity, buffers)
+        Self::keeping_packing_end(
+            capacity,
+            buffers,
+            Arc::new(ByteBudget::new(256 * 1024 * 1024)),
+        )
+    }
+
+    /// A span as `new` makes it, which keeps the packing thread's end for the test to run.
+    pub(super) fn keeping_packing_end(
+        capacity: usize,
+        buffers: Buffers<AppsSecond>,
+        budget: Arc<ByteBudget>,
+    ) -> Self {
+        let (store_end, packing_end) = super::packing::pair(budget);
+        let mut span = Self::new(capacity, buffers, store_end);
+        span.keep_packing_end(packing_end);
+
+        span
+    }
+
+    /// A span as `new` makes it, whose blocks the packing thread packs on a thread of its own,
+    /// which wakes the test's thread with each answer and ends once the span is gone.
+    pub(super) fn with_packing_thread(
+        capacity: usize,
+        buffers: Buffers<AppsSecond>,
+        budget: Arc<ByteBudget>,
+    ) -> Self {
+        let (store_end, packing_end) = super::packing::pair(budget);
+        // The thread ends once the store's end is gone, so the test lets go of its handle.
+        drop(packing_end.start(std::thread::current()).unwrap());
+
+        Self::new(capacity, buffers, store_end)
+    }
+
+    /// Keeps `packing_end`, the other end of this span's queues, for the test to run.
+    pub(super) fn keep_packing_end(&mut self, packing_end: super::packing::PackingEnd) {
+        assert!(self.packing_end.is_none());
+        self.packing_end = Some(packing_end);
+    }
+
+    /// Runs the packing loop's body on every message handed over, as the packing thread would,
+    /// and says how many of them were blocks.
+    pub(super) fn answer_handed(&mut self) -> usize {
+        let Some(packing_end) = &mut self.packing_end else {
+            unreachable!("the test runs a packing thread of its own");
+        };
+
+        packing_end.answer_handed()
+    }
+
+    /// Exchanges with the packing loop's body until nothing is out, which packs every ready
+    /// block and frees what waits to be freed, as a store left alone with its packing thread
+    /// ends.
+    pub(super) fn pack_ready(&mut self) {
+        let bound = self.span.blocks.capacity() + self.buffers.count() + DEPARTED_KEPT_MAX + 1;
+        for _ in 0..bound {
+            self.exchange();
+            if self.out.is_empty() && self.batches_out == 0 {
+                return;
+            }
+            self.answer_handed();
+        }
+        unreachable!("each exchange hands over a ready block, a batch, or nothing");
+    }
+
+    /// The span's buffers that nothing else holds.
+    pub(super) fn unheld_buffers(&self) -> impl Iterator<Item = &AppsSecond> {
+        self.buffers.unheld()
+    }
+
+    /// What the read benchmark counts of the packing thread's work.
+    #[cfg(feature = "read-benchmark")]
+    pub(super) fn packing_tally(&self) -> &super::packing::Tally {
+        self.packing.tally()
+    }
+
+    /// Exchanges with a packing thread running on its own, parked between exchanges until an
+    /// answer wakes it, until the span has settled, as the read benchmark does before it
+    /// reports bytes or a footprint.
+    pub(super) fn settle(&mut self) {
+        // A turn waits at most a millisecond, so the bound is 100 seconds of packing.
+        for _ in 0..100_000 {
+            self.exchange();
+            if self.settled() {
+                return;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        panic!("the packing thread left the span unsettled");
+    }
+
+    /// Whether nothing is out and nothing waits: no ready block plain, no free buffer holding
+    /// readings, and no packed block that left the row that nothing else holds.
+    pub(super) fn settled(&self) -> bool {
+        if !self.out.is_empty() {
+            return false;
+        }
+        if self.batches_out > 0 {
+            return false;
+        }
+        if self.ready_plain_count() > 0 {
+            return false;
+        }
+        if self
+            .departed
+            .iter()
+            .any(|block| Arc::strong_count(block) == 1)
+        {
+            return false;
+        }
+
+        !self.buffers.releasable()
+    }
+
+    /// How many packed blocks that left the row the store keeps.
+    pub(super) fn departed_kept_count(&self) -> usize {
+        self.departed.len()
     }
 
     /// How many buffers nothing but the buffers holds.
@@ -925,8 +1434,9 @@ impl BlockSpan {
         held
     }
 
+    /// The second at `index` of the span as the span holds it, packed or plain.
     pub(super) fn get(&self, index: usize) -> Option<&AppsSecond> {
-        self.stored(index)
+        (index < self.span.len).then(|| self.span.stored_at(index).as_ref())
     }
 
     pub(super) fn held(&self) -> impl Iterator<Item = &Arc<AppsSecond>> {

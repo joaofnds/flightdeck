@@ -99,6 +99,37 @@ fn a_released_buffer_keeps_nothing_it_held() {
     assert_eq!(Arc::strong_count(&reading), 1);
 }
 
+#[test]
+fn a_release_once_clears_a_free_buffer_once_until_it_is_written_or_released() {
+    // Goal: a release once clears each free buffer once, so a store whose buffers are mostly
+    // free pays nothing for them at every View it publishes, and clears a buffer again once it
+    // is written and let go, or released by another clear. A buffer a View holds is not cleared.
+    // Method: write two buffers, hold one, and count the buffers each release once clears:
+    // before and after a second, after the held one is let go and the other is written again,
+    // and after a plain release.
+    let mut buffers = Buffers::new(2, || 0_u64);
+    let held = buffers.write(|buffer| *buffer = 1).unwrap();
+    drop(buffers.write(|buffer| *buffer = 2).unwrap());
+    let released = |buffers: &mut Buffers<u64>| {
+        let mut count = 0;
+        buffers.release_once(|buffer| {
+            *buffer = 0;
+            count += 1;
+        });
+        count
+    };
+
+    assert_eq!(released(&mut buffers), 1);
+    assert_eq!(released(&mut buffers), 0);
+    drop(held);
+    assert_eq!(released(&mut buffers), 1);
+    drop(buffers.write(|buffer| *buffer = 3).unwrap());
+    assert_eq!(released(&mut buffers), 1);
+    assert_eq!(released(&mut buffers), 0);
+    buffers.release(|buffer| *buffer = 4);
+    assert_eq!(released(&mut buffers), 2);
+}
+
 mod when_every_buffer_is_held {
     use std::sync::Arc;
 

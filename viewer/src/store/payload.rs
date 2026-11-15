@@ -1,10 +1,12 @@
 //! Typed process payloads and shared names retain their own admissions, including View owners.
 use std::fmt;
-use std::ops::{Deref, Index};
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[path = "payload_names.rs"]
 mod names;
+#[path = "payload_packed.rs"]
+pub(super) mod packed;
 #[cfg(test)]
 pub(super) use names::NameTrace;
 pub(super) use names::{NameAdditions, ProcessNames};
@@ -28,13 +30,62 @@ use collector::ring::{IdentityUnavailable, ProcessCreation};
 pub struct Payload {
     pub(crate) selected: Observation,
     pub previous: Option<Stamp>,
-    rows: Vec<Arc<Shared<ProcessRow>>>,
-    /// The App index of each of `rows`, at the same place. It is held apart from the shared rows
-    /// because an App arriving or leaving moves the index of every process of the Apps after it,
-    /// and a process whose readings repeat keeps sharing its row whatever its index.
-    app_indexes: Vec<AppIndex>,
+    rows: ProcessRows,
     apps: Vec<Arc<Shared<AppDetails>>>,
     reservation: ByteReservation,
+}
+
+/// A second's processes: rows of its own, each shared with the second before where the two
+/// read the same, or its place in the process table of the packed block that holds it.
+#[derive(Debug)]
+enum ProcessRows {
+    Plain {
+        rows: Vec<Arc<Shared<ProcessRow>>>,
+        /// The App index of each of `rows`, at the same place. It is held apart from the shared
+        /// rows because an App arriving or leaving moves the index of every process of the Apps
+        /// after it, and a process whose readings repeat keeps sharing its row whatever its
+        /// index.
+        app_indexes: Vec<AppIndex>,
+    },
+    Packed {
+        table: Arc<packed::ProcessTable>,
+        /// The second's index in its block, the oldest at 0.
+        second_index: u32,
+        /// How many processes the second holds.
+        count: usize,
+    },
+}
+
+/// One process at one second, read from the second's own row or from its block's process
+/// table, with the App index that second gives it, so a reader never pairs a process with
+/// another second's readings or another process's index.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessAt<'payload> {
+    reading: Reading<'payload>,
+    app_index: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Reading<'payload> {
+    Row(&'payload ProcessRow),
+    Packed(packed::PackedAt<'payload>),
+}
+
+/// Every process of one payload, in the sample's order, each with its App index.
+#[derive(Debug)]
+pub struct Places<'payload> {
+    places: PlacesKind<'payload>,
+}
+
+#[derive(Debug)]
+enum PlacesKind<'payload> {
+    Plain(
+        std::iter::Zip<
+            std::slice::Iter<'payload, Arc<Shared<ProcessRow>>>,
+            std::slice::Iter<'payload, AppIndex>,
+        >,
+    ),
+    Packed(packed::Places<'payload>),
 }
 
 /// A process's App as the App's place among the Apps of its second, or no App, in four bytes.
@@ -54,15 +105,25 @@ pub struct Rows<'payload, Row> {
     rows: std::slice::Iter<'payload, Arc<Shared<Row>>>,
 }
 
-/// The process rows of one payload whose App index is one index, in the sample's order. It reads
-/// each row's index from the payload's indexes and no row it passes over.
+/// The processes of one payload whose App index is one index, in the sample's order. A plain
+/// payload's reads each row's index from the payload's indexes and no row it passes over, and a
+/// packed one's compares each process's App place with the App's.
 #[derive(Clone, Debug)]
 pub struct Members<'payload> {
-    rows: std::iter::Zip<
-        std::slice::Iter<'payload, Arc<Shared<ProcessRow>>>,
-        std::slice::Iter<'payload, AppIndex>,
-    >,
-    app_index: AppIndex,
+    members: MembersKind<'payload>,
+    app_index: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+enum MembersKind<'payload> {
+    Plain {
+        rows: std::iter::Zip<
+            std::slice::Iter<'payload, Arc<Shared<ProcessRow>>>,
+            std::slice::Iter<'payload, AppIndex>,
+        >,
+        app_index: AppIndex,
+    },
+    Packed(packed::Members<'payload>),
 }
 
 /// Captured executable bytes and their display spelling, shared across observations.
@@ -115,6 +176,64 @@ struct CompactAmount {
     known: [u8; 8],
     unavailable: Option<Unavailable>,
 }
+
+/// The eleven amounts a process row holds, in the order its fields are declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Measured {
+    Cpu,
+    Energy,
+    Gpu,
+    DiskRead,
+    DiskWritten,
+    DiskIo,
+    Resident,
+    Footprint,
+    IdleWakeups,
+    Pageins,
+    Threads,
+}
+
+impl Measured {
+    const ALL: [Self; 11] = [
+        Self::Cpu,
+        Self::Energy,
+        Self::Gpu,
+        Self::DiskRead,
+        Self::DiskWritten,
+        Self::DiskIo,
+        Self::Resident,
+        Self::Footprint,
+        Self::IdleWakeups,
+        Self::Pageins,
+        Self::Threads,
+    ];
+
+    /// The amount's place in `ALL`. The match names every amount and the assertion after it
+    /// ties each place to `ALL`, so an amount added here is one `ALL` has to list.
+    const fn index(self) -> usize {
+        match self {
+            Self::Cpu => 0,
+            Self::Energy => 1,
+            Self::Gpu => 2,
+            Self::DiskRead => 3,
+            Self::DiskWritten => 4,
+            Self::DiskIo => 5,
+            Self::Resident => 6,
+            Self::Footprint => 7,
+            Self::IdleWakeups => 8,
+            Self::Pageins => 9,
+            Self::Threads => 10,
+        }
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < Measured::ALL.len() {
+        assert!(Measured::ALL[index].index() == index);
+        index += 1;
+    }
+};
 
 /// Measures displayed in App detail, aligned with the observation's App rows.
 #[derive(Debug, PartialEq, Eq)]
@@ -171,40 +290,88 @@ impl Payload {
         &self.apps[index].row
     }
 
-    /// The process rows in the sample's order.
+    /// Every process of the second, in the sample's order, each with its App index.
     #[must_use]
-    pub fn iter(&self) -> Rows<'_, ProcessRow> {
-        Rows {
-            rows: self.rows.iter(),
+    pub fn processes(&self) -> Places<'_> {
+        let places = match &self.rows {
+            ProcessRows::Plain { rows, app_indexes } => {
+                PlacesKind::Plain(rows.iter().zip(app_indexes.iter()))
+            }
+            ProcessRows::Packed {
+                table,
+                second_index,
+                count,
+            } => PlacesKind::Packed(table.places(*second_index, *count)),
+        };
+
+        Places { places }
+    }
+
+    /// The processes whose App is the App at `app_index` of the second's Apps, `apps`, or that
+    /// belong to no App where `app_index` is `None`, in the sample's order.
+    #[must_use]
+    pub fn members(&self, app_index: Option<u32>, apps: &[AppRow]) -> Members<'_> {
+        assert_eq!(apps.len(), self.apps.len());
+        let members = match &self.rows {
+            ProcessRows::Plain { rows, app_indexes } => MembersKind::Plain {
+                rows: rows.iter().zip(app_indexes.iter()),
+                app_index: AppIndex::of(app_index),
+            },
+            ProcessRows::Packed {
+                table,
+                second_index,
+                ..
+            } => {
+                let app = app_index.map(|index| &apps[collector::usize_from_u32(index)]);
+                MembersKind::Packed(table.members(*second_index, app))
+            }
+        };
+
+        Members { members, app_index }
+    }
+
+    /// The process of pid `pid` created at `creation`, where the second holds it.
+    #[must_use]
+    pub fn find(&self, pid: i32, creation: Option<ProcessCreation>) -> Option<ProcessAt<'_>> {
+        match &self.rows {
+            ProcessRows::Plain { .. } => self
+                .processes()
+                .find(|process| process.pid() == pid && process.creation() == creation),
+            ProcessRows::Packed {
+                table,
+                second_index,
+                ..
+            } => table.find(*second_index, pid, creation),
         }
     }
 
-    /// The process rows whose App is the App at `app_index` of the sample's Apps, or that belong
-    /// to no App where `app_index` is `None`, in the sample's order.
-    #[must_use]
-    pub fn members(&self, app_index: Option<u32>) -> Members<'_> {
-        Members {
-            rows: self.rows.iter().zip(self.app_indexes.iter()),
-            app_index: AppIndex::of(app_index),
-        }
-    }
-
-    /// The App index of the process row at `row_index`: its App's place among the sample's Apps,
-    /// or `None` where the process belongs to no App.
-    #[must_use]
-    pub fn app_index(&self, row_index: usize) -> Option<u32> {
-        self.app_indexes[row_index].get()
-    }
-
-    /// The count of process rows.
+    /// The count of processes.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.rows.len()
+        match &self.rows {
+            ProcessRows::Plain { rows, .. } => rows.len(),
+            ProcessRows::Packed { count, .. } => *count,
+        }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.len() == 0
+    }
+
+    /// Whether the second's processes are read from its packed block's process table.
+    #[cfg(test)]
+    #[must_use]
+    pub(in crate::store) fn packed(&self) -> bool {
+        matches!(self.rows, ProcessRows::Packed { .. })
+    }
+
+    /// The process table of the packed block that holds the second, where one does.
+    pub(super) fn table(&self) -> Option<&Arc<packed::ProcessTable>> {
+        match &self.rows {
+            ProcessRows::Plain { .. } => None,
+            ProcessRows::Packed { table, .. } => Some(table),
+        }
     }
 
     /// Captures `sample`, sharing each process row and each App's additional measures that equal
@@ -247,8 +414,7 @@ impl Payload {
             Self {
                 selected: sample.selected,
                 previous: sample.previous,
-                rows,
-                app_indexes,
+                rows: ProcessRows::Plain { rows, app_indexes },
                 apps,
                 reservation,
             },
@@ -261,7 +427,7 @@ impl Payload {
         names: &ProcessNames,
         previous: &Previous<'_>,
     ) -> Result<Parts, Missing> {
-        let previous_rows = previous.payload.map_or(&[][..], |payload| &payload.rows);
+        let previous_rows = previous.payload.map_or(&[][..], Payload::plain_rows);
         let additions = names.additions(sample)?;
         let rows = Self::capture_with_names_rows(sample, names, &additions, previous_rows)?;
         let app_indexes = Self::capture_with_names_app_indexes(sample);
@@ -304,8 +470,9 @@ impl Payload {
     }
 
     /// The row of each process of `sample`, which is the row of `previous_rows` where that
-    /// second read the same. One pass over `previous_rows` finds each process while both lists
-    /// ascend by pid, and a list in another order shares fewer rows and reads the same.
+    /// second read the same. One pass over `previous_rows` finds each process, since both lists
+    /// ascend by pid and then the creation's unique id, the order the packer asserts of every
+    /// second it packs.
     fn capture_with_names_rows(
         sample: &Sample,
         names: &ProcessNames,
@@ -348,10 +515,14 @@ impl Payload {
     /// Names, rows and App details own separate reservations; this admission precedes the
     /// allocation of the payload's containers.
     fn capture_bytes(sample: &Sample) -> usize {
-        2 * size_of::<usize>()
-            + size_of::<Self>()
+        Self::header_bytes(sample.apps().len())
             + sample.processes().len() * Self::ROW_REFERENCE_BYTES
-            + sample.apps().len() * Self::APP_DETAILS_REFERENCE_BYTES
+    }
+
+    /// The charge of a payload's own allocation in its `Arc` with its list of `app_count` App
+    /// details, which a captured payload and a packed one share.
+    fn header_bytes(app_count: usize) -> usize {
+        2 * size_of::<usize>() + size_of::<Self>() + app_count * Self::APP_DETAILS_REFERENCE_BYTES
     }
 
     /// This payload's header and containers, excluding separately admitted shared names, rows
@@ -359,6 +530,41 @@ impl Payload {
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.reservation.bytes()
+    }
+
+    /// The second's own process rows, which a capture shares from. The second before a capture
+    /// is always in a plain block: the live path's is the newest, in the open block, and a
+    /// launch keeps a block plain while the second after its last still waits for its Apps.
+    fn plain_rows(&self) -> &[Arc<Shared<ProcessRow>>] {
+        match &self.rows {
+            ProcessRows::Plain { rows, .. } => rows,
+            ProcessRows::Packed { .. } => unreachable!("a capture shares rows of a packed block"),
+        }
+    }
+
+    /// The process rows in the sample's order, which a test reads of a payload whose rows are
+    /// its own. No release build holds it, since a second of a packed block has no row of its
+    /// own to hand out.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn iter(&self) -> Rows<'_, ProcessRow> {
+        let ProcessRows::Plain { rows, .. } = &self.rows else {
+            panic!("a test reads the rows of a packed payload, which reads through `processes`");
+        };
+
+        Rows { rows: rows.iter() }
+    }
+
+    /// The App index of the process row at `row_index`: its App's place among the sample's Apps,
+    /// or `None` where the process belongs to no App. Only a test reads it, as `iter`.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn app_index(&self, row_index: usize) -> Option<u32> {
+        let ProcessRows::Plain { app_indexes, .. } = &self.rows else {
+            panic!("a test reads the App indexes of a packed payload");
+        };
+
+        app_indexes[row_index].get()
     }
 }
 
@@ -447,19 +653,66 @@ impl<'payload, Row> Iterator for Rows<'payload, Row> {
 impl<Row> ExactSizeIterator for Rows<'_, Row> {}
 
 impl<'payload> Iterator for Members<'payload> {
-    type Item = &'payload ProcessRow;
+    type Item = ProcessAt<'payload>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let app_index = self.app_index;
-        self.rows
-            .find_map(|(shared, index)| (*index == app_index).then_some(&shared.row))
+        let reading = match &mut self.members {
+            MembersKind::Plain { rows, app_index } => {
+                let app_index = *app_index;
+                Reading::Row(
+                    rows.find_map(|(shared, index)| (*index == app_index).then_some(&shared.row))?,
+                )
+            }
+            MembersKind::Packed(members) => Reading::Packed(members.next()?),
+        };
+
+        Some(ProcessAt {
+            reading,
+            app_index: self.app_index,
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.rows.size_hint().1)
+        match &self.members {
+            MembersKind::Plain { rows, .. } => (0, rows.size_hint().1),
+            MembersKind::Packed(members) => members.size_hint(),
+        }
     }
 }
 
+impl<'payload> Iterator for Places<'payload> {
+    type Item = ProcessAt<'payload>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.places {
+            PlacesKind::Plain(rows) => {
+                let (shared, app_index) = rows.next()?;
+                Some(ProcessAt {
+                    reading: Reading::Row(&shared.row),
+                    app_index: app_index.get(),
+                })
+            }
+            PlacesKind::Packed(places) => {
+                let (packed, app_index) = places.next()?;
+                Some(ProcessAt {
+                    reading: Reading::Packed(packed),
+                    app_index,
+                })
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.places {
+            PlacesKind::Plain(rows) => rows.size_hint(),
+            PlacesKind::Packed(places) => places.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for Places<'_> {}
+
+#[cfg(any(test, feature = "fixtures"))]
 impl<'payload> IntoIterator for &'payload Payload {
     type Item = &'payload ProcessRow;
     type IntoIter = Rows<'payload, ProcessRow>;
@@ -469,28 +722,159 @@ impl<'payload> IntoIterator for &'payload Payload {
     }
 }
 
-impl Index<usize> for Payload {
+#[cfg(any(test, feature = "fixtures"))]
+impl std::ops::Index<usize> for Payload {
     type Output = ProcessRow;
 
     fn index(&self, index: usize) -> &Self::Output {
-        &self.rows[index].row
+        let ProcessRows::Plain { rows, .. } = &self.rows else {
+            panic!("a test reads a row of a packed payload, which reads through `processes`");
+        };
+
+        &rows[index].row
     }
 }
 
-impl ProcessRow {
-    /// The row as a page shows it, as a process of the App at `app_index` of its second's Apps.
-    pub(crate) fn presentation(
-        &self,
-        app_index: Option<u32>,
-    ) -> crate::live_app_response::json::ProcessView<'_> {
+impl<'payload> ProcessAt<'payload> {
+    #[must_use]
+    pub fn pid(&self) -> i32 {
+        match &self.reading {
+            Reading::Row(row) => row.pid,
+            Reading::Packed(packed) => packed.pid(),
+        }
+    }
+
+    #[must_use]
+    pub fn creation(&self) -> Option<ProcessCreation> {
+        match &self.reading {
+            Reading::Row(row) => row.creation,
+            Reading::Packed(packed) => packed.creation(),
+        }
+    }
+
+    #[must_use]
+    pub fn executable_name(&self) -> Option<&'payload ProcessName> {
+        match &self.reading {
+            Reading::Row(row) => row.executable_name(),
+            Reading::Packed(packed) => packed.executable_name(),
+        }
+    }
+
+    #[must_use]
+    pub fn program_unavailable(&self) -> Option<IdentityUnavailable> {
+        match &self.reading {
+            Reading::Row(row) => row.program_unavailable,
+            Reading::Packed(packed) => packed.program_unavailable(),
+        }
+    }
+
+    #[must_use]
+    pub fn app_attribution(&self) -> Option<Unavailable> {
+        match &self.reading {
+            Reading::Row(row) => row.app_attribution,
+            Reading::Packed(packed) => packed.app_attribution(),
+        }
+    }
+
+    #[must_use]
+    pub fn state(&self) -> ProcessState {
+        match &self.reading {
+            Reading::Row(row) => row.state,
+            Reading::Packed(packed) => packed.state(),
+        }
+    }
+
+    /// The App index the second gives the process: its App's place among the second's Apps, or
+    /// `None` where the process belongs to no App.
+    #[must_use]
+    pub fn app_index(&self) -> Option<u32> {
+        self.app_index
+    }
+
+    #[must_use]
+    pub fn cpu_ns(&self) -> Amount {
+        self.amount(Measured::Cpu)
+    }
+
+    #[must_use]
+    pub fn energy_nj(&self) -> Amount {
+        self.amount(Measured::Energy)
+    }
+
+    #[must_use]
+    pub fn gpu_ns(&self) -> Amount {
+        self.amount(Measured::Gpu)
+    }
+
+    #[must_use]
+    pub fn disk_read_bytes(&self) -> Amount {
+        self.amount(Measured::DiskRead)
+    }
+
+    #[must_use]
+    pub fn disk_written_bytes(&self) -> Amount {
+        self.amount(Measured::DiskWritten)
+    }
+
+    #[must_use]
+    pub fn disk_io_bytes(&self) -> Amount {
+        self.amount(Measured::DiskIo)
+    }
+
+    #[must_use]
+    pub fn resident_bytes(&self) -> Amount {
+        self.amount(Measured::Resident)
+    }
+
+    #[must_use]
+    pub fn footprint_bytes(&self) -> Amount {
+        self.amount(Measured::Footprint)
+    }
+
+    #[must_use]
+    pub fn idle_wakeups(&self) -> Amount {
+        self.amount(Measured::IdleWakeups)
+    }
+
+    #[must_use]
+    pub fn pageins(&self) -> Amount {
+        self.amount(Measured::Pageins)
+    }
+
+    #[must_use]
+    pub fn threads(&self) -> Amount {
+        self.amount(Measured::Threads)
+    }
+
+    fn amount(&self, measured: Measured) -> Amount {
+        match &self.reading {
+            Reading::Row(row) => row.compact(measured).amount(),
+            Reading::Packed(packed) => packed.compact(measured).amount(),
+        }
+    }
+
+    /// Where the row the process reads from lies in memory: its own row in a plain second, and
+    /// its first row in the block in a packed one. A tool that measures the store tells the rows
+    /// it holds apart by it.
+    #[must_use]
+    pub fn row_address(&self) -> usize {
+        match &self.reading {
+            Reading::Row(row) => std::ptr::from_ref(*row).addr(),
+            Reading::Packed(packed) => packed.row_address(),
+        }
+    }
+
+    /// The process as a page shows it, in its own App.
+    #[must_use]
+    pub(crate) fn presentation(&self) -> crate::live_app_response::json::ProcessView<'payload> {
         crate::live_app_response::json::ProcessView {
-            pid: self.pid,
-            creation: self.creation,
-            app_index,
+            pid: self.pid(),
+            creation: self.creation(),
+            app_index: self.app_index,
             executable_name: self
                 .executable_name()
                 .map(|name| (name.bytes.as_slice(), name.display.as_str())),
-            program_unavailable: self.program_unavailable,
+            program_unavailable: self.program_unavailable(),
             cpu_ns: self.cpu_ns(),
             energy_nj: self.energy_nj(),
             gpu_ns: self.gpu_ns(),
@@ -502,61 +886,180 @@ impl ProcessRow {
             idle_wakeups: self.idle_wakeups(),
             pageins: self.pageins(),
             threads: self.threads(),
-            app_attribution: self.app_attribution,
-            state: self.state,
+            app_attribution: self.app_attribution(),
+            state: self.state(),
+        }
+    }
+}
+
+/// Two processes at a second are equal where every reading and the App index are, whether
+/// each is read from a row or from a packed block.
+impl PartialEq for ProcessAt<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.readings() == other.readings()
+    }
+}
+
+/// Every reading of a process at a second and its App index, by which two processes compare.
+#[derive(PartialEq)]
+struct ProcessReadings<'payload> {
+    pid: i32,
+    creation: Option<ProcessCreation>,
+    executable_name: Option<&'payload ProcessName>,
+    program_unavailable: Option<IdentityUnavailable>,
+    /// Each amount at its place in `Measured::ALL`.
+    amounts: [Amount; Measured::ALL.len()],
+    app_attribution: Option<Unavailable>,
+    state: ProcessState,
+    app_index: Option<u32>,
+}
+
+impl<'payload> ProcessAt<'payload> {
+    /// Every reading of the process, read from its row field by field or through its packed
+    /// block's readers.
+    fn readings(&self) -> ProcessReadings<'payload> {
+        let Reading::Row(row) = self.reading else {
+            return ProcessReadings {
+                pid: self.pid(),
+                creation: self.creation(),
+                executable_name: self.executable_name(),
+                program_unavailable: self.program_unavailable(),
+                amounts: Measured::ALL.map(|measured| self.amount(measured)),
+                app_attribution: self.app_attribution(),
+                state: self.state(),
+                app_index: self.app_index,
+            };
+        };
+        // Every field is named, so a field added to a row is one the comparison has to read,
+        // and so one the packed readers have to give.
+        let ProcessRow {
+            pid,
+            creation,
+            executable_name,
+            program_unavailable,
+            cpu_ns,
+            energy_nj,
+            gpu_ns,
+            disk_read_bytes,
+            disk_written_bytes,
+            disk_io_bytes,
+            resident_bytes,
+            footprint_bytes,
+            idle_wakeups,
+            pageins,
+            threads,
+            app_attribution,
+            state,
+        } = row;
+        let mut amounts = [Amount::Known(0); Measured::ALL.len()];
+        for (measured, amount) in [
+            (Measured::Cpu, cpu_ns),
+            (Measured::Energy, energy_nj),
+            (Measured::Gpu, gpu_ns),
+            (Measured::DiskRead, disk_read_bytes),
+            (Measured::DiskWritten, disk_written_bytes),
+            (Measured::DiskIo, disk_io_bytes),
+            (Measured::Resident, resident_bytes),
+            (Measured::Footprint, footprint_bytes),
+            (Measured::IdleWakeups, idle_wakeups),
+            (Measured::Pageins, pageins),
+            (Measured::Threads, threads),
+        ] {
+            amounts[measured.index()] = amount.amount();
+        }
+
+        ProcessReadings {
+            pid: *pid,
+            creation: *creation,
+            executable_name: executable_name.as_deref(),
+            program_unavailable: *program_unavailable,
+            amounts,
+            app_attribution: *app_attribution,
+            state: *state,
+            app_index: self.app_index,
+        }
+    }
+}
+
+impl ProcessRow {
+    /// The amount of `measured` as the row holds it.
+    fn compact(&self, measured: Measured) -> CompactAmount {
+        match measured {
+            Measured::Cpu => self.cpu_ns,
+            Measured::Energy => self.energy_nj,
+            Measured::Gpu => self.gpu_ns,
+            Measured::DiskRead => self.disk_read_bytes,
+            Measured::DiskWritten => self.disk_written_bytes,
+            Measured::DiskIo => self.disk_io_bytes,
+            Measured::Resident => self.resident_bytes,
+            Measured::Footprint => self.footprint_bytes,
+            Measured::IdleWakeups => self.idle_wakeups,
+            Measured::Pageins => self.pageins,
+            Measured::Threads => self.threads,
         }
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn cpu_ns(&self) -> Amount {
         self.cpu_ns.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn energy_nj(&self) -> Amount {
         self.energy_nj.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn gpu_ns(&self) -> Amount {
         self.gpu_ns.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn disk_read_bytes(&self) -> Amount {
         self.disk_read_bytes.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn disk_written_bytes(&self) -> Amount {
         self.disk_written_bytes.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn disk_io_bytes(&self) -> Amount {
         self.disk_io_bytes.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn resident_bytes(&self) -> Amount {
         self.resident_bytes.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn footprint_bytes(&self) -> Amount {
         self.footprint_bytes.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn idle_wakeups(&self) -> Amount {
         self.idle_wakeups.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn pageins(&self) -> Amount {
         self.pageins.amount()
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn threads(&self) -> Amount {
         self.threads.amount()
@@ -686,8 +1189,8 @@ impl PartialEq for Payload {
     fn eq(&self, other: &Self) -> bool {
         self.selected == other.selected
             && self.previous == other.previous
-            && self.iter().eq(other.iter())
-            && self.app_indexes == other.app_indexes
+            && self.len() == other.len()
+            && self.processes().eq(other.processes())
             && self.apps().eq(other.apps())
     }
 }

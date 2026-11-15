@@ -7,7 +7,7 @@ use super::{QueryContext, QuerySecond, Response};
 use crate::Cancellation;
 use crate::live_app_response::json;
 use crate::live_app_response::{Detail, KeyKind, Observation, Page};
-use crate::store::{AppRow, AppsCursor, ProcessRow, Processes};
+use crate::store::{AppRow, AppsCursor, ProcessAt, Processes};
 
 const HEADER_BYTES: usize = 256 * size_of::<Value>();
 const ROW_BYTES: usize = 768 * size_of::<Value>();
@@ -139,11 +139,11 @@ fn response_members_bytes(
         + processes
             .skip(range.start)
             .take(range.len())
-            .map(|process| response_process_bytes(process.row()))
+            .map(|process| response_process_bytes(&process))
             .sum::<usize>())
 }
 
-fn response_process_bytes(process: &ProcessRow) -> usize {
+fn response_process_bytes(process: &ProcessAt<'_>) -> usize {
     ROW_BYTES
         + process
             .executable_name()

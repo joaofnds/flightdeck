@@ -10,8 +10,8 @@ use persistence::resources::{Footprint, Watchdog};
 use serde_json::json;
 use viewer::apps::Amount;
 use viewer::store::{
-    AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, Payload, ProcessAt,
-    ProcessRow, Processes, SampledSecond, Store, View,
+    AppDetails, AppRow, AppsSecond, ByteBudget, KeptPlain, MachineSecond, Missing, Payload,
+    ProcessAt, ProcessRow, Processes, SampledSecond, Store, View,
 };
 
 #[path = "store_payload/name_census.rs"]
@@ -48,7 +48,10 @@ struct PayloadCounts {
     refused: usize,
     too_many: usize,
     processes: usize,
-    processes_distinct: usize,
+    /// The process rows the View's seconds hold, each counted once: a plain second's own rows
+    /// and the first row of each process of a packed block, which is all a packed block holds
+    /// as rows.
+    processes_rows_held: usize,
     processes_max: usize,
     app_details: usize,
     app_details_distinct: usize,
@@ -155,52 +158,58 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
     let details_walk_ns =
         u64::try_from(details_walk.elapsed.as_nanos()).map_err(io::Error::other)?;
     let counts = PayloadCounts::of(view);
-    println!(
-        "{}",
-        json!({
-            "component_only": true,
-            "phase": "held_view",
-            "version": view.version,
-            "recent": view.seconds.len(),
-            "earlier": view.earlier.len(),
-            "sampled": view.sampled.len(),
-            "sampled_complete": view.sampled.iter().filter(|sample| sample.ranks().is_ok()).count(),
-            "payload_complete": counts.complete,
-            "payload_unread": counts.unread,
-            "payload_budget": counts.budget,
-            "payload_refused": counts.refused,
-            "payload_too_many": counts.too_many,
-            "process_rows": counts.processes,
-            "process_rows_distinct": counts.processes_distinct,
-            "process_rows_max": counts.processes_max,
-            "process_row_reserved_bytes": Payload::ROW_BYTES,
-            "process_rows_walk_ns": walk_ns,
-            "process_rows_walk_sum": walk.sum,
-            "app_details_walk_ns": details_walk_ns,
-            "app_details_walk_sum": details_walk.sum,
-            "app_details_rows": counts.app_details,
-            "app_details_rows_distinct": counts.app_details_distinct,
-            "app_details_row_reserved_bytes": Payload::APP_DETAILS_BYTES,
-            "app_row_capacity_bytes_by_reference": view.apps.seconds()
-                .map(|apps| apps.app_row_capacity() * size_of::<AppRow>()).sum::<usize>(),
-            "app_row_initialized_bytes_by_reference": view.apps.seconds()
-                .map(|apps| apps.app_count() * size_of::<AppRow>()).sum::<usize>(),
-            "reserved_bytes": budget.used(),
-            "reserved_bytes_max": budget.maximum(),
-            "reserved_bytes_peak": budget.used_peak(),
-            "footprint_bytes": footprint.current_bytes,
-            "footprint_peak_bytes": footprint.lifetime_bytes_max,
-            "resident_bytes": footprint.resident_bytes,
-            "failure": format!("{:?}", view.failure),
-            "left_out": format!("{:?}", view.left_out),
-            "type_bytes": {
-                "process": size_of::<ProcessRow>(), "app": size_of::<AppRow>(),
-                "app_details": size_of::<AppDetails>(), "apps_second": size_of::<AppsSecond>(),
-                "machine_second": size_of::<MachineSecond>(),
-                "sampled_second": size_of::<SampledSecond>(),
-            },
-        })
-    );
+    let blocks = json!({
+        "held": view.apps.block_count(),
+        "packed": view.apps.packed_count(),
+        "kept_plain_bound": view.apps.kept_plain_count(KeptPlain::Bound),
+        "kept_plain_budget": view.apps.kept_plain_count(KeptPlain::Budget),
+    });
+    let mut held = json!({
+        "component_only": true,
+        "phase": "held_view",
+        "version": view.version,
+        "recent": view.seconds.len(),
+        "earlier": view.earlier.len(),
+        "sampled": view.sampled.len(),
+        "sampled_complete": view.sampled.iter().filter(|sample| sample.ranks().is_ok()).count(),
+        "payload_complete": counts.complete,
+        "payload_unread": counts.unread,
+        "payload_budget": counts.budget,
+        "payload_refused": counts.refused,
+        "payload_too_many": counts.too_many,
+        "process_rows": counts.processes,
+        "process_rows_held": counts.processes_rows_held,
+        "process_rows_max": counts.processes_max,
+        "process_row_reserved_bytes": Payload::ROW_BYTES,
+        "process_rows_walk_ns": walk_ns,
+        "process_rows_walk_sum": walk.sum,
+        "app_details_walk_ns": details_walk_ns,
+        "app_details_walk_sum": details_walk.sum,
+        "app_details_rows": counts.app_details,
+        "app_details_rows_distinct": counts.app_details_distinct,
+        "app_details_row_reserved_bytes": Payload::APP_DETAILS_BYTES,
+        "app_row_capacity_bytes_by_reference": view.apps.seconds()
+            .map(|apps| apps.app_row_capacity() * size_of::<AppRow>()).sum::<usize>(),
+        "app_row_initialized_bytes_by_reference": view.apps.seconds()
+            .map(|apps| apps.app_count() * size_of::<AppRow>()).sum::<usize>(),
+        "reserved_bytes": budget.used(),
+        "reserved_bytes_max": budget.maximum(),
+        "reserved_bytes_peak": budget.used_peak(),
+        "footprint_bytes": footprint.current_bytes,
+        "footprint_peak_bytes": footprint.lifetime_bytes_max,
+        "resident_bytes": footprint.resident_bytes,
+        "failure": format!("{:?}", view.failure),
+        "left_out": format!("{:?}", view.left_out),
+        "type_bytes": {
+            "process": size_of::<ProcessRow>(), "app": size_of::<AppRow>(),
+            "app_details": size_of::<AppDetails>(), "apps_second": size_of::<AppsSecond>(),
+            "machine_second": size_of::<MachineSecond>(),
+            "sampled_second": size_of::<SampledSecond>(),
+        },
+    });
+    // Set apart from the rest, which reaches the macro's recursion limit.
+    held["blocks"] = blocks;
+    println!("{held}");
     Ok(())
 }
 
@@ -238,25 +247,29 @@ impl PayloadCounts {
                 Err(Missing::TooMany) => counts.too_many += 1,
             }
         }
-        counts.processes_distinct = Self::of_distinct(view, counts.processes, |processes| {
-            processes.iter().map(ProcessAt::row)
+        counts.processes_rows_held = Self::of_distinct(view, counts.processes, |processes| {
+            processes.iter().map(|process| process.row_address())
         });
-        counts.app_details_distinct =
-            Self::of_distinct(view, counts.app_details, Processes::details);
+        counts.app_details_distinct = Self::of_distinct(view, counts.app_details, |processes| {
+            processes
+                .details()
+                .map(|details| std::ptr::from_ref(details).addr())
+        });
 
         counts
     }
 
     /// How many distinct rows `rows` gives across the seconds of `view` that hold their
-    /// processes, `count` of them in all, telling rows apart by where they lie in memory.
-    fn of_distinct<'view, Row: 'view, Rows: Iterator<Item = &'view Row>>(
+    /// processes, `count` of them in all, telling rows apart by where they lie in memory. A
+    /// process of a packed block counts its first row in the block.
+    fn of_distinct<'view, Addresses: Iterator<Item = usize>>(
         view: &'view View,
         count: usize,
-        rows: impl Fn(Processes<'view>) -> Rows,
+        rows: impl Fn(Processes<'view>) -> Addresses,
     ) -> usize {
         let mut addresses = Vec::with_capacity(count);
         for processes in payloads(view) {
-            addresses.extend(rows(processes).map(|row| std::ptr::from_ref(row).addr()));
+            addresses.extend(rows(processes));
         }
         assert_eq!(addresses.len(), count);
 
@@ -289,7 +302,7 @@ impl RowsWalk {
         let mut sum = 0_u64;
         for processes in payloads(view) {
             for process in processes.iter() {
-                sum = sum.wrapping_add(Self::of_row(process.row()));
+                sum = sum.wrapping_add(Self::of_process(&process));
             }
         }
 
@@ -318,21 +331,21 @@ impl RowsWalk {
         }
     }
 
-    fn of_row(row: &ProcessRow) -> u64 {
+    fn of_process(process: &ProcessAt<'_>) -> u64 {
         let amounts = [
-            row.cpu_ns(),
-            row.energy_nj(),
-            row.gpu_ns(),
-            row.disk_read_bytes(),
-            row.disk_written_bytes(),
-            row.disk_io_bytes(),
-            row.resident_bytes(),
-            row.footprint_bytes(),
-            row.idle_wakeups(),
-            row.pageins(),
-            row.threads(),
+            process.cpu_ns(),
+            process.energy_nj(),
+            process.gpu_ns(),
+            process.disk_read_bytes(),
+            process.disk_written_bytes(),
+            process.disk_io_bytes(),
+            process.resident_bytes(),
+            process.footprint_bytes(),
+            process.idle_wakeups(),
+            process.pageins(),
+            process.threads(),
         ];
-        let mut sum = u64::from(row.pid.unsigned_abs());
+        let mut sum = u64::from(process.pid().unsigned_abs());
         for amount in amounts {
             if let Amount::Known(known) = amount {
                 sum = sum.wrapping_add(known);

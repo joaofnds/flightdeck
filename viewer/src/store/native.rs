@@ -479,6 +479,22 @@ impl AppMetadata {
         })
     }
 
+    /// The header of a packed second copied from this one, charged to `budget` for the packed
+    /// second's own allocation in its `Arc`, this reservation's and `copied_bytes` more for the
+    /// strings the packed second copies, or `None` where the budget refuses.
+    pub(super) fn packed(&self, copied_bytes: usize, budget: &Arc<ByteBudget>) -> Option<Self> {
+        let bytes = 2 * size_of::<usize>()
+            + size_of::<AppsSecond>()
+            + metadata_owner_bytes()
+            + copied_bytes;
+        let reservation = budget.reserve(bytes)?;
+
+        Some(Self {
+            origin: self.origin,
+            reservation: Some(Arc::new(reservation)),
+        })
+    }
+
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.reservation

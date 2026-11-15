@@ -19,10 +19,10 @@ use super::query::{CheckedCoverage, Queries};
 use super::recording::{self, Continuity};
 use super::{
     AppDetails, AppRow, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
-    CompleteMachineState, ContextRanks, Held, Leaders, MachineSecond, Mailbox, Payload, ProcessRow,
-    QueryContext, QueryOutcome, QueryRequest, QuerySelection, Readings, Response, RunIdentity,
-    SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond, SourceGeneration, TickApps, View, WallSeconds,
-    coverage,
+    CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox, Payload,
+    ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Readings,
+    Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond, SourceGeneration,
+    TickApps, View, WallSeconds, coverage,
 };
 use crate::app_process_groups_history::{
     AppProcessGroupsHistory, ProcessGroup, ProcessGroupsPoint,
@@ -58,7 +58,7 @@ fn reads_of_the_live_span_cost() {
     // Goal: say what each read of a View costs on a real recording's newest hour.
     // Method: load the hour's sealed minutes as the store does, publish a View and time each
     // read the charts and the rankings make of it.
-    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let mut loaded = load_hour_settled(&prepared_root());
     let view = publish(&mut loaded.held);
     let cohort = leading_apps(&view);
     println!(
@@ -80,7 +80,7 @@ fn reads_of_a_context_that_follows_the_newest_second_cost() {
     // read the pages make of it.
     // Method: load the hour as the store does, serve the query as the store's thread does and
     // time each read of the context it answers with.
-    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let mut loaded = load_hour_settled(&prepared_root());
 
     time_context("followed", &mut loaded, QuerySelection::FollowLatest);
 }
@@ -91,7 +91,7 @@ fn reads_of_a_context_fixed_on_an_earlier_second_cost() {
     // the pages make of it.
     // Method: load the hour as the store does, serve a query of a second a minute back as the
     // store's thread does and time each read of the context it answers with.
-    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let mut loaded = load_hour_settled(&prepared_root());
     let fixed = QuerySelection::Second {
         second: newest_wall_second(&loaded.held) - FIXED_SECONDS_BACK,
         alternative: 0,
@@ -105,8 +105,10 @@ fn taking_a_second_costs() {
     // Goal: say what taking one second into the span and publishing a View of it costs, with
     // every earlier View let go and with one View held through every take reported, as a hold
     // keeps one.
-    // Method: load the hour as the store does, publish after every take and time the two
-    // together, over the takes that fill the span the store ends with.
+    // Method: load the hour as the store does, with the packing thread beside it, wait untimed
+    // before each take until the packing thread has answered what it was handed, publish after
+    // every take and time the two together, over the takes that fill the span the store ends
+    // with, and say apart what packing a block took the packing thread.
     let root = prepared_root();
 
     let takes = timed_takes(&root, None);
@@ -129,13 +131,15 @@ fn taking_a_second_costs() {
 #[test]
 fn loading_the_hour_costs() {
     // Goal: say what loading the newest hour costs in time and in memory.
-    // Method: load the hour's sealed minutes as the store does, once in this process, and read
-    // the process's footprint and the store's budget when the load ends.
+    // Method: load the hour's sealed minutes as the store does, once in this process, with the
+    // packing thread beside the load as in the app, and read the process's footprint and the
+    // store's budget once the packing thread has packed what the load left.
     let root = prepared_root();
 
     let started = Instant::now();
     let mut loaded = load_hour(&root, take_every_second);
     let elapsed = started.elapsed();
+    loaded.held.apps.settle();
     let memory = Memory::read(&loaded.budget);
 
     println!("load of the hour: {} ns", elapsed.as_nanos());
@@ -149,17 +153,20 @@ fn continuing_a_load_costs() {
     // memory, when the recording holds six minutes the store has not taken, or a third of a
     // recording shorter than eighteen.
     // Method: load the hour but for those newest minutes, then load from the newest second
-    // held as the store's refresh does, and read the footprint before and after.
+    // held as the store's refresh does, and read the footprint before and after, each once
+    // the packing thread has packed what the load before it left.
     let root = prepared_root();
     let cutoff_ns = continued_cutoff_ns(&root);
     let mut loaded = load_hour(&root, |held, run, second, apps| {
         take_through(cutoff_ns, held, run, second, apps);
     });
+    loaded.held.apps.settle();
     let before = Memory::read(&loaded.budget);
 
     let started = Instant::now();
     let taken = continue_load(&root, &mut loaded);
     let elapsed = started.elapsed();
+    loaded.held.apps.settle();
     let after = Memory::read(&loaded.budget);
 
     println!(
@@ -178,7 +185,7 @@ fn rows_of_the_live_span_repeat() {
     // from the row of the second before although they read the same and their App index moved.
     // Method: load the hour as the store does and compare each process's row with its row of
     // the second before, by address and then field by field.
-    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let mut loaded = load_hour_settled(&prepared_root());
     let view = publish(&mut loaded.held);
 
     let app_bytes = report_apps(&view);
@@ -210,13 +217,17 @@ fn prepared_root() -> PathBuf {
     PathBuf::from(root)
 }
 
-/// Loads the newest hour of `root` as the store does, handing each second to `take`.
+/// Loads the newest hour of `root` as the store does, handing each second to `take`, with the
+/// packing thread started as the store's thread starts it. The load waits for nothing, and
+/// the packing thread ends once the store's end goes with what the store holds.
 fn load_hour(
     root: &Path,
     mut take: impl FnMut(&mut Held, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Loaded {
     let budget = Arc::new(ByteBudget::new(super::BYTES_MAX));
-    let mut held = Held::new(root.to_path_buf(), Arc::clone(&budget));
+    let (store_end, packing_end) = super::packing::pair(Arc::clone(&budget));
+    drop(packing_end.start(std::thread::current()).unwrap());
+    let mut held = Held::new(root.to_path_buf(), Arc::clone(&budget), store_end);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut handed_over = 0_usize;
     let outcome =
@@ -239,6 +250,15 @@ fn load_hour(
     held.ring_complete = true;
 
     Loaded { held, budget }
+}
+
+/// Loads the newest hour of `root` taking every second, once the packing thread has packed
+/// what the load left, as the running app holds it a few seconds after a load.
+fn load_hour_settled(root: &Path) -> Loaded {
+    let mut loaded = load_hour(root, take_every_second);
+    loaded.held.apps.settle();
+
+    loaded
 }
 
 fn take_every_second(
@@ -597,18 +617,25 @@ fn time_context_pages(label: &str, context: &Arc<QueryContext>, app: &RankedApp)
 struct Takes {
     /// What each take and its publish took, in the order the load handed the seconds over.
     elapsed_ns: Vec<u128>,
+    /// What packing each block took the packing thread.
+    packing: super::packing::BlockTimes,
+    /// What freeing the batches it was handed took the packing thread over the load.
+    freeing: super::packing::FreeingTimes,
     /// The span the load ended with.
     view: Arc<View>,
 }
 
 /// Loads the hour of `root` publishing a View after every take, and keeps hold of the View
 /// published after take `view_held_after`, counted from one, until the load ends, where it
-/// names one.
+/// names one. Before each take it waits, untimed, until the packing thread has answered what
+/// it was handed, since in the running app a second passes between takes, so a take's time
+/// holds the exchange and no packing.
 fn timed_takes(root: &Path, view_held_after: Option<usize>) -> Takes {
     let mailbox = Mailbox::new();
     let mut elapsed_ns = Vec::new();
     let mut view_held = None;
     let mut loaded = load_hour(root, |held, run, second, apps| {
+        timed_takes_wait(held);
         let started = Instant::now();
         assert!(held.take(run, second, apps));
         held.publish(&mailbox);
@@ -618,10 +645,32 @@ fn timed_takes(root: &Path, view_held_after: Option<usize>) -> Takes {
             view_held = Some(view);
         }
     });
-    let view = publish(&mut loaded.held);
     drop(view_held);
+    loaded.held.apps.settle();
+    let view = publish(&mut loaded.held);
+    let tally = loaded.held.apps.packing_tally();
+    let packing = tally.block_times();
+    let freeing = tally.freeing_times();
 
-    Takes { elapsed_ns, view }
+    Takes {
+        elapsed_ns,
+        packing,
+        freeing,
+        view,
+    }
+}
+
+/// Waits until the packing thread has answered every message `held` handed it, woken by each
+/// answer, within a bound of ten seconds.
+fn timed_takes_wait(held: &Held) {
+    let tally = held.apps.packing_tally();
+    for _ in 0..10_000 {
+        if tally.finished() {
+            return;
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+    }
+    panic!("the packing thread did not answer within ten seconds");
 }
 
 /// How many of a load's first takes a report leaves out, so that it covers the takes that fill
@@ -645,6 +694,30 @@ fn report_takes(label: &str, takes: &Takes, reported_from: usize) {
         sorted[sorted.len() - 1],
         reported.len(),
         takes.elapsed_ns.len(),
+    );
+    // No line below is a figure `gate.py` reads, since today's code has no packing thread. The
+    // share, the thirtieth and the freeing a second floor.
+    let packing = &takes.packing;
+    println!(
+        "{label}, packing a block on its own thread took a mean of {} ns and at most {} ns over \
+         {} blocks, {} millionths of one core at one block every thirty seconds",
+        packing.mean_ns,
+        packing.highest_ns,
+        packing.block_count,
+        packing.mean_ns / 30_000,
+    );
+    let freeing = &takes.freeing;
+    let take_count = u64::try_from(takes.elapsed_ns.len()).unwrap();
+    let freeing_ns = freeing.ns_sum / take_count;
+    println!(
+        "{label}, freeing what it was handed took the packing thread {freeing_ns} ns a second, \
+         {} ns over {} batches and {take_count} takes",
+        freeing.ns_sum, freeing.batch_count,
+    );
+    println!(
+        "{label}, a second on both threads costs {} ns, the take's mean, a thirtieth of the \
+         packing's and the freeing a second",
+        mean + u128::from(packing.mean_ns / 30) + u128::from(freeing_ns),
     );
     report_span("the span those takes left", &takes.view);
 }
@@ -749,10 +822,12 @@ fn report_details(view: &View) -> usize {
 /// they take as held.
 fn report_processes(view: &View) -> usize {
     let census = ProcessCensus::of(view);
-    let bytes = census.rows * Payload::ROW_REFERENCE_BYTES + census.distinct * Payload::ROW_BYTES;
+    let bytes = census.rows * Payload::ROW_REFERENCE_BYTES
+        + census.distinct * Payload::ROW_BYTES
+        + census.table_bytes;
 
     println!(
-        "process rows: {}, of them {} shared with the second before",
+        "process rows of the plain seconds: {}, of them {} shared with the second before",
         census.rows, census.shared,
     );
     println!(
@@ -771,6 +846,19 @@ fn report_processes(view: &View) -> usize {
         "process rows as held: {bytes} bytes, {} rows held once",
         census.distinct,
     );
+    // No line below names a figure the gate reads, so a build before packing prints none of
+    // them and the gate refuses nothing.
+    println!(
+        "  {} more read from {} packed blocks, whose process tables take {} bytes",
+        census.packed_rows, census.tables, census.table_bytes,
+    );
+    println!(
+        "Blocks of the span packed {} of {}, kept plain for a bound {} and for the budget {}",
+        view.apps.packed_count(),
+        view.apps.block_count(),
+        view.apps.kept_plain_count(KeptPlain::Bound),
+        view.apps.kept_plain_count(KeptPlain::Budget),
+    );
     bytes
 }
 
@@ -778,6 +866,7 @@ fn report_processes(view: &View) -> usize {
 /// counts.
 #[derive(Default)]
 struct ProcessCensus {
+    /// The rows of the plain seconds, which the counts below the first rows' count compare.
     rows: usize,
     /// The rows the store holds once, however many seconds name them.
     distinct: usize,
@@ -791,6 +880,12 @@ struct ProcessCensus {
     /// The rows held apart from the row of the second before although equal to it in every
     /// reading, whose App index moved.
     index_only: usize,
+    /// The processes read at the seconds of packed blocks, which hold no row of their own.
+    packed_rows: usize,
+    /// The packed blocks, each counted once.
+    tables: usize,
+    /// The bytes the process tables of the packed blocks are charged.
+    table_bytes: usize,
 }
 
 /// A process row of a second and the App index the second gives it.
@@ -801,15 +896,27 @@ impl ProcessCensus {
         let mut census = Self::default();
         let mut before: HashMap<(i32, String), Listed> = HashMap::new();
         let mut now: HashMap<(i32, String), Listed> = HashMap::new();
-        let mut distinct: HashSet<*const ProcessRow> = HashSet::new();
+        let mut distinct: HashSet<usize> = HashSet::new();
+        let mut tables: HashSet<*const super::payload::packed::ProcessTable> = HashSet::new();
         for second in view.apps.iter() {
             let Ok(payload) = &second.processes else {
                 before.clear();
                 continue;
             };
+            // A packed second's processes read their first row in the block, which the rows
+            // held once count, and its changes from the block's table.
+            if let Some(table) = payload.table() {
+                census.packed_rows += payload.len();
+                if tables.insert(Arc::as_ptr(table)) {
+                    census.table_bytes += table.reserved_bytes();
+                }
+                distinct.extend(payload.processes().map(|process| process.row_address()));
+                before.clear();
+                continue;
+            }
             now.clear();
             for (index, row) in payload.iter().enumerate() {
-                distinct.insert(std::ptr::from_ref(row));
+                distinct.insert(std::ptr::from_ref(row).addr());
                 let key = (row.pid, format!("{:?}", row.creation));
                 let listed = (payload.app_index(index), row);
                 census.count(before.get(&key).copied(), listed);
@@ -818,6 +925,7 @@ impl ProcessCensus {
             std::mem::swap(&mut before, &mut now);
         }
         census.distinct = distinct.len();
+        census.tables = tables.len();
 
         census
     }
@@ -964,8 +1072,8 @@ fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
             for details in payload.apps() {
                 digest(details).hash(hasher);
             }
-            for (index, row) in payload.iter().enumerate() {
-                hash_process_row((payload.app_index(index), row), apps, hasher);
+            for process in payload.processes() {
+                hash_process(process, apps, hasher);
             }
         }
         Err(missing) => digest(missing).hash(hasher),
@@ -1011,30 +1119,31 @@ fn hash_sampled(second: &SampledSecond, hasher: &mut DefaultHasher) {
 
 /// Adds every reading of a listed row to `hasher`, with the App of `apps` the row belongs to named
 /// by its identity, so the digest stays the same wherever the store keeps that App's index.
-fn hash_process_row(listed: Listed, apps: &[AppRow], hasher: &mut DefaultHasher) {
-    let (app_index, row) = listed;
-    let app = app_index.map(|index| app_identity(&apps[usize::try_from(index).unwrap()].name));
+fn hash_process(process: ProcessAt<'_>, apps: &[AppRow], hasher: &mut DefaultHasher) {
+    let app = process
+        .app_index()
+        .map(|index| app_identity(&apps[usize::try_from(index).unwrap()].name));
     let facts = (
-        row.pid,
-        row.creation,
+        process.pid(),
+        process.creation(),
         app,
-        row.executable_name().map(|name| &name.bytes),
-        row.program_unavailable,
-        row.app_attribution,
-        row.state,
+        process.executable_name().map(|name| &name.bytes),
+        process.program_unavailable(),
+        process.app_attribution(),
+        process.state(),
     );
     let amounts = [
-        row.cpu_ns(),
-        row.energy_nj(),
-        row.gpu_ns(),
-        row.disk_read_bytes(),
-        row.disk_written_bytes(),
-        row.disk_io_bytes(),
-        row.resident_bytes(),
-        row.footprint_bytes(),
-        row.idle_wakeups(),
-        row.pageins(),
-        row.threads(),
+        process.cpu_ns(),
+        process.energy_nj(),
+        process.gpu_ns(),
+        process.disk_read_bytes(),
+        process.disk_written_bytes(),
+        process.disk_io_bytes(),
+        process.resident_bytes(),
+        process.footprint_bytes(),
+        process.idle_wakeups(),
+        process.pageins(),
+        process.threads(),
     ];
     digest(&(facts, amounts)).hash(hasher);
 }

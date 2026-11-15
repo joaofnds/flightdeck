@@ -19,6 +19,11 @@ mod tests;
 /// nothing but these buffers holds it, so a reading a View holds never changes.
 pub struct Buffers<T> {
     all: Vec<Arc<T>>,
+    /// Whether `release_once` cleared each buffer after it was last written or released, so it
+    /// clears a free buffer once and not at every View the store publishes. Only a write makes a
+    /// buffer held, so a buffer cleared stays as cleared until it is written or released. A
+    /// buffer `make` just made counts as cleared, since nothing was written into it.
+    cleared: Vec<bool>,
     make: fn() -> T,
     /// Where the search for a buffer to write starts, past the one written last, so a buffer
     /// just released is written again last.
@@ -35,7 +40,12 @@ impl<T> Buffers<T> {
             all.push(Arc::new(make()));
         }
 
-        Self { all, make, next: 0 }
+        Self {
+            all,
+            cleared: vec![true; count],
+            make,
+            next: 0,
+        }
     }
 
     /// A buffer that nothing else holds, written by `fill`, or `None` when every buffer is
@@ -78,6 +88,7 @@ impl<T> Buffers<T> {
             unreachable!("the store writes only a buffer nothing else holds");
         };
         fill(buffer);
+        self.cleared[index] = false;
         self.next = (index + 1) % self.all.len();
 
         Arc::clone(&self.all[index])
@@ -86,11 +97,84 @@ impl<T> Buffers<T> {
     /// Clears with `clear` each buffer that nothing else holds, so a buffer waiting to be
     /// written again keeps nothing it held alive.
     pub fn release(&mut self, mut clear: impl FnMut(&mut T)) {
-        for buffer in &mut self.all {
+        assert_eq!(self.cleared.len(), self.all.len());
+        for (buffer, cleared) in self.all.iter_mut().zip(&mut self.cleared) {
             if let Some(buffer) = Arc::get_mut(buffer) {
                 clear(buffer);
+                // `clear` may leave a buffer otherwise than `release_once` does.
+                *cleared = false;
             }
         }
+    }
+
+    /// Clears with `clear` each buffer that nothing else holds and that it has not cleared
+    /// since the buffer was last written or released, so a store whose buffers are mostly free
+    /// pays for each once. `clear` must leave a buffer as clearing it again would.
+    pub(super) fn release_once(&mut self, mut clear: impl FnMut(&mut T)) {
+        assert_eq!(self.cleared.len(), self.all.len());
+        for (buffer, cleared) in self.all.iter_mut().zip(&mut self.cleared) {
+            if *cleared {
+                continue;
+            }
+            if let Some(buffer) = Arc::get_mut(buffer) {
+                clear(buffer);
+                *cleared = true;
+            }
+        }
+    }
+
+    /// Moves out what each buffer holds that nothing else holds and that has not been cleared
+    /// since it was last written or released, at most `count_max` buffers, and leaves each the
+    /// buffer `released` makes from it, which must leave it as clearing it again would. Returns
+    /// what it moved out, which it allocates nothing for where it found nothing, so the caller
+    /// can free it elsewhere.
+    pub(super) fn release_once_batch(
+        &mut self,
+        count_max: usize,
+        mut released: impl FnMut(&T) -> T,
+    ) -> Vec<T> {
+        assert!(count_max > 0);
+        assert_eq!(self.cleared.len(), self.all.len());
+
+        let mut batch = Vec::new();
+        for (buffer, cleared) in self.all.iter_mut().zip(&mut self.cleared) {
+            if batch.len() == count_max {
+                break;
+            }
+            if *cleared {
+                continue;
+            }
+            let Some(buffer) = Arc::get_mut(buffer) else {
+                continue;
+            };
+            if batch.is_empty() {
+                batch.reserve_exact(count_max);
+            }
+            let left = released(buffer);
+            batch.push(std::mem::replace(buffer, left));
+            *cleared = true;
+        }
+
+        batch
+    }
+
+    /// Whether a buffer that nothing else holds has not been cleared since it was last written
+    /// or released.
+    #[cfg(test)]
+    pub(super) fn releasable(&self) -> bool {
+        self.all
+            .iter()
+            .zip(&self.cleared)
+            .any(|(buffer, &cleared)| !cleared && Arc::strong_count(buffer) == 1)
+    }
+
+    /// The buffers that nothing else holds.
+    #[cfg(test)]
+    pub(super) fn unheld(&self) -> impl Iterator<Item = &T> {
+        self.all
+            .iter()
+            .filter(|buffer| Arc::strong_count(buffer) == 1)
+            .map(AsRef::as_ref)
     }
 
     /// How many buffers there are, held or not.
@@ -138,6 +222,11 @@ impl<T> Span<T> {
 
     pub(super) fn release(&mut self, clear: impl FnMut(&mut T)) {
         self.buffers.release(clear);
+    }
+
+    /// Clears with `clear` each buffer nothing else holds once, as `Buffers::release_once` does.
+    pub(super) fn release_once(&mut self, clear: impl FnMut(&mut T)) {
+        self.buffers.release_once(clear);
     }
 
     /// A span of at most `capacity` readings over `buffers`, which holds more buffers than

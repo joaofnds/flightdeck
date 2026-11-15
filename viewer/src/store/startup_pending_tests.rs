@@ -532,7 +532,10 @@ impl PendingStage {
         let payload = apps.processes.as_ref().unwrap();
         assert_eq!(payload.previous, Some(previous.stamp));
         assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
-        let process = payload.iter().find(|process| process.pid == 7).unwrap();
+        let process = payload
+            .processes()
+            .find(|process| process.pid() == 7)
+            .unwrap();
         assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
         assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
         let ranks = apps.ranks().unwrap();
@@ -687,7 +690,10 @@ fn assert_recent_resident(apps: &AppsSecond, observation: &Observation) {
     assert_eq!(apps.missing, None);
     let payload = apps.processes.as_ref().unwrap();
     assert_eq!(payload.selected, *observation);
-    let process = payload.iter().find(|process| process.pid == 7).unwrap();
+    let process = payload
+        .processes()
+        .find(|process| process.pid() == 7)
+        .unwrap();
     assert_eq!(process.resident_bytes(), crate::apps::Amount::Known(11));
     assert_eq!(process.footprint_bytes(), crate::apps::Amount::Known(12));
     let ranks = apps.ranks().unwrap();

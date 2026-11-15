@@ -14,6 +14,7 @@ mod key_order;
 mod machine_stretch;
 mod native;
 mod native_acceptance;
+mod packing;
 mod payload;
 mod query;
 mod recording;
@@ -51,6 +52,7 @@ mod retention_tests;
 mod stretch_tests;
 
 use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,13 +66,14 @@ pub use attribution::{
     ResidentOther, Totals,
 };
 use block::Block;
-pub use block::{AppAt, AppsCursor, AppsSpan, ProcessAt, Processes, Second, Seconds};
+pub use block::{AppAt, AppsCursor, AppsSpan, Processes, Second, Seconds};
 pub use buffers::{Buffers, Mailbox, Span, Waker};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
 pub use machine_stretch::{Category, Gauge, MachinePlace, MachineStretch, Rate, pressure_level};
 pub use model::summary::{Mark, Reduction};
 pub use native::AppMetadata;
-pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
+pub use payload::packed::KeptPlain;
+pub use payload::{AppDetails, Payload, ProcessAt, ProcessName, ProcessRow};
 pub use query::{
     HistoryError, HistoryResult, QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome,
     QueryReadiness, QueryReply, QueryRequest, QuerySecond, QuerySelection, QuerySubmitError,
@@ -298,7 +301,8 @@ impl Store {
     pub fn start_with_budget(root: &Path, budget: Arc<ByteBudget>) -> io::Result<Self> {
         let shared = Arc::new(Shared::starting());
         let root = root.to_owned();
-        let mut held = Held::new(root.clone(), budget);
+        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        let mut held = Held::new(root.clone(), budget, store_end);
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
             .map_err(io::Error::other)?;
@@ -309,6 +313,14 @@ impl Store {
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
+                let packing = match packing_end.start(thread::current()) {
+                    Ok(packing) => packing,
+                    Err(error) => {
+                        thread_shared.queries.close();
+                        eprintln!("flightdeck packing thread: {error}");
+                        return;
+                    }
+                };
                 let observation = observation.enter();
                 // A ring's mapping stays on the thread that maps it.
                 let mut ring = make_ring(&root, &held.payload_budget);
@@ -317,11 +329,18 @@ impl Store {
                 if let Err(error) = started {
                     thread_shared.queries.close();
                     eprintln!("flightdeck store startup: {error}");
-                    return;
+                } else {
+                    run(&root, &mut held, &mut ring, &thread_shared, &operation);
+                    thread_shared.queries.close();
                 }
-                run(&root, &mut held, &mut ring, &thread_shared, &operation);
-                thread_shared.queries.close();
                 drop(observation);
+                // The store's end of the queues goes with what the store holds, which ends the
+                // packing thread's loop.
+                drop(ring);
+                drop(held);
+                if let Err(panic) = packing.join() {
+                    std::panic::resume_unwind(panic);
+                }
             })?;
 
         Ok(Self {
@@ -529,10 +548,34 @@ impl Held {
     /// As `without_recording`, for a store that holds samples under `budget`.
     #[cfg(test)]
     fn without_recording_with_payload(budget: Arc<ByteBudget>) -> Self {
-        Self::new(PathBuf::new(), budget)
+        Self::keeping_packing_end(PathBuf::new(), budget)
     }
 
-    fn new(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
+    /// A store with no recording behind it, for samples under `budget`, whose blocks the
+    /// packing thread packs on a thread of its own, which wakes the test's thread with each
+    /// answer and ends once the store is gone.
+    #[cfg(test)]
+    fn with_packing_thread(budget: Arc<ByteBudget>) -> Self {
+        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        // The thread ends once the store's end is gone, so the test lets go of its handle.
+        drop(packing_end.start(thread::current()).unwrap());
+
+        Self::new(PathBuf::new(), budget, store_end)
+    }
+
+    /// A store as `new` makes it, which keeps the packing thread's end for the test to run.
+    #[cfg(test)]
+    fn keeping_packing_end(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
+        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        let mut held = Self::new(root, budget, store_end);
+        held.apps.keep_packing_end(packing_end);
+
+        held
+    }
+
+    /// The store's state over the recording at `root`, holding the store's end of the queues
+    /// to the packing thread.
+    fn new(root: PathBuf, budget: Arc<ByteBudget>, packing: packing::StoreEnd) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
         let apps = Buffers::new(
             SECONDS_MAX + block::BLOCK_DEPARTED_MAX + SECONDS_HELD_MAX,
@@ -552,6 +595,7 @@ impl Held {
             ring_complete: false,
             full_detail_evicted_through_ns: None,
         });
+        let apps = block::BlockSpan::new(SECONDS_MAX, apps, packing);
 
         Self {
             retention: Reader::of(root),
@@ -568,7 +612,7 @@ impl Held {
                 Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, SampledSecond::empty),
             ),
             span: Span::new(SECONDS_MAX, seconds),
-            apps: block::BlockSpan::new(SECONDS_MAX, apps),
+            apps,
             earlier: Span::new(EARLIER_MAX, earlier),
             stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
             owed: None,
@@ -693,7 +737,8 @@ impl Held {
         };
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
-        self.apps.push(second.wall_ns, |buffer| {
+        let awaiting = matches!(&apps, TickApps::Awaiting(_));
+        self.apps.push(second.wall_ns, awaiting, |buffer| {
             buffer.take(apps, previous.as_deref());
             if buffer.observation.is_none() {
                 buffer.observation = Some(tick);
@@ -712,30 +757,26 @@ impl Held {
         }
     }
 
+    /// Clears what nothing else holds, each buffer once until it is written again, so a publish
+    /// pays only for the buffers let go since the last. The App buffers it frees none of: the
+    /// exchange hands what they held to the packing thread.
     fn release_views(&mut self) {
-        self.views.release(|view| {
+        self.views.release_once(|view| {
             view.seconds.clear();
             view.apps.clear();
             view.earlier.clear();
             view.stretches.clear();
             view.sampled.clear();
         });
-        self.apps.release(|apps| {
-            if apps.apps.reserved_bytes() == 0 {
-                if apps.apps.capacity() > 0 {
-                    apps.take(TickApps::Missing(&Missing::Unread), None);
-                    return;
-                }
-            }
-            *apps = AppsSecond::default();
-        });
+        // What a View let go of goes to the packing thread, which frees it.
+        self.apps.exchange();
         self.span
-            .release(|second| *second = MachineSecond::default());
+            .release_once(|second| *second = MachineSecond::default());
         self.earlier
-            .release(|second| *second = MachineSecond::default());
-        self.stretches.release();
+            .release_once(|second| *second = MachineSecond::default());
+        self.stretches.release_once();
         self.sampled
-            .release(|second| *second = SampledSecond::empty());
+            .release_once(|second| *second = SampledSecond::empty());
     }
 
     /// Lets go of what the retention period no longer covers, oldest first, so the next View
@@ -1101,6 +1142,13 @@ fn startup_staged_refused(
     thread::park_timeout(STARTUP_RETRY_WAIT);
 }
 
+/// What the store's thread does before it parks for a hidden window while it starts, as
+/// `run_pause` does once it has started.
+fn startup_staged_pause(held: &mut Held, ring: &mut Ring, shared: &Shared) {
+    run_queries(held, ring, &shared.queries);
+    held.apps.exchange();
+}
+
 fn startup_staged_turn(
     input: &recording::staged::Input<'_>,
     held: &mut Held,
@@ -1114,7 +1162,7 @@ fn startup_staged_turn(
         // A Store paused while it starts answers each query before it parks, as a started Store
         // does when it pauses, or a page that asks before the window shows again waits out its
         // whole bound.
-        run_queries(held, ring, &shared.queries);
+        startup_staged_pause(held, ring, shared);
         shared.paused.store(true, Ordering::Release);
         thread::park();
         shared.paused.store(false, Ordering::Release);
@@ -1141,7 +1189,10 @@ fn startup_staged_turn(
             return Ok(false);
         }
     }
-    match startup.advance(input, held, ring)? {
+    let advance = startup.advance(input, held, ring)?;
+    // A turn of the launch exchanges with the packing thread, as a step of the store does.
+    held.apps.exchange();
+    match advance {
         Advance::Progress => *blocked = None,
         Advance::Blocked => {
             *blocked = Some(startup_capacity(held, input.budget));
@@ -1238,64 +1289,81 @@ fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
 fn run(root: &Path, held: &mut Held, ring: &mut Ring, shared: &Shared, operation: &Operation) {
     let mut waited = Ok(());
     for _ in 0..STEPS_MAX {
-        if shared.stop.load(Ordering::Acquire) {
+        if run_turn(root, held, ring, shared, operation, &mut waited).is_break() {
             return;
         }
-        if !shared.active.load(Ordering::Acquire) {
-            run_answers(held, ring, shared);
-            shared.paused.store(true, Ordering::Release);
-            thread::park();
-            shared.paused.store(false, Ordering::Release);
-            continue;
-        }
-        held.expire();
-        if shared.catch_up.load(Ordering::Acquire) {
-            shared.catching_up.store(true, Ordering::Release);
-        }
-        if shared.catch_up.swap(false, Ordering::AcqRel) {
-            match refresh(root, held, ring, shared, operation) {
-                Ok(true) => {
-                    waited = Ok(());
-                }
-                Ok(false) => {
-                    shared.catch_up.store(true, Ordering::Release);
-                    run_answers(held, ring, shared);
-                    thread::park_timeout(WAIT);
-                    continue;
-                }
-                Err(error) => {
-                    eprintln!("flightdeck store catch-up: {error}");
-                    return;
-                }
-            }
-        }
-        let publication = if shared.catching_up.load(Ordering::Acquire) {
-            Publication::Complete
-        } else {
-            Publication::Progress
-        };
-        if let Err(error) = step(held, ring, waited, &shared.mailbox, operation, publication) {
-            eprintln!("flightdeck store publication: {error}");
-            return;
-        }
-        // After the step, since a query that came with a new reading in the ring would otherwise
-        // be told the Store has not caught up, and ask again a poll later.
-        run_serve(held, ring, shared);
-        if run_retry(held, ring, shared) {
-            waited = Ok(());
-            continue;
-        }
-        run_ready(held, ring, shared);
-        run_owed(root, held, &shared.mailbox);
-        waited = if held.failure.is_some() {
-            // A ring that failed may fail again at once, so the thread sleeps instead.
-            thread::sleep(WAIT);
-            Ok(())
-        } else {
-            run_wait(ring, shared)
-        };
     }
     unreachable!("the store thread steps until the store is dropped");
+}
+
+/// One turn of the store's thread, after which it stops where the turn breaks. `waited` is how
+/// the last wait on the ring ended, which the turn's step reports and the turn replaces.
+fn run_turn(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    operation: &Operation,
+    waited: &mut Result<(), Failure>,
+) -> ControlFlow<()> {
+    if shared.stop.load(Ordering::Acquire) {
+        return ControlFlow::Break(());
+    }
+    if !shared.active.load(Ordering::Acquire) {
+        run_pause(held, ring, shared);
+        shared.paused.store(true, Ordering::Release);
+        thread::park();
+        shared.paused.store(false, Ordering::Release);
+        return ControlFlow::Continue(());
+    }
+    held.expire();
+    if shared.catch_up.load(Ordering::Acquire) {
+        shared.catching_up.store(true, Ordering::Release);
+    }
+    if shared.catch_up.swap(false, Ordering::AcqRel) {
+        match refresh(root, held, ring, shared, operation) {
+            Ok(true) => {
+                *waited = Ok(());
+            }
+            Ok(false) => {
+                shared.catch_up.store(true, Ordering::Release);
+                run_answers(held, ring, shared);
+                thread::park_timeout(WAIT);
+                return ControlFlow::Continue(());
+            }
+            Err(error) => {
+                eprintln!("flightdeck store catch-up: {error}");
+                return ControlFlow::Break(());
+            }
+        }
+    }
+    let publication = if shared.catching_up.load(Ordering::Acquire) {
+        Publication::Complete
+    } else {
+        Publication::Progress
+    };
+    if let Err(error) = step(held, ring, *waited, &shared.mailbox, operation, publication) {
+        eprintln!("flightdeck store publication: {error}");
+        return ControlFlow::Break(());
+    }
+    // After the step, since a query that came with a new reading in the ring would otherwise
+    // be told the Store has not caught up, and ask again a poll later.
+    run_serve(held, ring, shared);
+    if run_retry(held, ring, shared) {
+        *waited = Ok(());
+        return ControlFlow::Continue(());
+    }
+    run_ready(held, ring, shared);
+    run_owed(root, held, &shared.mailbox);
+    *waited = if held.failure.is_some() {
+        // A ring that failed may fail again at once, so the thread sleeps instead.
+        thread::sleep(WAIT);
+        Ok(())
+    } else {
+        run_wait(ring, shared)
+    };
+
+    ControlFlow::Continue(())
 }
 
 /// Waits on the ring, leaving where a consumer can reach it what ends that wait.
@@ -1317,6 +1385,14 @@ fn run_serve(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     shared
         .queries
         .serve(held, checked.as_ref(), &held.payload_budget);
+}
+
+/// What the store's thread does before it parks for a hidden window: it answers the queries
+/// and exchanges with the packing thread, whose next answer wakes it, so a hidden store goes on
+/// until nothing is out or waits.
+fn run_pause(held: &mut Held, ring: &mut Ring, shared: &Shared) {
+    run_answers(held, ring, shared);
+    held.apps.exchange();
 }
 
 fn run_answers(held: &mut Held, ring: &mut Ring, shared: &Shared) {
@@ -1508,6 +1584,24 @@ enum Publication {
 /// over a View where anything changed. `waited` is how the wait before the step went.
 /// The return value reports native admission.
 fn step(
+    held: &mut Held,
+    ring: &mut Ring,
+    waited: Result<(), Failure>,
+    mailbox: &Mailbox<View>,
+    operation: &Operation,
+    publication: Publication,
+) -> persistence::Result<NativeRead> {
+    let progress = step_take(held, ring, waited, mailbox, operation, publication)?;
+    // The exchange after the publish keeps a new second's way to the screen as short as it was,
+    // and runs whether or not the step published.
+    held.apps.exchange();
+
+    Ok(progress)
+}
+
+/// The work of `step` before it exchanges with the packing thread: takes in what the ring
+/// published and publishes.
+fn step_take(
     held: &mut Held,
     ring: &mut Ring,
     waited: Result<(), Failure>,

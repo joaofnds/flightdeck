@@ -42,8 +42,13 @@ impl AppsSecond {
         let index =
             usize::try_from(detail.app_index).map_err(|_| Error::Bound("live App index"))?;
         let app = self.apps.get(index).ok_or(Error::Bound("live App index"))?;
-        let mut result =
-            presentation_members(&header, payload, Some(detail.app_index), detail.page)?;
+        let mut result = presentation_members(
+            &header,
+            payload,
+            &self.apps,
+            Some(detail.app_index),
+            detail.page,
+        )?;
         result["app"] = json::app(
             &app.presentation(payload.app(index)),
             index,
@@ -57,7 +62,7 @@ impl AppsSecond {
     pub fn ungrouped_page(&self, page: Page) -> Result<Value> {
         let (header, payload) = self.presentation()?;
 
-        presentation_members(&header, payload, None, page)
+        presentation_members(&header, payload, &self.apps, None, page)
     }
 
     pub(crate) fn presentation(&self) -> Result<(Header, &Payload)> {
@@ -106,15 +111,16 @@ impl AppsSecond {
 fn presentation_members(
     header: &Header,
     payload: &Payload,
+    apps: &[AppRow],
     app_index: Option<u32>,
     page: Page,
 ) -> Result<Value> {
-    let processes = payload.members(app_index);
+    let processes = payload.members(app_index, apps);
     let count = processes.clone().count();
 
     json::processes_page(
         header,
-        processes.map(|process| process.presentation(app_index)),
+        processes.map(|process| process.presentation()),
         count,
         page,
     )

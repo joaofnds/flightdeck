@@ -306,7 +306,19 @@ struct GuardStage {
 
 impl GuardStage {
     fn new(fixture: &crate::live::identity_fixture::Fixture, budget: &Arc<ByteBudget>) -> Self {
-        let mut held = Held::without_recording_with_payload(Arc::clone(budget));
+        Self::over(
+            Held::without_recording_with_payload(Arc::clone(budget)),
+            fixture,
+            budget,
+        )
+    }
+
+    /// A stage of `held`, loading the recording of `fixture` under `budget`.
+    fn over(
+        mut held: Held,
+        fixture: &crate::live::identity_fixture::Fixture,
+        budget: &Arc<ByteBudget>,
+    ) -> Self {
         held.startup = crate::store::StartupState::Loading;
         Self {
             operation: Arc::new(crate::Cancellation::default())

@@ -82,7 +82,7 @@ fn visit<'view>(
     for apps in view.apps.seconds() {
         if let Ok(processes) = apps.processes() {
             for process in processes.iter() {
-                if let Some(name) = process.row().executable_name() {
+                if let Some(name) = process.executable_name() {
                     take(name)?;
                 }
             }

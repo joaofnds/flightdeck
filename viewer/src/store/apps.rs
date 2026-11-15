@@ -95,6 +95,10 @@ pub(super) enum TickApps<'tick> {
     /// The Apps a loader read from the tick's sealed minute, which the store holds in place of
     /// the buffer it takes them into.
     Loaded(&'tick mut AppsSecond),
+    /// The header of a second a launch takes before it installs the second's Apps, which the
+    /// store holds as it holds `Loaded`, and whose block waits to be packed only once the launch
+    /// has installed them or installs no more.
+    Awaiting(&'tick mut AppsSecond),
     /// What a loader added up of the Apps of the tick and of the seconds of its stretch and run
     /// after it, which the store adds to the stretch and holds none of at the second.
     Folded(&'tick Folded),
@@ -143,7 +147,7 @@ impl AppsSecond {
             TickApps::Missing(missing) => self.clear(missing.clone()),
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
             TickApps::Folded(_) => self.clear(Missing::Unread),
-            TickApps::Loaded(loaded) => {
+            TickApps::Loaded(loaded) | TickApps::Awaiting(loaded) => {
                 assert_eq!(
                     loaded.apps.reserved_bytes(),
                     loaded.apps.capacity() * size_of::<AppRow>()

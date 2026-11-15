@@ -7,7 +7,7 @@ use collector::ring::{
 };
 
 use super::name_tests::native_sample;
-use super::{AppIndex, Payload, ProcessNames, ProcessRow};
+use super::{AppIndex, Payload, ProcessNames, ProcessRow, ProcessRows};
 use crate::apps::Amount;
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
@@ -147,13 +147,13 @@ fn payloads_that_place_a_process_in_another_app_differ() {
     let budget = Arc::new(ByteBudget::new(64 * 1024));
     let names = ProcessNames::new(sample.processes().len(), &budget).unwrap();
     let (payload, _additions) = Payload::capture_with_names(&sample, &names, None).unwrap();
-    let mut moved = payload.app_indexes.clone();
+    let mut moved = app_indexes(&payload).to_vec();
     moved[0] = match moved[0].get() {
         Some(_) => AppIndex::NONE,
         None => AppIndex::of(Some(0)),
     };
 
-    let same = holding(&payload, payload.app_indexes.clone(), &budget);
+    let same = holding(&payload, app_indexes(&payload).to_vec(), &budget);
     let other = holding(&payload, moved, &budget);
 
     assert_eq!(payload, same);
@@ -250,11 +250,22 @@ fn holding(payload: &Payload, app_indexes: Vec<AppIndex>, budget: &Arc<ByteBudge
     Payload {
         selected: payload.selected,
         previous: payload.previous,
-        rows: payload.rows.clone(),
-        app_indexes,
+        rows: ProcessRows::Plain {
+            rows: payload.plain_rows().to_vec(),
+            app_indexes,
+        },
         apps: payload.apps.clone(),
         reservation: budget.reserve(payload.bytes()).unwrap(),
     }
+}
+
+/// The App index of each row of the plain `payload`, at the row's place.
+fn app_indexes(payload: &Payload) -> &[AppIndex] {
+    let ProcessRows::Plain { app_indexes, .. } = &payload.rows else {
+        panic!("the payload is plain");
+    };
+
+    app_indexes
 }
 
 /// The App index `payload` gives process `pid`.
@@ -284,6 +295,18 @@ fn moving(pid: i32, tick: u64) -> Process {
             ..idle
         },
         task: task(1 + i32::from(tick >= 11)),
+    }
+}
+
+/// A process of pid `pid` whose user time is `user_ns`.
+pub(in crate::store) fn process(pid: i32, user_ns: u64) -> Process {
+    Process {
+        pid,
+        usage: Usage {
+            user_ns,
+            ..crate::store::startup_tests::usage(0)
+        },
+        task: task(1),
     }
 }
 

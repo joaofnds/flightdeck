@@ -324,7 +324,7 @@ fn pages(second: &AppsSecond) -> Vec<Value> {
             .processes
             .as_ref()
             .unwrap()
-            .members(Some(app_index))
+            .members(Some(app_index), &second.apps)
             .count();
         for offset in (0..count).step_by(512) {
             pages.push(
