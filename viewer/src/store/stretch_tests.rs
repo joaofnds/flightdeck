@@ -403,14 +403,32 @@ fn a_launch_adds_up_the_apps_it_owes_a_stretch_across_two_minutes() {
 }
 
 #[test]
-fn a_launch_adds_up_the_apps_it_owes_stretches_several_loaders_decode() {
-    // Goal: the Apps a store adds up after it starts reach each stretch whichever loader decodes
-    // the stretch's minutes. Method: seal a few ticks of run minutes 0 to 3 and 21, so the
-    // stretch of wall seconds 60 to 69 crosses minutes 0 and 1, both older than the seconds whose
-    // Apps the store holds one by one, and the stretch of wall seconds 180 to 189 crosses minute
-    // 2, which is older, and minute 3, whose Apps the store holds one by one. Launch a store, add
-    // up the Apps it owes, and compare its stretches with a whole load's.
+fn a_launch_adds_up_the_apps_it_owes_stretches_one_loader_decodes_across_two_minutes() {
+    // Goal: the Apps a store adds up after it starts reach a stretch whose two minutes one
+    // loader decodes. Method: seal a few ticks of run minutes 0 to 3 and 21, which the loaders
+    // decode as minutes 0 and 1, minutes 2 and 3, and minute 21, so the stretch of wall seconds
+    // 60 to 69 crosses minutes 0 and 1, both older than the seconds whose Apps the store holds
+    // one by one, and the stretch of wall seconds 180 to 189 crosses minute 2, which is older,
+    // and minute 3, whose Apps the store holds one by one. Launch a store, add up the Apps it
+    // owes, and compare its stretches with a whole load's.
+    let batches = recording::load_batches_split(&[1; 5]);
+    assert_eq!(batches, [0..2, 2..4, 4..5]);
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (2, 55..60), (3, 0..6), (21, 0..5)]);
+
+    assert_owed_apps_add_up(&fixture);
+}
+
+#[test]
+fn a_launch_adds_up_the_apps_it_owes_a_stretch_two_loaders_decode() {
+    // Goal: the Apps a store adds up after it starts reach a stretch whose two minutes two
+    // loaders decode, the later a minute whose Apps the store holds one by one. Method: seal a
+    // few ticks of run minutes 1, 2, 3 and 21, which the loaders decode as minutes 1 and 2 and
+    // minutes 3 and 21, so the stretch of wall seconds 180 to 189 crosses minute 2, which is
+    // older, and minute 3. Launch a store, add up the Apps it owes, and compare its stretches
+    // with a whole load's.
+    let batches = recording::load_batches_split(&[1; 4]);
+    assert_eq!(batches, [0..2, 2..4]);
+    let fixture = recording_of(&[(1, 0..5), (2, 55..60), (3, 0..6), (21, 0..5)]);
 
     assert_owed_apps_add_up(&fixture);
 }

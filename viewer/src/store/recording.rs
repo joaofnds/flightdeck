@@ -557,8 +557,10 @@ pub(super) fn sample_second(
     second
 }
 
-/// The threads that decode the loaded hour's sealed minutes at once.
-const LOADERS_MAX: usize = 6;
+/// The threads that decode the Apps a launch owes the store's stretches at once. One more ends
+/// the pass sooner and takes the footprint higher while it runs, and the read benchmark's
+/// `decoding_the_owed_apps_costs` measures both.
+const LOADERS_MAX: usize = 3;
 
 /// The ticks a sealed minute holds where none was missed.
 const TICKS_PER_MINUTE: usize = 60;

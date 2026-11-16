@@ -1862,18 +1862,19 @@ mod when_the_recording_holds_sealed_minutes {
     #[test]
     fn each_loader_decodes_about_an_even_share_of_the_hour() {
         // Goal: the minutes whose Apps a load reads, such as the newest at launch, do not fall
-        // on one loader, since the load ends once the slowest loader is done. Method: split the
-        // loaded hour's 44 older minutes, costing one each, and the live span's 18, costing
-        // three, and compare each batch's cost with an even share of 17.
+        // on one loader, since the load ends once the slowest loader is done. Method: split 44
+        // minutes costing one each and 18 costing three, and compare each of the three batches'
+        // cost with an even share of 33.
         let mut costs = vec![1; 44];
         costs.extend([3; 18]);
 
         let batches = crate::store::recording::load_batches_split(&costs);
 
+        assert_eq!(batches.len(), 3);
         let minutes: Vec<usize> = batches.iter().flat_map(Clone::clone).collect();
         assert_eq!(minutes, (0..62).collect::<Vec<_>>());
         for batch in batches {
-            assert!(costs[batch].iter().sum::<usize>() < 17 + 3);
+            assert!(costs[batch].iter().sum::<usize>() < 33 + 3);
         }
     }
 

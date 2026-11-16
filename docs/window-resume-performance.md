@@ -259,6 +259,14 @@ executables have the SHA-256 identities
 `7fd29af824e30bc5d0302cf2790e8239706ecf4965589607a4db66f93d45a098` for `d9391c3` and
 `120c25f4b488562edee23c6fa8a4acc27643d51aab4def7394fa48aac2583cad` for the base.
 
+The pass decodes the older minutes' Apps on three loaders, where those launches ran six. One
+more ends the pass sooner and takes the footprint higher while it runs. `just read-benchmark`
+runs the loaders alone, with no Store taking what they hand over. On an hour of an Apple M5
+Pro at about 860 processes, on 2026-11-16, six loaders decoded it in 169 ms and took the
+process's footprint from 7 MB to 168 MB, and three in 252 ms and to 113 MB, the lowest of five
+runs of each in turn. In three runs of each, two loaders read 352 ms and 91 MB, and one
+655 ms and 75 MB.
+
 The Store reserves the stretches when it starts: 375 buffers of 2,048 rows, whatever the hour
 holds, which a page holds in RAM only once a stretch writes to it. A row took 152 bytes when
 this was measured, 116.7 MB (111.3 MiB) in all. Since each row adds up GPU time too it takes
