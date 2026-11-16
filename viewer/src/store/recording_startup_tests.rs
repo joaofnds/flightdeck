@@ -1,11 +1,12 @@
 use super::*;
 use crate::recording::read_machine;
+use crate::store::SampledSecond;
 
 #[path = "startup_boundary_tests.rs"]
 mod boundaries;
 
-#[path = "startup_pending_tests.rs"]
-mod pending;
+#[path = "startup_turn_tests.rs"]
+mod turn;
 
 #[test]
 fn staged_machine_work_classes_a_refused_projection_apart_from_its_reduction() {
@@ -177,76 +178,98 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
 }
 
 #[test]
-fn sealed_candidate_survives_pool_denial_without_repeating_accepted_app_work() {
-    // Goal: an admitted sealed result survives a real retained pool owner until installation.
-    // Only an older second waits now, and it keeps only its resident ranks, so the previous
-    // publication, elapsed time, disk bytes, disk rate and process rows can no longer be asked
-    // of the stalled second. They are asked of the newest recent second, which installs before
-    // the stall, since a recent second never waits.
-    // Method: pin the sampled buffer an older second needs, stall its install twice, then
-    // release the owner, finish, and read the stalled second and the newest recent one.
-    let fixture = crate::store::startup_tests::primary_fixture();
+fn the_owed_pass_ranks_an_older_second_while_views_hold_every_sampled_buffer() {
+    // Goal: Views that hold every sampled buffer stop no ranking of an older second and go on
+    // reading the second as they held it, while the launch derives none of its Apps.
+    // Method: over minutes sealed with their App tables, hold the sampled buffer the first older
+    // second was written into, finish the launch, publish a View that holds the other one, then
+    // run the pass on what the launch owes and read the older second in the store and the View.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let fixture = crate::store::startup_tests::primary_fixture_derived(&derive);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
     let mut stage = GuardStage::new(&fixture, &budget);
     let pinned = stage.primary_with_no_sampled_spare(&fixture, &budget);
-    let source_generation = stage.held.source_generation;
-    let accepted = stage.accepted();
     let identity = stage.held.sampled.get(0).unwrap().observation;
-
-    stage.block(&fixture, &budget);
-    assert_eq!(stage.accepted(), accepted);
-    assert!(matches!(
-        stage.advance(&fixture, &budget).unwrap(),
-        Advance::Blocked
-    ));
-    assert_eq!(stage.accepted(), accepted);
-    assert_eq!(app_work(&trace, &identity), 1);
-    drop(pinned);
     stage.complete(&fixture, &budget);
+    assert_eq!(app_work(&trace, &identity), 0);
+    let view = crate::store::startup_tests::published_view(&mut stage.held);
+    assert_eq!(stage.held.sampled.free(), 0);
+    let owed = stage.held.owed.take().unwrap();
 
-    assert_eq!(stage.held.source_generation, source_generation);
-    assert!(stage.held.startup == crate::store::StartupState::Complete);
-    assert_eq!(app_work(&trace, &identity), 1);
+    crate::store::run_owed_add(&fixture.root, &mut stage.held, &owed);
+
     assert_installed_sample(&stage.held, &identity);
-    let ranks = assert_newest_recent_second(&stage.held);
-    drop((stage, ranks, scope));
+    assert_eq!(view.sampled[0].observation, identity);
+    assert_eq!(view.sampled[0].ranks(), Err(&Missing::Unread));
+    assert_eq!(app_work(&trace, &identity), 0);
+    drop((pinned, view, stage, scope));
     assert_eq!(budget.used(), 0);
 }
 
-/// That the newest recent second, publication 6, holds the rows and rates its second before,
-/// publication 5, gives it, and returns its ranks.
-fn assert_newest_recent_second(held: &Held) -> crate::live_app_response::Ranks {
-    let apps = held.apps.get(1).unwrap();
-    assert_eq!(apps.observation.unwrap().stamp.publication, 6);
-    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
-    let payload = apps.processes.as_ref().unwrap();
-    assert_eq!(payload.previous.unwrap().publication, 5);
-    let process = payload.iter().find(|process| process.pid == 7).unwrap();
-    assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
-    assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
-    assert_eq!(process.resident_bytes(), crate::apps::Amount::Known(11));
-    assert_eq!(process.footprint_bytes(), crate::apps::Amount::Known(12));
-    let ranks = apps.ranks().unwrap();
-    let disk = ranks
-        .metrics
-        .iter()
-        .find(|rank| rank.metric == crate::live_app_response::Metric::Disk)
-        .unwrap();
-    let app = disk
-        .entries
-        .iter()
-        .find(|entry| entry.app.bytes.as_slice() == b"/Apps/Current.app")
-        .unwrap();
-    assert_eq!(app.amount, 60);
-    assert!((app.rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
+#[test]
+fn the_owed_pass_leaves_an_older_second_the_budget_refuses_without_ranks() {
+    // Goal: an older second whose rankings the budget refuses says so, rather than that nothing
+    // read it, and the store holds no bytes for it once it lets the second go.
+    // Method: over minutes sealed with their App tables, finish the launch, hold every byte the
+    // budget has left, run the pass on what the launch owes and read the older second, then
+    // drop the store and the hold.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let fixture = crate::store::startup_tests::primary_fixture_derived(&derive);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut stage = GuardStage::new(&fixture, &budget);
+    stage.hold_two_recent_seconds_and_one_older();
+    stage.primary(&fixture, &budget);
+    stage.complete(&fixture, &budget);
+    let owed = stage.held.owed.take().unwrap();
+    let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
 
-    ranks
+    crate::store::run_owed_add(&fixture.root, &mut stage.held, &owed);
+
+    let sample = stage.held.sampled.get(0).unwrap();
+    assert_eq!(sample.ranks(), Err(&Missing::Budget));
+    drop((lease, stage));
+    assert_eq!(budget.used(), 0);
 }
 
-/// That the older second `identity` holds its Apps' ranks, resident memory among them.
+#[test]
+fn the_owed_pass_keeps_the_rankings_a_sampled_second_holds_already() {
+    // Goal: the pass that adds the Apps the launch owes leaves the rankings of a second the store
+    // sampled with its Apps installed, even where the budget would refuse them anew.
+    // Method: over minutes sealed with their App tables, finish the launch over two recent
+    // seconds, read a native tick that moves the older of them out of the span with its
+    // rankings, hold every byte the budget has left, then run the pass and read that second.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let mut fixture = crate::store::startup_tests::primary_fixture_derived(&derive);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut stage = GuardStage::new(&fixture, &budget);
+    stage.hold_two_recent_seconds_and_one_older();
+    stage.primary(&fixture, &budget);
+    stage.complete(&fixture, &budget);
+    fixture.publish_with_usage(1130, &crate::store::startup_tests::usage(122));
+    crate::store::native_acceptance::read_native(
+        &mut stage.held,
+        &mut stage.ring,
+        &stage.operation,
+    )
+    .unwrap();
+    let sample = stage.held.sampled.newest().unwrap();
+    assert_eq!(sample.observation.stamp.publication, 5);
+    assert!(sample.ranks().is_ok());
+    let owed = stage.held.owed.take().unwrap();
+    let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
+
+    crate::store::run_owed_add(&fixture.root, &mut stage.held, &owed);
+
+    let sample = stage.held.sampled.newest().unwrap();
+    assert_eq!(sample.observation.stamp.publication, 5);
+    assert!(sample.ranks().is_ok());
+    drop((lease, stage));
+    assert_eq!(budget.used(), 0);
+}
+
 fn assert_installed_sample(held: &Held, identity: &Observation) {
     let sample = held.sampled.get(0).unwrap();
     assert_eq!(sample.observation, *identity);
@@ -265,20 +288,27 @@ fn assert_installed_sample(held: &Held, identity: &Observation) {
 }
 
 #[test]
-fn sealed_candidate_rejects_a_changed_witness_before_installation() {
-    // Goal: a pending admitted sealed result cannot certify a changed source.
-    // Method: stall an older install with a real sampled pool owner, change its seal, then
-    // release the owner.
+fn a_changed_witness_is_refused_before_the_history_completes() {
+    // Goal: a seal that changes while the history is blocked cannot certify the launch.
+    // Method: over a live span that reaches into the minute before the selected one, hold every
+    // byte the budget has left once the launch is Primary, change that minute's seal, then let go
+    // of the bytes and go on.
     let fixture = crate::store::startup_tests::primary_fixture();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
-    let pinned = stage.primary_with_no_sampled_spare(&fixture, &budget);
+    stage.held.span = crate::store::Span::new(
+        3,
+        crate::store::Buffers::new(4, crate::store::MachineSecond::default),
+    );
+    stage.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(3);
+    stage.primary(&fixture, &budget);
+    let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
     stage.block(&fixture, &budget);
     let accepted = stage.accepted();
     let source_generation = stage.held.source_generation;
     let marker = fixture.marker(1);
     crate::store::tests::change_saved_manifest(&fixture.root, &marker);
-    drop(pinned);
+    drop(lease);
 
     let result = stage.advance(&fixture, &budget);
 
@@ -288,8 +318,8 @@ fn sealed_candidate_rejects_a_changed_witness_before_installation() {
     );
     assert_eq!(stage.accepted(), accepted);
     assert_eq!(
-        stage.held.sampled.get(0).unwrap().ranks(),
-        Err(&Missing::Unread)
+        stage.held.apps.get(0).unwrap().missing,
+        Some(Missing::Unread)
     );
     assert_eq!(stage.held.source_generation, source_generation);
     assert!(stage.held.startup == crate::store::StartupState::Primary);
@@ -346,27 +376,11 @@ impl GuardStage {
         )
     }
 
-    /// Drives the launch to Primary over two recent seconds and one older one, holding the
-    /// sampled buffer the first older second was written into, so no sampled buffer is free
-    /// and the next older second waits to be installed.
-    fn primary_with_no_sampled_spare(
+    fn primary(
         &mut self,
         fixture: &crate::live::identity_fixture::Fixture,
         budget: &Arc<ByteBudget>,
-    ) -> Arc<SampledSecond> {
-        use crate::store::{Buffers, MachineSecond, Span};
-        self.held.span = Span::new(2, Buffers::new(3, MachineSecond::default));
-        self.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
-        self.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
-        self.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
-        for _ in 0..MINUTES_MAX * 2 {
-            if self.startup.cursor.next_minute_index == 2 {
-                break;
-            }
-            self.advance(fixture, budget).unwrap();
-        }
-        assert_eq!(self.startup.cursor.next_minute_index, 2);
-        let pinned = Arc::clone(self.held.sampled.newest_held().unwrap());
+    ) {
         crate::store::startup_tests::drive_primary(
             &mut self.startup,
             &Input {
@@ -377,11 +391,39 @@ impl GuardStage {
             &mut self.held,
             &mut self.ring,
         );
+    }
+
+    /// Makes the store hold two recent seconds and one older one, each on the fewest buffers.
+    fn hold_two_recent_seconds_and_one_older(&mut self) {
+        use crate::store::{Buffers, MachineSecond, Span};
+        self.held.span = Span::new(2, Buffers::new(3, MachineSecond::default));
+        self.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
+        self.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
+        self.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
+    }
+
+    /// Drives the launch to Primary over two recent seconds and one older one, holding the
+    /// sampled buffer the first older second was written into, so no sampled buffer is free.
+    fn primary_with_no_sampled_spare(
+        &mut self,
+        fixture: &crate::live::identity_fixture::Fixture,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<SampledSecond> {
+        self.hold_two_recent_seconds_and_one_older();
+        for _ in 0..MINUTES_MAX * 2 {
+            if self.startup.cursor.next_minute_index == 2 {
+                break;
+            }
+            self.advance(fixture, budget).unwrap();
+        }
+        assert_eq!(self.startup.cursor.next_minute_index, 2);
+        let pinned = Arc::clone(self.held.sampled.newest_held().unwrap());
+        self.primary(fixture, budget);
         assert_eq!(self.held.sampled.free(), 0);
         pinned
     }
 
-    /// Advances until the launch waits for a buffer.
+    /// Advances until the launch is blocked.
     fn block(
         &mut self,
         fixture: &crate::live::identity_fixture::Fixture,
@@ -392,7 +434,7 @@ impl GuardStage {
                 return;
             }
         }
-        panic!("the launch did not wait for a buffer");
+        panic!("the launch was not blocked");
     }
 
     fn complete(

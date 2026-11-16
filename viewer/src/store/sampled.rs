@@ -1,6 +1,8 @@
 //! Older machine samples own their exact identity and bounded hover rankings together.
 use std::sync::Arc;
 
+use collector::ring::RunIdentity;
+
 use super::{AppsSecond, MachineSecond, Missing, Second};
 use crate::apps::Stamp;
 use crate::byte_budget::{ByteBudget, ByteReservation};
@@ -69,6 +71,39 @@ pub struct SampledRank<'sample> {
 }
 
 impl SampledSecond {
+    /// Whether this is the second of publication `publication` of run `run`, held without the
+    /// rankings of its Apps since nothing read them.
+    pub(super) fn unread_at(&self, run: &RunIdentity, publication: u64) -> bool {
+        if !matches!(self.ranks, Err(Missing::Unread)) {
+            return false;
+        }
+
+        super::names_tick(&self.observation, run, publication)
+    }
+
+    /// This second with `loaded`, the rankings a loader made of its Apps, charged to `budget`,
+    /// or with none where the budget refuses them.
+    pub(super) fn with_ranks(&self, loaded: &LoadedRanks, budget: &Arc<ByteBudget>) -> Self {
+        if let Ok(ranks) = &loaded.ranks {
+            let selected = &ranks.selected;
+            assert_eq!(selected.recording, self.observation.recording);
+            assert_eq!(selected.stamp.boot, self.observation.stamp.boot);
+            assert_eq!(selected.stamp.run, self.observation.stamp.run);
+            assert_eq!(
+                selected.stamp.publication,
+                self.observation.stamp.publication
+            );
+        }
+
+        let (ranks, reservation) = Self::charged(loaded, budget);
+        Self {
+            machine: self.machine.clone(),
+            observation: self.observation,
+            ranks,
+            reservation,
+        }
+    }
+
     pub(super) fn unread(machine: &MachineSecond, observation: Observation) -> Self {
         Self {
             machine: machine.clone(),
@@ -150,19 +185,19 @@ impl SampledSecond {
         self.observation = apps.observation.unwrap_or_else(|| unreachable!());
         assert_eq!(self.observation.stamp.publication, machine.publication);
         assert_eq!(self.observation.wall_ns, Some(machine.wall_ns));
-        let name_bytes = apps
-            .apps
-            .iter()
-            .map(|app| Self::take_name_bytes(&app.name))
-            .max()
-            .unwrap_or(0);
-        let reservation = budget.reserve(Self::take_bytes(name_bytes, apps.missing.as_ref()));
-        match reservation {
-            Some(reservation) => {
-                self.ranks = apps.ranks();
-                self.reservation = Some(reservation);
-            }
-            None => self.ranks = Err(Missing::Budget),
+        (self.ranks, self.reservation) = Self::charged(&LoadedRanks::of(apps), budget);
+    }
+
+    /// The rankings `loaded` holds with the reservation that charges them to `budget`, or no
+    /// rankings and `Missing::Budget` where the budget refuses them.
+    fn charged(
+        loaded: &LoadedRanks,
+        budget: &Arc<ByteBudget>,
+    ) -> (Result<Ranks, Missing>, Option<ByteReservation>) {
+        let bytes = Self::take_bytes(loaded.name_bytes, loaded.ranks.as_ref().err());
+        match budget.reserve(bytes) {
+            Some(reservation) => (loaded.ranks.clone(), Some(reservation)),
+            None => (Err(Missing::Budget), None),
         }
     }
 
@@ -225,6 +260,39 @@ impl<'sample> From<&'sample Rank> for SampledRank<'sample> {
             rate: rank.rate,
             measured_members: rank.measured_members,
             unavailable_members: rank.unavailable_members,
+        }
+    }
+}
+
+/// The rankings a loader made of one second's Apps, which the store keeps where it sampled that
+/// second before it read them.
+#[derive(Debug)]
+pub(super) struct LoadedRanks {
+    ranks: Result<Ranks, Missing>,
+    /// The bytes a sample charges for one ranked name, the most any of the second's Apps takes.
+    name_bytes: usize,
+}
+
+impl LoadedRanks {
+    pub(super) fn of(apps: &AppsSecond) -> Self {
+        let name_bytes = apps
+            .apps
+            .iter()
+            .map(|app| SampledSecond::take_name_bytes(&app.name))
+            .max()
+            .unwrap_or(0);
+
+        Self {
+            ranks: apps.ranks(),
+            name_bytes,
+        }
+    }
+
+    /// No rankings, for the reason `missing` a loader gives for a second it holds no Apps of.
+    pub(super) fn missing(missing: Missing) -> Self {
+        Self {
+            ranks: Err(missing),
+            name_bytes: 0,
         }
     }
 }

@@ -10,6 +10,7 @@ use super::attribution::{self, Completeness, PointApps, PointRow, Totals};
 use super::buffers::{Buffers, Span};
 use super::key_order::{self, key_of};
 use super::machine_stretch::MachineStretch;
+use super::sampled::LoadedRanks;
 use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
@@ -202,6 +203,8 @@ impl Folding {
 #[derive(Debug)]
 pub(super) struct Folded {
     pub(super) apps: AppsStretch,
+    /// The rankings of the oldest of those seconds.
+    pub(super) rankings: Box<LoadedRanks>,
 }
 
 /// Each App's readings added up over the seconds of one stretch the store took in, what the App
@@ -326,17 +329,10 @@ impl AppsStretch {
     }
 
     /// Whether the stretch's first second is the tick of publication `publication` of run `run`.
-    /// The loader and the store read a tick's clocks from different records, so the run and the
-    /// publication name it.
     fn starts_at(&self, run: &RunIdentity, publication: u64) -> bool {
-        let Some(observation) = &self.observation else {
-            return false;
-        };
-
-        observation.recording == run.recording.0
-            && observation.stamp.boot == run.boot.0
-            && observation.stamp.run == run.run.0
-            && observation.stamp.publication == publication
+        self.observation
+            .as_ref()
+            .is_some_and(|observation| super::names_tick(observation, run, publication))
     }
 
     /// Adds the Apps of `second`, a second of stretch `stretch`, writing the stretch's Apps into

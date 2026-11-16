@@ -893,7 +893,8 @@ fn report_memory(label: &str, memory: &Memory) {
 fn report_span(label: &str, view: &View) {
     println!(
         "{label}: {} seconds from wall second {} to {}, digests: machine seconds {:016x}, Apps \
-         {:016x}, earlier seconds {:016x}, sampled seconds {:016x}",
+         {:016x}, earlier seconds {:016x}, sampled seconds {:016x}, {} of {} sampled seconds \
+         ranked",
         view.seconds.len(),
         view.seconds.first().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
         view.seconds.last().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
@@ -901,6 +902,11 @@ fn report_span(label: &str, view: &View) {
         apps_digest(view),
         machine_digest(&view.earlier),
         sampled_digest(view),
+        view.sampled
+            .iter()
+            .filter(|sample| sample.ranks().is_ok())
+            .count(),
+        view.sampled.len(),
     );
 }
 

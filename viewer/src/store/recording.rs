@@ -31,6 +31,7 @@ use collector::ring::{Identity, RunIdentity};
 use persistence::canonical::catalog::Catalog;
 
 use super::apps::{Kept, TickApps};
+use super::sampled::LoadedRanks;
 use super::stretch::{Folded, Folding};
 use super::{AppsSecond, AppsStretch, Failure, MachineSecond, Missing, Reading, readings};
 use crate::recording::{
@@ -759,6 +760,8 @@ struct Fold {
 struct Part {
     /// Where the oldest of them stands among the batch's seconds.
     first_index: usize,
+    /// The rankings of the oldest of them.
+    rankings: Box<LoadedRanks>,
     run: RunIdentity,
 }
 
@@ -790,7 +793,10 @@ impl Fold {
         let apps = &mut seconds[part.first_index].apps;
         assert!(matches!(apps, LoadedApps::Missing(Missing::Unread)));
 
-        *apps = LoadedApps::Folded(Folded { apps: folded });
+        *apps = LoadedApps::Folded(Folded {
+            apps: folded,
+            rankings: part.rankings,
+        });
     }
 }
 
@@ -870,6 +876,7 @@ fn load_minute_fold(
     if fold.part.is_none() {
         fold.part = Some(Part {
             first_index: seconds.len(),
+            rankings: Box::new(LoadedRanks::of(&fold.previous)),
             run: *minute.run,
         });
     }

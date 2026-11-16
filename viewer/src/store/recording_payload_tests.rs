@@ -2237,7 +2237,7 @@ impl super::replay::Target for FrameRetryTarget<'_> {
     fn consume(
         &mut self,
         captured: super::replay::Captured<'_>,
-    ) -> Result<super::replay::Progress, Self::Error> {
+    ) -> Result<Option<crate::recording::Before>, Self::Error> {
         let sample = Ok(captured
             .sample
             .unwrap()
@@ -2267,7 +2267,7 @@ impl super::replay::Target for FrameRetryTarget<'_> {
         second.metadata.origin = crate::store::native::Origin::Saved(self.losses);
         self.seconds.push(second);
 
-        Ok(super::replay::Progress::Accepted(captured.before))
+        Ok(captured.before)
     }
 }
 

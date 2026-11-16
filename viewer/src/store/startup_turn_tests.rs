@@ -1,21 +1,19 @@
-//! Sealed candidates age while the actual staged caller admits native successors.
+//! The launch as the store's own turn steps it, with native ticks arriving between its steps.
 use super::*;
 use crate::live::identity_fixture::Fixture;
-use crate::store::startup_tests::{primary_fixture, usage};
-use crate::store::{Buffers, MachineSecond, Span, StartupState};
+use crate::store::startup_tests::usage;
+use crate::store::{Buffers, MachineSecond, SampledSecond, Span, StartupState};
 use persistence::work::ingestion::{Event, Key, Kind, Purpose, Trace};
 
 #[test]
 fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
     // Goal: a reader holding a recent second's buffer stops no install, even with every App
-    // buffer held, and native progress after the installs derives no history twice. A recent
-    // install never waits, since its new block takes a buffer's slot where every buffer is
-    // held, so no recent candidate is left pending to age into the older seconds or out of the
-    // recording, and the launch asserts that a waiting candidate is never recent.
+    // buffer held, since a recent install takes a held buffer's slot, and native progress after
+    // the installs derives no history twice.
     // Method: pin a retired recent second, hold every other App buffer, install the history,
     // append two real ticks, then finish, compare the span's seconds with the retired one and
     // count each publication's derivations.
-    let mut run = PendingStage::new(recent_fixture(), 6, RECENT_TICKS);
+    let mut run = TurnStage::new(recent_fixture(), 6, RECENT_TICKS);
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -29,7 +27,6 @@ fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
     let count = run.stage.held.apps.buffer_count();
     run.reach_phase(Phase::History);
     assert!(!run.turn());
-    assert!(run.stage.startup.pending.is_none());
     assert!(run.blocked.is_none());
 
     run.fixture.publish_with_usage(1064, &usage(122));
@@ -57,96 +54,31 @@ fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
 }
 
 #[test]
-fn pending_older_candidate_resolves_outside_without_overwriting_the_native_sample() {
-    // Goal: a retired sampled reader can deny replacement without denying native eviction.
-    // Method: pin sampled pub1, stall admitted pub3, then let native pub7 sample resolved pub5.
-    let mut run = PendingStage::new(primary_fixture(), 2, OLDER_TICKS);
-    run.stage.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
-    run.stage.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
-    let budget = Arc::clone(&run.budget);
-    let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
-    let scope = trace.enter();
-    run.reach_loaded(2);
-    let retired = Arc::clone(run.sampled_held());
-    assert_eq!(retired.observation, run.observation(1));
-    assert_eq!(retired.ranks(), Err(&Missing::Unread));
-    run.reach_primary();
-    assert_eq!(Arc::strong_count(&retired), 2);
-    run.assert_retained(&Retained {
-        recent: &[5, 6],
-        older: &[3],
-    });
-    run.assert_sampled_push_room();
-    run.reach_phase(Phase::History);
-    assert!(!run.turn());
-    run.assert_pending_older(3);
-    run.assert_progress(&ReplayPosition {
-        minute: 1,
-        next_endpoint: 0,
-        previous: Some(2),
-    });
-    assert_eq!(run.sampled(3).ranks(), Err(&Missing::Unread));
-    assert_stable_denial(&mut run, &trace, 3);
-    let opened = table_work(&trace, &run.key(1));
-
-    run.fixture.publish_with_usage(1122, &usage(122));
-    assert!(!run.turn());
-    run.assert_native(Interval {
-        selected: 7,
-        previous: 6,
-    });
-    assert_older_resolved(&run, &trace);
-    assert_reopened(&trace, &run.key(1), &opened);
-    drop(retired);
-    run.complete();
-
-    run.assert_retained(&Retained {
-        recent: &[6, 7],
-        older: &[5],
-    });
-    run.assert_recent_rates(Interval {
-        selected: 7,
-        previous: 6,
-    });
-    assert_sampled_resident(run.sampled(5), &run.observation(5));
-    assert_sampled_disk(run.sampled(5));
-    assert_eq!(
-        publication_work(&trace, &run.observation(3), Kind::AppDerivation),
-        1
-    );
-    assert_eq!(
-        publication_work(&trace, &run.observation(4), Kind::AppDerivation),
-        0
-    );
-    drop((run, scope));
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
 fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     // Goal: a queued query cannot bypass witness validation while history is capacity-blocked.
-    // Method: hold the sampled buffer an older install needs, over seconds more than fifteen
-    // minutes older than the recent ones so the query reaches none that left the span, receive
-    // a real Primary control, change the pending seal, then query the same caller.
-    let mut run = PendingStage::older();
+    // Method: over seconds more than fifteen minutes older than the recent ones so the query
+    // reaches none that left the span, hold every byte the budget has left once history begins,
+    // receive a real Primary control, change the seal history reads, then query the same caller.
+    let mut run = TurnStage::new(far_older_fixture(), 4, FAR_OLDER_TICKS);
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
-    run.reach_loaded(2);
-    let pinned = Arc::clone(run.sampled_held());
     run.reach_primary();
-    run.reach_phase(Phase::History);
-    assert!(!run.turn());
-    run.assert_pending_older(3);
     let handle = run.shared.queries.handle(std::thread::current());
     let selected = run.observation(7);
 
     let retained = run.primary_reply(&handle);
 
     assert_primary_query(&retained, &selected);
+    run.reach_phase(Phase::History);
+    let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
+    assert!(!run.turn());
+    assert!(run.blocked.is_some());
     let accepted = run.stage.accepted();
+    let history_index = run.stage.startup.history_index;
     let root = run.fixture.root.clone();
-    crate::store::tests::change_saved_manifest(&root, &run.stage.startup.minutes[1].found.marker);
+    let marker = &run.stage.startup.minutes[history_index].found.marker;
+    crate::store::tests::change_saved_manifest(&root, marker);
     let token = run.submit_primary_query(&handle);
     assert_eq!(
         token,
@@ -157,6 +89,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     );
 
     let result = run.try_turn();
+    drop(lease);
 
     assert!(
         matches!(result, Err(Failure::Read(Refused::Commitment(error)))
@@ -167,22 +100,18 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     assert!(run.shared.queries.requested());
     assert!(run.shared.mailbox.take().is_none());
     assert_eq!(run.stage.accepted(), accepted);
-    run.assert_pending_older(3);
-    run.assert_progress(&ReplayPosition {
-        minute: 1,
-        next_endpoint: 0,
-        previous: Some(2),
-    });
+    assert_eq!(run.stage.startup.history_index, history_index);
+    assert_eq!(run.stage.startup.minutes[history_index].next_endpoint, 0);
     assert_eq!(run.stage.held.newest.unwrap().publication, 7);
     assert_eq!(
-        publication_work(&trace, &run.observation(3), Kind::AppDerivation),
-        1
+        publication_work(&trace, &run.observation(4), Kind::AppDerivation),
+        0
     );
     assert_primary_query(&retained, &selected);
     handle.cancel().unwrap();
     assert!(!handle.pending());
     assert!(!run.shared.queries.requested());
-    drop((handle, pinned, run, scope, trace));
+    drop((handle, run, scope, trace));
     assert!(!root.try_exists().unwrap());
     assert!(budget.used() > 0);
     assert_primary_query(&retained, &selected);
@@ -190,7 +119,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     assert_eq!(budget.used(), 0);
 }
 
-struct PendingStage {
+struct TurnStage {
     stage: GuardStage,
     shared: crate::store::Shared,
     blocked: Option<crate::store::StartupCapacity>,
@@ -203,12 +132,6 @@ struct PendingStage {
 struct Interval {
     selected: u64,
     previous: u64,
-}
-
-struct ReplayPosition {
-    minute: usize,
-    next_endpoint: usize,
-    previous: Option<u64>,
 }
 
 struct Retained<'readings> {
@@ -236,17 +159,7 @@ const FAR_OLDER_TICKS: &[[u64; 3]] = &[
     [6, 120, 2002],
     [7, 121, 2003],
 ];
-const OLDER_TICKS: &[[u64; 3]] = &[
-    [1, 0, 1000],
-    [2, 1, 1001],
-    [3, 118, 1118],
-    [4, 119, 1119],
-    [5, 120, 1120],
-    [6, 121, 1121],
-    [7, 122, 1122],
-];
-
-impl PendingStage {
+impl TurnStage {
     fn new(fixture: Fixture, recent_capacity: usize, ticks: &'static [[u64; 3]]) -> Self {
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut stage = GuardStage::new(&fixture, &budget);
@@ -263,16 +176,6 @@ impl PendingStage {
             fixture,
             ticks,
         }
-    }
-
-    /// A launch over four recent seconds and three older ones more than fifteen minutes before
-    /// them, of which the sampled buffers keep one, so a reader of the first older second
-    /// leaves no sampled buffer free.
-    fn older() -> Self {
-        let mut run = Self::new(far_older_fixture(), 4, FAR_OLDER_TICKS);
-        run.stage.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
-        run.stage.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
-        run
     }
 
     fn turn(&mut self) -> bool {
@@ -339,17 +242,6 @@ impl PendingStage {
         panic!("staged caller did not reach the requested phase");
     }
 
-    fn reach_loaded(&mut self, minute_count: usize) {
-        for _ in 0..MINUTES_MAX * 2 {
-            if self.stage.startup.cursor.next_minute_index == minute_count {
-                assert!(self.stage.startup.phase == Phase::Machine);
-                return;
-            }
-            assert!(!self.turn());
-        }
-        panic!("staged caller did not load the requested minutes");
-    }
-
     fn reach_primary(&mut self) {
         for _ in 0..MINUTES_MAX * 2 {
             if self.stage.held.startup == StartupState::Primary {
@@ -370,7 +262,6 @@ impl PendingStage {
                 assert_eq!(self.stage.held.source_generation, 1);
                 assert!(self.stage.held.checked_catalog.is_some());
                 assert!(self.stage.held.failure.is_none());
-                assert!(self.stage.startup.pending.is_none());
                 self.assert_pairing();
                 return;
             }
@@ -399,19 +290,6 @@ impl PendingStage {
         }
     }
 
-    fn key(&self, minute_index: usize) -> Key {
-        let manifest = &self.stage.startup.minutes[minute_index]
-            .witness
-            .as_ref()
-            .unwrap()
-            .manifest;
-        Key::Minute {
-            run: self.fixture.writer.identity().unwrap(),
-            first: manifest.publication_first,
-            end: manifest.publication_end,
-        }
-    }
-
     fn recent(&self, publication: u64) -> &AppsSecond {
         self.stage
             .held
@@ -428,80 +306,6 @@ impl PendingStage {
             .held()
             .find(|sample| sample.observation == self.observation(publication))
             .unwrap()
-    }
-
-    fn sampled_held(&self) -> &Arc<SampledSecond> {
-        self.stage.held.sampled.newest_held().unwrap()
-    }
-
-    fn assert_sampled_push_room(&self) {
-        let sampled = &self.stage.held.sampled;
-        assert_eq!(sampled.free(), 0);
-        assert_eq!(sampled.len(), 1);
-        assert_eq!(Arc::strong_count(sampled.held().next().unwrap()), 2);
-        self.assert_pairing();
-    }
-
-    fn assert_pending_older(&self, publication: u64) {
-        let candidate = self.stage.startup.pending.as_ref().unwrap();
-        let observation = self.observation(publication);
-        assert_eq!(candidate.observation, observation);
-        assert!(matches!(
-            target(&self.stage.held, &observation),
-            Target::Older(_)
-        ));
-        assert_sampled_resident(candidate.sampled.as_ref().unwrap(), &observation);
-        assert!(candidate.before.as_ref().unwrap().is_admitted());
-        assert_eq!(
-            candidate
-                .before
-                .as_ref()
-                .unwrap()
-                .previous()
-                .0
-                .observation(),
-            observation
-        );
-        assert!(self.blocked.is_some());
-        self.assert_sampled_push_room();
-    }
-
-    fn assert_progress(&self, position: &ReplayPosition) {
-        assert_eq!(
-            self.stage.startup.minutes[position.minute].next_endpoint,
-            position.next_endpoint
-        );
-        let accepted = self
-            .stage
-            .startup
-            .cursor
-            .decoder
-            .predecessor
-            .as_ref()
-            .map(|before| before.previous().0.observation());
-        assert_eq!(
-            accepted,
-            position
-                .previous
-                .map(|publication| self.observation(publication))
-        );
-        assert!(self.stage.held.startup == StartupState::Primary);
-        assert_eq!(self.stage.held.source_generation, 1);
-        assert!(self.stage.held.failure.is_none());
-    }
-
-    fn assert_native(&self, interval: Interval) {
-        assert_eq!(
-            self.stage.held.apps.newest().unwrap().observation,
-            Some(self.observation(interval.selected))
-        );
-        self.assert_recent_rates(interval);
-        assert_eq!(
-            self.stage.held.newest.unwrap().publication,
-            interval.selected
-        );
-        assert!(self.stage.held.failure.is_none());
-        self.assert_pairing();
     }
 
     fn assert_retained(&self, expected: &Retained<'_>) {
@@ -598,8 +402,7 @@ fn assert_primary_query(context: &crate::store::QueryContext, selected: &Observa
 }
 
 /// Three seconds in three stretches of ten wall seconds, then four more than fifteen minutes
-/// later, sealed in three minutes so the third older second leaves the span while the first
-/// one's sampled buffer can still be held.
+/// later, sealed in three minutes so the live span of four reaches into the second minute.
 fn far_older_fixture() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
@@ -647,44 +450,6 @@ fn startup_shared() -> crate::store::Shared {
     }
 }
 
-fn assert_stable_denial(run: &mut PendingStage, trace: &Trace, publication: u64) {
-    let accepted = run.stage.accepted();
-    let work = source_work(trace);
-    let next_endpoint = run.stage.startup.minutes[run.stage.startup.history_index].next_endpoint;
-    let before = run
-        .stage
-        .startup
-        .cursor
-        .decoder
-        .predecessor
-        .as_ref()
-        .map(|before| before.previous().0.observation());
-    assert!(!run.turn());
-    assert_eq!(run.stage.accepted(), accepted);
-    assert_eq!(source_work(trace), work);
-    assert_eq!(
-        run.stage.startup.pending.as_ref().unwrap().observation,
-        run.observation(publication)
-    );
-    assert_eq!(
-        run.stage.startup.minutes[run.stage.startup.history_index].next_endpoint,
-        next_endpoint
-    );
-    assert_eq!(
-        run.stage
-            .startup
-            .cursor
-            .decoder
-            .predecessor
-            .as_ref()
-            .map(|before| before.previous().0.observation()),
-        before
-    );
-    assert!(run.blocked.is_some());
-    assert!(run.stage.held.failure.is_none());
-    assert_eq!(run.stage.held.source_generation, 1);
-}
-
 fn assert_recent_resident(apps: &AppsSecond, observation: &Observation) {
     assert_eq!(apps.observation, Some(*observation));
     assert_eq!(apps.missing, None);
@@ -726,21 +491,6 @@ fn assert_sampled_resident(sample: &SampledSecond, observation: &Observation) {
     assert_eq!(entry.amount, 11);
 }
 
-fn assert_sampled_disk(sample: &SampledSecond) {
-    let ranks = sample.ranks().unwrap();
-    let disk = ranks
-        .metrics
-        .iter()
-        .find(|ranking| ranking.metric == crate::live_app_response::Metric::Disk)
-        .unwrap();
-    let entry = disk
-        .entries()
-        .find(|rank| rank.app.bytes.as_slice() == b"/Apps/Current.app")
-        .unwrap();
-    assert_eq!(entry.amount, 60);
-    assert!((entry.rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
-}
-
 fn source_work(trace: &Trace) -> Vec<Event> {
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
@@ -780,86 +530,7 @@ fn publication_work(trace: &Trace, observation: &Observation, kind: Kind) -> usi
         .count()
 }
 
-fn minute_work(trace: &Trace, key: &Key, kind: Kind) -> usize {
-    source_work(trace)
-        .iter()
-        .filter(|event| event.key == *key)
-        .filter(|event| event.kind == kind)
-        .count()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct TableWork {
-    captures: usize,
-    collections: usize,
-    projections: usize,
-    tick_projections: usize,
-    event_projections: usize,
-}
-
-fn table_work(trace: &Trace, key: &Key) -> TableWork {
-    let events = source_work(trace);
-    let events = events.iter().filter(|event| event.key == *key);
-    TableWork {
-        captures: minute_work(trace, key, Kind::ContentCapture),
-        collections: minute_work(trace, key, Kind::NativeCollect),
-        projections: minute_work(trace, key, Kind::ProjectionDecode),
-        tick_projections: events
-            .clone()
-            .filter(|event| event.kind == Kind::ProjectionDecode && event.table == Some("ticks"))
-            .count(),
-        event_projections: events
-            .filter(|event| event.kind == Kind::ProjectionDecode && event.table == Some("events"))
-            .count(),
-    }
-}
-
-fn assert_reopened(trace: &Trace, key: &Key, before: &TableWork) {
-    let after = table_work(trace, key);
-    // Only process/events tables reopen; cached endpoint headers need no new tick projection.
-    assert_eq!(after.captures, before.captures + 2);
-    assert_eq!(after.collections, before.collections + 2);
-    assert_eq!(after.tick_projections, before.tick_projections);
-    assert_eq!(after.event_projections, before.event_projections + 1);
-    assert_eq!(after.projections, before.projections + 1);
-}
-
-fn assert_older_resolved(run: &PendingStage, trace: &Trace) {
-    run.assert_retained(&Retained {
-        recent: &[6, 7],
-        older: &[5],
-    });
-    assert_sampled_resident(run.sampled(5), &run.observation(5));
-    assert_sampled_disk(run.sampled(5));
-    assert!(matches!(
-        target(&run.stage.held, &run.observation(3)),
-        Target::Outside
-    ));
-    assert!(matches!(
-        target(&run.stage.held, &run.observation(4)),
-        Target::Outside
-    ));
-    assert!(run.stage.startup.pending.is_none());
-    run.assert_progress(&ReplayPosition {
-        minute: 1,
-        next_endpoint: 2,
-        previous: Some(4),
-    });
-    assert_eq!(
-        publication_work(trace, &run.observation(3), Kind::AppDerivation),
-        1
-    );
-    assert_eq!(
-        publication_work(trace, &run.observation(4), Kind::AppDerivation),
-        0
-    );
-    assert_eq!(
-        publication_work(trace, &run.observation(4), Kind::CommittedFrameCapture),
-        1
-    );
-}
-
-fn assert_history_work(trace: &Trace, run: &PendingStage, publications: &[u64]) {
+fn assert_history_work(trace: &Trace, run: &TurnStage, publications: &[u64]) {
     for publication in publications {
         let observation = run.observation(*publication);
         assert_eq!(

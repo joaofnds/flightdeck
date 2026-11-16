@@ -108,6 +108,11 @@ fn both_adapters_preserve_the_exact_observation_when_apps_exceed_the_bound() {
 }
 
 pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
+    expand_program_dictionary_to(fixture, 2_050);
+}
+
+/// Moves `fixture` to a writer whose program dictionary holds `entries` programs.
+pub(super) fn expand_program_dictionary_to(fixture: &mut Fixture, entries: u64) {
     use collector::recording::{RegisteredRun, Registry};
     use collector::ring::{DictionaryCapacity, Place, RingReader, Writer};
     let reader = RingReader::open_generation(fixture.writer.name()).unwrap();
@@ -119,7 +124,7 @@ pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
         },
         reader.shape(),
         DictionaryCapacity {
-            entries: 2_050,
+            entries,
             arena_bytes: 128 * 1024,
         },
         &identity,
@@ -1073,6 +1078,61 @@ fn a_sampled_refusal_reserves_its_owned_reason() {
 
     assert_eq!(sample.ranks().unwrap_err(), apps.missing.as_ref().unwrap());
     assert!(budget.used() >= size_of::<super::SampledSecond>() + 16_384);
+}
+
+#[test]
+fn a_sampled_refusal_charges_the_bytes_its_reason_holds() {
+    // Goal: a sample charges a refused second's reason byte for byte.
+    // Method: take two refused seconds whose reasons differ by 16,384 bytes into samples, each
+    // on a budget of its own, and compare the bytes the two budgets charge.
+    let reading = second_at(100);
+
+    let short = refused_sample_charge(&reading, String::from("x"));
+    let long = refused_sample_charge(&reading, "x".repeat(16_385));
+
+    assert_eq!(long - short, 16_384);
+}
+
+/// The bytes a sample charges where it takes the second of `reading`, refused for `reason`.
+fn refused_sample_charge(reading: &super::MachineSecond, reason: String) -> usize {
+    let mut apps = ranked_second(reading, None);
+    apps.apps.clear();
+    apps.missing = Some(super::Missing::Refused(reason));
+    let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let mut sample = super::SampledSecond::empty();
+
+    sample.take(reading, &apps, &budget);
+
+    assert!(sample.ranks().is_err());
+    budget.used()
+}
+
+#[test]
+fn an_unread_sample_ranked_from_loaded_rankings_charges_what_taking_its_apps_charges() {
+    // Goal: the pass that adds the Apps a launch owes charges a sampled second's rankings as a
+    // sample that takes the same Apps charges them, names included.
+    // Method: rank an unread sample from the rankings loaded of a second with a named App and of
+    // one with no Apps, take the named second into another sample, each on a budget of its own,
+    // and compare the charges.
+    let reading = second_at(100);
+    let named = ranked_second(&reading, None);
+    let mut unnamed = ranked_second(&reading, None);
+    unnamed.apps.clear();
+    let unread = super::SampledSecond::unread(&reading, named.observation.unwrap());
+    let taken_budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let mut taken = super::SampledSecond::empty();
+    taken.take(&reading, &named, &taken_budget);
+    let named_budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let unnamed_budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+
+    let named_sample = unread.with_ranks(&super::sampled::LoadedRanks::of(&named), &named_budget);
+    let unnamed_sample =
+        unread.with_ranks(&super::sampled::LoadedRanks::of(&unnamed), &unnamed_budget);
+
+    assert!(named_sample.ranks().is_ok());
+    assert!(unnamed_sample.ranks().is_ok());
+    assert_eq!(named_budget.used(), taken_budget.used());
+    assert!(named_budget.used() > unnamed_budget.used());
 }
 
 #[test]

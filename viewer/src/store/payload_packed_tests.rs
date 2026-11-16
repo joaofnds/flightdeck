@@ -798,7 +798,7 @@ fn assert_header_reads_as(
 /// `plain`: the count, the ranks, the charts, the pages, and each App found by key with its
 /// readings, index and members.
 fn assert_second_reads_as(second: Second<'_>, plain: &AppsSecond, message: &str) {
-    let plain_second = Second::unheld(plain);
+    let plain_second = Second::plain(plain);
     assert_eq!(second.app_count(), plain.apps.len(), "{message}");
     assert_eq!(second.ranks(), plain_second.ranks(), "{message}");
     let cohort: Vec<Arc<RankedApp>> = plain
@@ -829,7 +829,7 @@ fn assert_second_reads_as(second: Second<'_>, plain: &AppsSecond, message: &str)
 /// processes in no App, are the pages of `plain`, and that a second that presents its pages
 /// gives each page asked of it.
 fn assert_pages_read_as(second: Second<'_>, plain: &AppsSecond, message: &str) {
-    let plain_second = Second::unheld(plain);
+    let plain_second = Second::plain(plain);
     let presented = plain_second.presentation().is_ok();
     for page in pages_over(plain.apps.len(), APPS_PAGE_ROWS_MAX) {
         let read = refused_on(plain_second.apps_page(page));
@@ -866,7 +866,7 @@ fn refused_on(
 /// name, members and index it has in `plain`, and, where the second holds its process rows, the
 /// readings, the processes and the page of members.
 fn assert_app_reads_as(second: Second<'_>, plain: &AppsSecond, index: usize, message: &str) {
-    let plain_second = Second::unheld(plain);
+    let plain_second = Second::plain(plain);
     let row = &plain.apps[index];
     let Some(found) = second.app(&row.name) else {
         panic!("{message}: not found");

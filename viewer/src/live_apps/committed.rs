@@ -257,28 +257,12 @@ impl Frame {
         operation: &Operation,
         mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<()>,
     ) -> Result<()> {
-        Self::placed_many_from(endpoints, rows, order, 0, operation, |endpoint, frame| {
-            consume(endpoint, frame)?;
-            Ok(true)
-        })?;
-        Ok(())
-    }
-
-    /// Resumes after accepted endpoints without capturing their Frames again.
-    pub(crate) fn placed_many_from(
-        endpoints: &[Endpoint],
-        rows: &DataFrame,
-        order: &[usize],
-        first: usize,
-        operation: &Operation,
-        mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<bool>,
-    ) -> Result<()> {
         match Self::placed(
             &Placement {
                 endpoints,
                 rows,
                 order,
-                first,
+                first: 0,
                 operation,
                 budget: None,
             },
@@ -292,7 +276,7 @@ impl Frame {
 
     pub(crate) fn placed<E>(
         input: &Placement<'_>,
-        mut consume: impl FnMut(&Endpoint, PlacedFrame) -> std::result::Result<bool, E>,
+        mut consume: impl FnMut(&Endpoint, PlacedFrame) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), PlacementError<E>> {
         assert!(input.first <= input.endpoints.len());
         assert_eq!(input.rows.width(), BATCH_COLUMNS);
@@ -340,9 +324,7 @@ impl Frame {
                 endpoint.stamp.publication,
                 persistence::work::ingestion::Kind::CommittedFrameCapture,
             );
-            if !consume(endpoint, frame).map_err(PlacementError::Consumer)? {
-                return Ok(input.operation.check()?);
-            }
+            consume(endpoint, frame).map_err(PlacementError::Consumer)?;
         }
         assert!(cursor.rows.next().is_none());
 

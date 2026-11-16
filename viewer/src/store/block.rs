@@ -1124,21 +1124,15 @@ impl<'block> Second<'block> {
         self.second.apps.len()
     }
 
-    /// A second no block holds, one a launch is about to install.
-    #[must_use]
-    pub(super) fn unheld(second: &'block AppsSecond) -> Self {
-        Self {
-            second,
-            packed: None,
-        }
-    }
-
     /// `second` as a second no block holds, which a test outside the store builds plain and
     /// reads as the store reads it.
     #[cfg(any(test, feature = "fixtures"))]
     #[must_use]
     pub fn plain(second: &'block AppsSecond) -> Self {
-        Self::unheld(second)
+        Self {
+            second,
+            packed: None,
+        }
     }
 
     /// The Apps that used the most of each resource at this second, or why the second holds no

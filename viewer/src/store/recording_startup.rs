@@ -15,8 +15,8 @@ use crate::recording::{
     Before, MachineMinute, Refused, ScopedSealedMinute, SealedSource, read_machine_and_endpoints,
 };
 use crate::store::apps::TickApps;
-use crate::store::{AppsSecond, Held, Missing, SampledSecond, Second};
-use payload::replay::{Captured, Progress, Target as ReplayTarget};
+use crate::store::{AppsSecond, Held, Missing};
+use payload::replay::{Captured, Target as ReplayTarget};
 
 #[cfg(test)]
 #[path = "recording_startup_tests.rs"]
@@ -28,7 +28,6 @@ pub(in crate::store) struct Startup {
     selected: Option<usize>,
     cursor: payload::Cursor,
     history_index: usize,
-    pending: Option<Candidate>,
     checked: Option<CheckedCatalog>,
     control: Option<ByteReservation>,
 }
@@ -47,9 +46,10 @@ struct Witness {
 }
 
 struct Candidate {
-    observation: Observation,
+    /// Where the candidate's second stands among the seconds of the live span, or `None` where
+    /// the launch derives no Apps of it.
+    recent: Option<usize>,
     apps: AppsSecond,
-    sampled: Option<SampledSecond>,
     before: Option<Before>,
 }
 
@@ -103,20 +103,15 @@ impl From<Error> for Failure {
 }
 
 impl Startup {
-    fn process(
-        &mut self,
-        input: &Input<'_>,
-        held: &mut Held,
-        index: usize,
-    ) -> Result<bool, Failure> {
+    fn process(&mut self, input: &Input<'_>, held: &mut Held, index: usize) -> Result<(), Failure> {
         process_minute(
             &mut self.minutes[index],
             &mut self.cursor.decoder,
-            &mut self.pending,
             input,
             held,
         )
     }
+
     pub(in crate::store) fn new() -> Self {
         Self {
             minutes: Vec::new(),
@@ -124,7 +119,6 @@ impl Startup {
             selected: None,
             cursor: payload::Cursor::new(0),
             history_index: 0,
-            pending: None,
             checked: None,
             control: None,
         }
@@ -365,9 +359,7 @@ impl Startup {
         let _purpose =
             persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Selection);
         if let Some(index) = self.selected {
-            if !self.process(input, held, index)? {
-                return Err(Failure::Blocked);
-            }
+            self.process(input, held, index)?;
         }
         self.phase = Phase::Terminal;
         Ok(())
@@ -405,10 +397,7 @@ impl Startup {
     fn history(&mut self, input: &Input<'_>, held: &mut Held) -> Result<(), Failure> {
         let end = self.selected.unwrap_or(0);
         if self.history_index < end {
-            if !self.process(input, held, self.history_index)? {
-                return Err(Failure::Blocked);
-            }
-
+            self.process(input, held, self.history_index)?;
             self.history_index += 1;
             return Ok(());
         }
@@ -437,13 +426,17 @@ impl Startup {
         (!found.is_empty()).then(|| Owed::all(found))
     }
 
+    /// Starts the history at the oldest minute that holds a second of the live span. The pass
+    /// that adds the Apps the launch owes ranks the seconds of the minutes before it, from the
+    /// Apps those minutes sealed, so the launch reads none of their processes.
     fn history_boundary(&mut self, input: &Input<'_>, held: &Held) -> Result<(), Failure> {
         let end = self.selected.unwrap_or(0);
         let first = self.minutes[..end].iter().position(|minute| {
             minute.witness.as_ref().is_some_and(|witness| {
-                witness.endpoints.iter().any(|endpoint| {
-                    !matches!(target(held, &endpoint.observation()), Target::Outside)
-                })
+                witness
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| recent_index(held, &endpoint.observation()).is_some())
             })
         });
         self.history_index = first.unwrap_or(end);
@@ -456,9 +449,7 @@ impl Startup {
                 .witness
                 .as_ref()
                 .and_then(|witness| witness.endpoints.first())
-                .is_some_and(|endpoint| {
-                    !matches!(target(held, &endpoint.observation()), Target::Outside)
-                })
+                .is_some_and(|endpoint| recent_index(held, &endpoint.observation()).is_some())
         })
     }
 
@@ -532,35 +523,19 @@ fn machine_failure(error: crate::store::MachineCaptureError) -> Failure {
 fn process_minute(
     minute: &mut MinuteWork,
     decoder: &mut payload::Decoder,
-    pending: &mut Option<Candidate>,
     input: &Input<'_>,
     held: &mut Held,
-) -> Result<bool, Failure> {
+) -> Result<(), Failure> {
     let witness = minute
         .witness
         .as_ref()
         .unwrap_or_else(|| unreachable!("machine witness"));
     let sealed = witness.open(input, &minute.found)?;
     held.apps.launch_wait();
-    if let Some(mut candidate) = pending.take() {
-        // Only an older second waits, since a recent one always installs, and the span never
-        // reaches back to an older second, so a waiting candidate is never recent.
-        assert!(matches!(
-            target(held, &candidate.observation),
-            Target::Older(_) | Target::Outside
-        ));
-        input.operation.check()?;
-        if !install_ready(&mut candidate, held, input.budget)? {
-            *pending = Some(candidate);
-            return Ok(false);
-        }
-
-        decoder.accept_replay(candidate.before.take(), &mut minute.next_endpoint);
-    }
     if minute.next_endpoint == witness.endpoints.len() {
         sealed.revalidate_full()?;
         input.operation.check()?;
-        return Ok(true);
+        return Ok(());
     }
 
     let batch = crate::recording::processes::read_processes_batch_with_endpoints(
@@ -577,47 +552,26 @@ fn process_minute(
         &mut InstallTarget {
             names: None,
             held,
-            pending,
             input,
         },
     )?;
     sealed.revalidate_full()?;
     input.operation.check()?;
-    Ok(pending.is_none())
+    Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum Target {
-    Recent(usize),
-    Older(usize),
-    Outside,
-}
-
-fn target(held: &Held, observation: &Observation) -> Target {
-    if let Some(index) = held
-        .apps
+/// Where the second `observation` names stands among the seconds of the live span. The pass that
+/// adds the Apps the launch owes ranks a second older than the span.
+fn recent_index(held: &Held, observation: &Observation) -> Option<usize> {
+    held.apps
         .span()
         .seconds()
         .position(|apps| apps.observation() == Some(*observation))
-    {
-        return Target::Recent(index);
-    }
-
-    if let Some(index) = held
-        .sampled
-        .held()
-        .position(|sample| sample.observation == *observation)
-    {
-        return Target::Older(index);
-    }
-
-    Target::Outside
 }
 
 struct InstallTarget<'step, 'input> {
     names: Option<crate::store::payload::ProcessNames>,
     held: &'step mut Held,
-    pending: &'step mut Option<Candidate>,
     input: &'step Input<'input>,
 }
 
@@ -625,17 +579,14 @@ impl ReplayTarget for InstallTarget<'_, '_> {
     type Error = Failure;
 
     fn derives(&self, endpoint: &Endpoint) -> bool {
-        !matches!(target(self.held, &endpoint.observation()), Target::Outside)
+        recent_index(self.held, &endpoint.observation()).is_some()
     }
 
-    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Failure> {
+    fn consume(&mut self, captured: Captured<'_>) -> Result<Option<Before>, Failure> {
         let mut candidate = capture_candidate(captured, self.input, self.held, &mut self.names)?;
         self.input.operation.check()?;
-        if !install_ready(&mut candidate, self.held, self.input.budget)? {
-            *self.pending = Some(candidate);
-            return Ok(Progress::Pending);
-        }
-        Ok(Progress::Accepted(candidate.before.take()))
+        install(&mut candidate, self.held);
+        Ok(candidate.before.take())
     }
 }
 
@@ -647,6 +598,7 @@ fn capture_candidate(
 ) -> Result<Candidate, Failure> {
     let observation = captured.endpoint.observation();
     let mut apps = AppsSecond::default();
+    let mut recent = None;
     if let Some(sample) = captured.sample {
         let sample = match sample {
             Err(crate::live_apps::AggregateError::Presentation(
@@ -654,30 +606,21 @@ fn capture_candidate(
             )) => return Err(error.into()),
             sample => sample.map_err(crate::live_apps::AggregateError::legacy),
         };
-        let target = target(held, &observation);
-        let previous = match target {
-            Target::Recent(index) => index
-                .checked_sub(1)
-                .and_then(|index| held.apps.stored(index)),
-            Target::Older(_) | Target::Outside => None,
-        };
-        match target {
-            Target::Recent(_) => {
-                payload::load_minute_rows(&sample, previous, input.budget, &mut apps);
-                payload::load_minute_payload(
-                    &sample,
-                    previous,
-                    input.budget,
-                    captured.names_capacity,
-                    names,
-                    &mut apps,
-                );
-            }
-            Target::Older(_) => {
-                payload::load_minute_rows(&sample, previous, input.budget, &mut apps);
-            }
-            Target::Outside => unreachable!("outside does not derive Apps"),
-        }
+        let index = recent_index(held, &observation)
+            .unwrap_or_else(|| unreachable!("a second outside the span derives no Apps"));
+        recent = Some(index);
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| held.apps.stored(index));
+        payload::load_minute_rows(&sample, previous, input.budget, &mut apps);
+        payload::load_minute_payload(
+            &sample,
+            previous,
+            input.budget,
+            captured.names_capacity,
+            names,
+            &mut apps,
+        );
         if apps.missing == Some(Missing::Budget) {
             return Err(Failure::Blocked);
         }
@@ -688,66 +631,24 @@ fn capture_candidate(
     }
     apps.observation = Some(observation);
     Ok(Candidate {
-        observation,
+        recent,
         apps,
-        sampled: None,
         before: captured.before,
     })
 }
 
-/// Installs `candidate` where its second now lies. Returns `false`, changing nothing, where an
-/// older second's sampled buffers are all held, so the launch waits for one. A recent second
-/// always installs, since its new block takes a buffer's slot where every buffer is held.
-fn install(
-    candidate: &mut Candidate,
-    held: &mut Held,
-    budget: &Arc<ByteBudget>,
-) -> Result<bool, Failure> {
+/// Installs `candidate` at the second of the live span it was captured for, in a new block that
+/// takes a buffer's slot where every buffer is held.
+fn install(candidate: &mut Candidate, held: &mut Held) {
     held.release_views();
-    match target(held, &candidate.observation) {
-        Target::Outside => Ok(true),
-        Target::Recent(index) => {
-            assert!(candidate.sampled.is_none());
+    match candidate.recent {
+        Some(index) => {
             let previous = held.apps.span().second(index);
             candidate.apps.consecutive = previous.consecutive();
             candidate.apps.metadata.origin = previous.origin();
             held.apps
                 .replace(index, |apps| mem::swap(apps, &mut candidate.apps));
-            Ok(true)
         }
-        Target::Older(index) => {
-            let sampled = &mut held.sampled;
-            if candidate.sampled.is_none() {
-                let machine = &sampled
-                    .get(index)
-                    .unwrap_or_else(|| unreachable!("older sample"))
-                    .machine;
-                candidate.sampled = Some(
-                    SampledSecond::admitted(machine, Second::unheld(&candidate.apps), budget)
-                        .map_err(|_| Failure::Blocked)?,
-                );
-                candidate.apps = AppsSecond::default();
-            }
-            Ok(sampled.replace(index, |sample| {
-                mem::swap(
-                    sample,
-                    candidate
-                        .sampled
-                        .as_mut()
-                        .unwrap_or_else(|| unreachable!("ranking")),
-                );
-            }))
-        }
-    }
-}
-
-fn install_ready(
-    candidate: &mut Candidate,
-    held: &mut Held,
-    budget: &Arc<ByteBudget>,
-) -> Result<bool, Failure> {
-    match install(candidate, held, budget) {
-        Err(Failure::Blocked) => Ok(false),
-        result => result,
+        None => assert_eq!(candidate.apps.missing, Some(Missing::Unread)),
     }
 }

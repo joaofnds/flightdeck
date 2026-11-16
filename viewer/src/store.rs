@@ -124,7 +124,10 @@ const EARLIER_MAX: usize = 259;
 
 /// The older seconds the store takes on buffers it already has while a View the main thread holds
 /// keeps theirs. The live span lets go of `SECONDS_HELD_MAX` seconds in that time, which start at
-/// most eight stretches.
+/// most eight stretches. The pass that ranks the older seconds a launch sampled unread rewrites
+/// up to `EARLIER_MAX` of them while the launch's first View holds them all, and each one past
+/// these buffers is made new in the slot of the buffer written longest ago, so the count of
+/// buffers never grows.
 const EARLIER_HELD_MAX: usize = 8;
 
 /// The closed stretches of `EARLIER_STRIDE_SECONDS` the store holds Apps of: the stretches of
@@ -184,8 +187,10 @@ pub struct View {
     pub stretches: Vec<Arc<AppsStretch>>,
     /// The hover payloads of `earlier`, in the same order.
     pub sampled: Vec<Arc<SampledSecond>>,
-    /// Whether the View holds the Apps of every second and stretch it holds, which the store
-    /// loads at startup after the readings of the Mac and the Apps of the newest second.
+    /// Whether the launch has read the Apps of every second of the live span, which the store
+    /// loads at startup after the readings of the Mac and the Apps of the newest second. The
+    /// rankings of `sampled` and the Apps of the older stretches arrive in a later View, from the
+    /// pass that adds the Apps the launch owes.
     pub apps_loaded: bool,
     /// Why the store could not read the recording at its last step.
     pub failure: Option<Failure>,
@@ -940,6 +945,16 @@ fn stretch_of_wall_ns(wall_ns: u64) -> u64 {
     stretch_of_wall_second(wall_ns / 1_000_000_000)
 }
 
+/// Whether `observation` is the tick of publication `publication` of run `run`. The loader and
+/// the store read a tick's clocks from different records, so the run and the publication name it.
+fn names_tick(observation: &Observation, run: &RunIdentity, publication: u64) -> bool {
+    let stamp = &observation.stamp;
+    observation.recording == run.recording.0
+        && stamp.boot == run.boot.0
+        && stamp.run == run.run.0
+        && stamp.publication == publication
+}
+
 /// The stretch of `EARLIER_STRIDE_SECONDS` that holds the wall second `wall_second`, which
 /// `AppsStretch::stretch` names. The division floors.
 #[must_use]
@@ -977,16 +992,30 @@ fn run_owed(root: &Path, held: &mut Held, mailbox: &Mailbox<View>) {
 }
 
 /// Adds the Apps of the minutes `owed` holds to the stretches that hold those minutes' seconds,
-/// as a load of the whole hour adds them up.
+/// as a load of the whole hour adds them up, and ranks the seconds of those minutes the launch
+/// sampled before it read their Apps.
 fn run_owed_add(root: &Path, held: &mut Held, owed: &recording::Owed) {
     let mut walk = OwedWalk::default();
     let stretches = &mut held.stretches;
+    let sampled = &mut held.sampled;
+    let budget = &held.payload_budget;
     let left_out = recording::load_owed(root, owed, |run, second, apps| {
         let Some(start) = walk.step(run, second) else {
             return;
         };
-        if let TickApps::Folded(folded) = apps {
-            stretches.add_owed(&start.first.run, start.first.publication, &folded.apps);
+        match apps {
+            TickApps::Folded(folded) => {
+                stretches.add_owed(&start.first.run, start.first.publication, &folded.apps);
+                run_owed_add_ranks(sampled, budget, run, second.publication, &folded.rankings);
+            }
+            TickApps::Missing(Missing::Unread)
+            | TickApps::Refused(_)
+            | TickApps::Loaded(_)
+            | TickApps::Awaiting(_) => {}
+            TickApps::Missing(missing) => {
+                let refused = sampled::LoadedRanks::missing(missing.clone());
+                run_owed_add_ranks(sampled, budget, run, second.publication, &refused);
+            }
         }
     });
 
@@ -995,6 +1024,27 @@ fn run_owed_add(root: &Path, held: &mut Held, owed: &recording::Owed) {
         held.resumes_from_newest &= resumes_from_newest_leaving_out(left_out);
     }
     held.unpublished = true;
+}
+
+/// Keeps `loaded`, the rankings a loader made of the second of publication `publication` of run
+/// `run`, or why it made none, where `sampled` holds that second without them.
+fn run_owed_add_ranks(
+    sampled: &mut Span<SampledSecond>,
+    budget: &Arc<ByteBudget>,
+    run: &RunIdentity,
+    publication: u64,
+    loaded: &sampled::LoadedRanks,
+) {
+    let unread = sampled
+        .held()
+        .enumerate()
+        .find(|(_, sample)| sample.unread_at(run, publication));
+    let Some((index, sample)) = unread else {
+        return;
+    };
+
+    let ranked = sample.with_ranks(loaded, budget);
+    sampled.replace_held(index, |buffer| *buffer = ranked);
 }
 
 /// Whether a store whose load left `left_out` out may go on from its newest second. A refused
@@ -1258,22 +1308,17 @@ fn startup_staged_native(
     Ok(progress)
 }
 
-/// What a blocked launch waits on to change: the bytes charged, the sampled buffers free and
-/// the newest second. App buffers are not among them, since an install never waits for one.
+/// What a blocked launch waits on to change: the bytes charged and the newest second. No buffer
+/// is among them, since an install never waits for one.
 #[derive(PartialEq, Eq)]
 struct StartupCapacity {
     bytes: usize,
-    sampled: usize,
     newest: Option<(RunIdentity, u64)>,
 }
 
 impl StartupCapacity {
     fn improved(&self, previous: &Self) -> bool {
         if self.bytes < previous.bytes {
-            return true;
-        }
-
-        if self.sampled > previous.sampled {
             return true;
         }
 
@@ -1284,7 +1329,6 @@ impl StartupCapacity {
 fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
     StartupCapacity {
         bytes: budget.used(),
-        sampled: held.sampled.free(),
         newest: held.newest.map(|newest| (newest.run, newest.publication)),
     }
 }

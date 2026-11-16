@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::apps::TickApps;
+use super::sampled::LoadedRanks;
 use super::stretch::{Folded, Folding, StretchRow};
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsSpan, AppsStretch, Cohorts, Held,
@@ -279,6 +280,7 @@ fn a_stretch_a_load_added_up_part_of_holds_none_where_that_part_holds_more_apps_
     }
     let folded = Folded {
         apps: folding.finish().unwrap(),
+        rankings: Box::new(LoadedRanks::of(&AppsSecond::default())),
     };
     let mut held = Held::without_recording();
     assert!(held.take(&RUN, &second_at(1_000), TickApps::Folded(&folded)));
@@ -970,6 +972,43 @@ fn assert_owed_apps_add_up(fixture: &Fixture) {
 
     assert_eq!(held.left_out, None);
     assert_stretches_match(&published(&mut held), &whole, "after the launch");
+    assert_owed_ranks_add_up(fixture);
+}
+
+/// Asserts that a store whose live span holds two seconds, which launches on `fixture`'s
+/// recording and then adds up the Apps it owes, holds the sampled seconds and their rankings
+/// that such a store holds once it loads the whole recording at once.
+fn assert_owed_ranks_add_up(fixture: &Fixture) {
+    let mut whole = Held::without_recording();
+    hold_two_live_seconds(&mut whole);
+    load_into(&mut whole, fixture);
+    let whole = published(&mut whole);
+    let mut held = Held::with_packing_thread(Arc::new(super::ByteBudget::new(super::BYTES_MAX)));
+    hold_two_live_seconds(&mut held);
+    launch(fixture, &mut held);
+    let owed = held.owed.take().unwrap();
+
+    super::run_owed_add(&fixture.root, &mut held, &owed);
+
+    let view = published(&mut held);
+    assert!(!whole.sampled.is_empty());
+    assert_eq!(view.sampled.len(), whole.sampled.len());
+    for (shown, expected) in view.sampled.iter().zip(&whole.sampled) {
+        assert_eq!(shown.observation, expected.observation);
+        assert_eq!(shown.ranks(), expected.ranks());
+    }
+}
+
+/// Shrinks `held`'s live span to two seconds, so the older seconds of a short recording are
+/// sampled.
+fn hold_two_live_seconds(held: &mut Held) {
+    held.span = super::Span::new(2, super::Buffers::new(3, MachineSecond::default));
+    let buffers = super::Buffers::new(
+        2 + super::block::BLOCK_DEPARTED_MAX + 1,
+        AppsSecond::default,
+    );
+    held.apps =
+        super::block::BlockSpan::with_packing_thread(2, buffers, Arc::clone(&held.payload_budget));
 }
 
 /// Asserts that `view` holds the stretches `whole` holds, as each of Overview's App charts

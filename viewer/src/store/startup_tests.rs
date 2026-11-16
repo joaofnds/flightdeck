@@ -282,17 +282,23 @@ pub(super) fn query_outcome(held: &mut super::Held, ring: &mut super::Ring) -> s
 }
 
 pub(super) fn primary_fixture() -> Fixture {
+    primary_fixture_derived(&crate::live::identity_fixture::Underived)
+}
+
+/// Six ticks in three minutes sealed with the tables `derive` derives, the first two minutes
+/// apart.
+pub(super) fn primary_fixture_derived(derive: &dyn persistence::worker::Derive) -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1001, &usage(1));
-    fixture.seal_minute(0);
+    fixture.seal_minute_derived(0, derive);
     fixture.skip_run_ticks(116);
     fixture.publish_with_usage(1118, &usage(118));
     fixture.publish_with_usage(1119, &usage(119));
-    fixture.seal_minute(1);
+    fixture.seal_minute_derived(1, derive);
     fixture.publish_with_usage(1120, &usage(120));
     fixture.publish_with_usage(1121, &usage(121));
-    fixture.seal_minute(2);
+    fixture.seal_minute_derived(2, derive);
     fixture
 }
 
@@ -535,7 +541,7 @@ fn publish_named_identity(fixture: &mut Fixture) -> collector::ring::IdentityObs
 fn selected_apps_use_an_available_source_predecessor_below_wall_pruning() {
     // Goal: pruning by wall time cannot turn an available consecutive App boundary into a gap.
     // Method: jump the wall clock between run ticks 59 and 60 in two real sealed minutes.
-    let fixture = pruned_boundary_fixture();
+    let fixture = pruned_boundary_fixture(&crate::live::identity_fixture::Underived);
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -566,14 +572,17 @@ fn selected_apps_use_an_available_source_predecessor_below_wall_pruning() {
 }
 
 #[test]
-fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
-    // Goal: history's first retained older sample has a separate exact source predecessor.
-    // Method: keep only two recent slots after a wall-pruned boundary and replay its older rank.
-    let mut fixture = pruned_boundary_fixture();
+fn the_first_older_sample_is_ranked_with_its_rates_by_the_pass_that_adds_the_owed_apps() {
+    // Goal: a launch reads no minute for the rankings of a second older than the live span, and
+    // the pass that adds the Apps it owes ranks that second with the rates its minute sealed.
+    // Method: keep only two recent slots after a wall-pruned boundary, load the launch, then run
+    // the pass on what the launch owes and read the older second's rank.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let mut fixture = pruned_boundary_fixture(&derive);
     fixture.skip_run_ticks(58);
     fixture.publish_with_usage(5060, &usage(120));
     fixture.publish_with_usage(5061, &usage(121));
-    fixture.seal_minute(2);
+    fixture.seal_minute_derived(2, &derive);
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -590,8 +599,13 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
         operation: &operation,
     };
     drive_primary(&mut startup, &input, &mut held, &mut ring);
-
     drive_complete(&mut startup, &input, &mut held, &mut ring);
+    let unread = held.sampled.get(0).unwrap();
+    assert_eq!(unread.observation.stamp.publication, 2);
+    assert!(matches!(unread.ranks(), Err(super::Missing::Unread)));
+    let owed = held.owed.take().unwrap();
+
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     let older = held.sampled.get(0).unwrap();
     assert_eq!(older.observation.stamp.publication, 2);
@@ -609,14 +623,59 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
     assert!((app.rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
 }
 
-fn pruned_boundary_fixture() -> Fixture {
+#[test]
+fn the_pass_that_adds_the_owed_apps_gives_an_older_sample_the_reason_its_apps_were_refused() {
+    // Goal: an older sampled second whose sealed Apps the loader refuses reads that refusal
+    // after the pass that adds the Apps the launch owes, not that its Apps are unread.
+    // Method: seal a minute whose one tick holds more Apps than a second may, then a later
+    // minute, keep the later minute's two seconds recent, load the launch and run the pass.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let mut fixture = Fixture::new_mode(true, 2_049, None);
+    crate::store::tests::expand_program_dictionary_to(&mut fixture, 2_052);
+    let names: Vec<_> = (0..2_049).map(|index| format!("process-{index}")).collect();
+    let names: Vec<_> = names.iter().map(String::as_bytes).collect();
+    crate::store::tests::publish_named_processes(&mut fixture, 0, &names, 2_049);
+    fixture.seal_minute_derived(0, &derive);
+    fixture.skip_run_ticks(60);
+    fixture.publish_with_usage(200, &usage(60));
+    fixture.publish_with_usage(201, &usage(61));
+    fixture.seal_minute_derived(1, &derive);
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
+    held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+    let owed = held.owed.take().unwrap();
+
+    super::run_owed_add(&fixture.root, &mut held, &owed);
+
+    let older = held.sampled.get(0).unwrap();
+    assert_eq!(older.observation.stamp.publication, 1);
+    assert_eq!(older.ranks().unwrap_err(), &super::Missing::TooMany);
+}
+
+/// Two minutes sealed with the tables `derive` derives, as the persister seals them, the second
+/// an hour of wall clock past the first.
+fn pruned_boundary_fixture(derive: &dyn persistence::worker::Derive) -> Fixture {
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     fixture.publish_with_usage(1000, &usage(59));
-    fixture.seal_minute(0);
+    fixture.seal_minute_derived(0, derive);
     fixture.publish_with_usage(5000, &usage(60));
     fixture.publish_with_usage(5001, &usage(61));
-    fixture.seal_minute(1);
+    fixture.seal_minute_derived(1, derive);
     fixture
 }
 
@@ -659,8 +718,12 @@ fn unread_machine_retention_needs_no_admission_even_after_recent_and_older_evict
 
 #[test]
 fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_boundary() {
-    // Goal: an unused prefix cannot consume a predecessor-only schedule slot.
-    // Method: retain one recent/older pair from three loaded minutes after a pruned source minute.
+    // Goal: the history starts at the first minute that holds a second of the live span, whose
+    // first second takes its rates from the minute before, and reads nothing of the minutes
+    // before that one.
+    // Method: keep two recent seconds and one older one of three loaded minutes after a pruned
+    // source minute, load the launch, then read the first recent second's predecessor and the
+    // work done for the pruned minute's second.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     fixture.publish_with_usage(1000, &usage(59));
@@ -680,8 +743,8 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
-    held.span = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
-    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(1);
+    held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
     held.earlier = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
     held.sampled = super::Span::new(1, super::Buffers::new(2, super::SampledSecond::empty));
     held.startup = super::StartupState::Loading;
@@ -698,8 +761,12 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
 
     assert_eq!(
         held.sampled.get(0).unwrap().observation.stamp.publication,
-        3
+        2
     );
+    let first = held.apps.get(0).unwrap();
+    assert_eq!(first.observation.unwrap().stamp.publication, 3);
+    let payload = first.processes.as_ref().unwrap();
+    assert_eq!(payload.previous.unwrap().publication, 2);
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
     assert!(events.iter().all(|event| !matches!(

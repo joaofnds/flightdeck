@@ -14,7 +14,7 @@ pub(in crate::store::recording) trait Target {
     type Error: From<Refused>;
 
     fn derives(&self, endpoint: &Endpoint) -> bool;
-    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Self::Error>;
+    fn consume(&mut self, captured: Captured<'_>) -> Result<Option<Before>, Self::Error>;
 }
 
 pub(in crate::store::recording) struct Captured<'sample> {
@@ -22,11 +22,6 @@ pub(in crate::store::recording) struct Captured<'sample> {
     pub names_capacity: usize,
     pub sample: Option<Result<&'sample Sample, AggregateError>>,
     pub before: Option<Before>,
-}
-
-pub(in crate::store::recording) enum Progress {
-    Accepted(Option<Before>),
-    Pending,
 }
 
 pub(in crate::store::recording) struct Input<'step> {
@@ -68,13 +63,9 @@ impl Decoder {
                     target.derives(endpoint),
                     names_capacity,
                 );
-                match target.consume(captured)? {
-                    Progress::Accepted(before) => {
-                        self.accept_replay(before, input.next);
-                        Ok(true)
-                    }
-                    Progress::Pending => Ok(false),
-                }
+                let before = target.consume(captured)?;
+                self.accept_replay(before, input.next);
+                Ok(())
             },
         );
         match result {
@@ -202,8 +193,8 @@ impl Target for Predecessor {
         false
     }
 
-    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Refused> {
-        Ok(Progress::Accepted(captured.before))
+    fn consume(&mut self, captured: Captured<'_>) -> Result<Option<Before>, Refused> {
+        Ok(captured.before)
     }
 }
 
@@ -221,7 +212,7 @@ where
         true
     }
 
-    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Refused> {
+    fn consume(&mut self, captured: Captured<'_>) -> Result<Option<Before>, Refused> {
         let sample = captured
             .sample
             .unwrap_or_else(|| unreachable!("derived sample"));
@@ -230,6 +221,6 @@ where
             sample.map_err(AggregateError::legacy),
             captured.names_capacity,
         )?;
-        Ok(Progress::Accepted(captured.before))
+        Ok(captured.before)
     }
 }

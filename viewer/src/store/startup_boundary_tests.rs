@@ -4,7 +4,7 @@ use crate::live::identity_fixture::Fixture;
 use crate::store::startup_tests::{
     drive_primary, published_view, query_context, query_outcome, usage,
 };
-use crate::store::{QueryOutcome, QueryReadiness, QueryUnavailable, StartupState};
+use crate::store::{QueryOutcome, QueryReadiness, QueryUnavailable, SampledSecond, StartupState};
 
 #[test]
 fn rollback_selection_follows_source_order_through_complete() {
@@ -260,10 +260,15 @@ fn assert_cohorts(held: &mut Held, count: usize) {
 }
 
 #[test]
-fn full_staged_retention_reuses_sample_spares_and_keeps_a_fixed_primary_immutable() {
-    // Goal: full real retention progresses past both spare bounds while a Primary stays immutable.
-    // Method: seal 2375 ticks, replace 12 older targets in one minute, then append 65 native ticks.
-    let mut fixture = large_fixture();
+fn full_staged_retention_keeps_a_fixed_primary_immutable_while_the_older_seconds_are_ranked() {
+    // Goal: full real retention keeps a Primary immutable while the launch reads the processes
+    // of no minute older than the live span, and the pass that adds the Apps the launch owes
+    // ranks every older second.
+    // Method: seal 2375 ticks with their App tables, take a Primary, append 65 native ticks
+    // during the history, finish, count the process tables read of the 21 minutes before the
+    // live span, then run the pass on what the launch owes.
+    let derive = persistence::sealed_apps::SealedApps::default();
+    let mut fixture = large_fixture(&derive);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
@@ -277,17 +282,16 @@ fn full_staged_retention_reuses_sample_spares_and_keeps_a_fixed_primary_immutabl
     let generation = stage.held.source_generation;
     assert_large_primary(&stage.held, &primary);
 
-    stage.advance(&fixture, &budget).unwrap();
-    stage.advance(&fixture, &budget).unwrap();
-    assert_eq!(historical_apps(&trace), 12);
-    assert_eq!(stage.held.sampled.free(), 8);
-    assert_sampled_prefix(&stage.held);
     append_native(&mut fixture, &mut stage);
     stage.complete(&fixture, &budget);
+    assert_eq!(process_captures_ending_by(&trace, 1261), 0);
+    let owed = stage.held.owed.take().unwrap();
+
+    crate::store::run_owed_add(&fixture.root, &mut stage.held, &owed);
 
     assert!(stage.held.startup == StartupState::Complete);
     assert_eq!(stage.held.source_generation, generation);
-    assert_eq!(historical_apps(&trace), 1246);
+    assert_eq!(historical_apps(&trace), 980);
     assert_large_final(&mut stage.held);
     assert_eq!(primary_headers(&primary), headers);
     assert_eq!(primary.readiness(), QueryReadiness::Primary);
@@ -415,23 +419,6 @@ fn primary_headers(context: &crate::store::QueryContext) -> Vec<(Observation, u6
         .collect()
 }
 
-fn assert_sampled_prefix(held: &Held) {
-    let sampled = &held.sampled;
-    for index in 0..12 {
-        let sample = sampled.get(index).unwrap();
-        assert_eq!(
-            sample.observation.stamp.publication,
-            1 + 5 * u64::try_from(index).unwrap()
-        );
-        assert_sampled_resident(sample);
-    }
-    assert!(matches!(
-        sampled.get(12).unwrap().ranks(),
-        Err(Missing::Unread)
-    ));
-    assert_sampled_disk(sampled.get(1).unwrap());
-}
-
 fn assert_sampled_resident(sample: &SampledSecond) {
     let ranks = sample.ranks().unwrap();
     assert_eq!(ranks.selected, sample.observation);
@@ -514,6 +501,23 @@ fn assert_large_final(held: &mut Held) {
     assert_cohorts(held, 960);
 }
 
+/// The process tables a launch read for itself of the sealed minutes that end before
+/// publication `end`.
+fn process_captures_ending_by(trace: &persistence::work::ingestion::Trace, end: u64) -> usize {
+    use persistence::work::ingestion::{Key, Kind, Purpose};
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    events
+        .iter()
+        .filter(|event| event.kind == Kind::ContentCapture)
+        .filter(|event| event.purpose == Purpose::Ordinary)
+        .filter(|event| matches!(event.table, Some("processes" | "events")))
+        .filter(
+            |event| matches!(event.key, Key::Minute { end: minute_end, .. } if minute_end <= end),
+        )
+        .count()
+}
+
 fn historical_apps(trace: &persistence::work::ingestion::Trace) -> usize {
     use persistence::work::ingestion::{Key, Kind, Purpose};
     let mut events = Vec::new();
@@ -534,7 +538,7 @@ fn historical_apps(trace: &persistence::work::ingestion::Trace) -> usize {
         .count()
 }
 
-fn large_fixture() -> Fixture {
+fn large_fixture(derive: &dyn persistence::worker::Derive) -> Fixture {
     // A ring that holds a whole minute, so that the persister saves every reading of each.
     let mut fixture = Fixture::new_mode(true, 7, None);
     for minute in 0..40 {
@@ -546,7 +550,7 @@ fn large_fixture() -> Fixture {
             };
             fixture.publish_with_usage(wall, &usage(run_tick));
         }
-        fixture.seal_minute(minute);
+        fixture.seal_minute_derived(minute, derive);
     }
     fixture
 }

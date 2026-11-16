@@ -201,6 +201,7 @@ pub struct Span<T> {
 }
 
 impl<T> Span<T> {
+    #[cfg(test)]
     pub(super) fn free(&self) -> usize {
         self.buffers.free()
     }
@@ -214,6 +215,15 @@ impl<T> Span<T> {
 
         self.held[index] = reading;
         true
+    }
+
+    /// Replaces the reading at `index` with the one `fill` writes, in a buffer made new where
+    /// every buffer is held, as `push` writes one, so a View that holds the reading replaced
+    /// stops nothing.
+    pub(super) fn replace_held(&mut self, index: usize, fill: impl FnOnce(&mut T)) {
+        assert!(index < self.held.len());
+
+        self.held[index] = self.buffers.write_replacing(fill);
     }
 
     pub(super) fn clear(&mut self) {
