@@ -102,18 +102,45 @@ impl Sample {
 
 /// The Apps of `apps` that used the most of each resource in the observation `ranked` names.
 pub(crate) fn rank_apps(ranked: &Ranked, apps: &[impl Rankable]) -> Result<Ranks> {
-    let mut ranks = Ranks {
-        selected: ranked.selected,
-        app_count: u32::try_from(apps.len()).map_err(|_| Error::Bound("ranked Apps"))?,
-        membership_complete: ranked.membership_complete,
-        ungrouped_members: ranked.ungrouped_members,
-        metrics: METRICS.map(Ranking::new),
-    };
+    let mut ranking = RankApps::new(ranked, apps.len())?;
     for app in apps {
-        ranks_app(app, ranked.elapsed_ns, &mut ranks.metrics);
+        ranking.add(app);
     }
 
-    Ok(ranks)
+    Ok(ranking.ranks())
+}
+
+/// The ranks of one observation's Apps as `rank_apps` makes them, for Apps that are read one at
+/// a time rather than held in a slice.
+pub(crate) struct RankApps {
+    ranks: Ranks,
+    elapsed_ns: Option<u64>,
+}
+
+impl RankApps {
+    /// Ranks for the `app_count` Apps of the observation `ranked` names, none added yet.
+    pub(crate) fn new(ranked: &Ranked, app_count: usize) -> Result<Self> {
+        Ok(Self {
+            ranks: Ranks {
+                selected: ranked.selected,
+                app_count: u32::try_from(app_count).map_err(|_| Error::Bound("ranked Apps"))?,
+                membership_complete: ranked.membership_complete,
+                ungrouped_members: ranked.ungrouped_members,
+                metrics: METRICS.map(Ranking::new),
+            },
+            elapsed_ns: ranked.elapsed_ns,
+        })
+    }
+
+    /// Adds `app`, the next App of the observation in key order.
+    pub(crate) fn add(&mut self, app: &impl Rankable) {
+        ranks_app(app, self.elapsed_ns, &mut self.ranks.metrics);
+    }
+
+    /// The ranks of the Apps added.
+    pub(crate) fn ranks(self) -> Ranks {
+        self.ranks
+    }
 }
 
 impl Rankable for App {

@@ -1,7 +1,7 @@
 //! Older machine samples own their exact identity and bounded hover rankings together.
 use std::sync::Arc;
 
-use super::{AppRow, AppsCursor, AppsSecond, MachineSecond, Missing, Second};
+use super::{AppsSecond, MachineSecond, Missing, Second};
 use crate::apps::Stamp;
 use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::live_app_response::{
@@ -88,7 +88,11 @@ impl SampledSecond {
             return Err(Missing::Budget);
         }
 
-        let bytes = Self::take_bytes(AppsCursor::default().apps(apps), apps.missing());
+        let mut name_bytes = 0;
+        apps.app_names_in(0..apps.app_count(), |name| {
+            name_bytes = name_bytes.max(Self::take_name_bytes(name));
+        });
+        let bytes = Self::take_bytes(name_bytes, apps.missing());
         let reservation = budget.reserve(bytes).ok_or(Missing::Budget)?;
         Ok(Self {
             machine: machine.clone(),
@@ -146,7 +150,13 @@ impl SampledSecond {
         self.observation = apps.observation.unwrap_or_else(|| unreachable!());
         assert_eq!(self.observation.stamp.publication, machine.publication);
         assert_eq!(self.observation.wall_ns, Some(machine.wall_ns));
-        let reservation = budget.reserve(Self::take_bytes(&apps.apps, apps.missing.as_ref()));
+        let name_bytes = apps
+            .apps
+            .iter()
+            .map(|app| Self::take_name_bytes(&app.name))
+            .max()
+            .unwrap_or(0);
+        let reservation = budget.reserve(Self::take_bytes(name_bytes, apps.missing.as_ref()));
         match reservation {
             Some(reservation) => {
                 self.ranks = apps.ranks();
@@ -156,17 +166,17 @@ impl SampledSecond {
         }
     }
 
-    fn take_bytes(apps: &[AppRow], missing: Option<&Missing>) -> usize {
-        let name_bytes = apps
-            .iter()
-            .map(|app| {
-                size_of::<RankedApp>()
-                    + 2 * size_of::<usize>()
-                    + app.name.bytes.capacity()
-                    + app.name.display_name.capacity()
-            })
-            .max()
-            .unwrap_or(0);
+    /// The bytes a sample charges for one ranked name, `name`, in its allocation.
+    fn take_name_bytes(name: &RankedApp) -> usize {
+        size_of::<RankedApp>()
+            + 2 * size_of::<usize>()
+            + name.bytes.capacity()
+            + name.display_name.capacity()
+    }
+
+    /// The bytes a sample charges for its ranks, each name charged `name_bytes`, the most any
+    /// of its Apps' names takes, and the reason of a refusal `missing` gives.
+    fn take_bytes(name_bytes: usize, missing: Option<&Missing>) -> usize {
         let refusal_bytes = match missing {
             Some(Missing::Refused(reason)) => reason.len(),
             _ => 0,

@@ -224,7 +224,7 @@ fn details<'second>(second: &'second AppsSecond, app_path: &[u8]) -> &'second Ap
         .position(|row| row.name.bytes == app_path)
         .unwrap();
 
-    second.processes.as_ref().unwrap().app(index)
+    second.processes.as_ref().unwrap().own_app(index)
 }
 
 /// The bundle a process of `pid` runs from: pids below 7 from one that sorts before the other.

@@ -25,6 +25,24 @@ pub(crate) use reduce::WORKING_BYTES_MAX;
 pub(crate) use reduce::{AppReading, Capture, Interval, Reduction, Source, consecutive, identity};
 pub(crate) use saved::{SavedResidents, capture, capture_header, kept_readings};
 
+/// The measured readings of one App's resident memory over some seconds, as its mean counts
+/// them: their sum and how many there are.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Samples {
+    pub(crate) sum: u128,
+    pub(crate) count: u32,
+}
+
+impl Samples {
+    /// Adds the App's reading of one second, `resident`, where it is measured.
+    pub(crate) fn add(&mut self, resident: &crate::live_app_response::Measure) {
+        if let Some(known) = resident.measured() {
+            self.sum += u128::from(known);
+            self.count += 1;
+        }
+    }
+}
+
 pub(crate) fn has_resident(measure: &crate::live_app_response::Measure) -> bool {
     if measure.known > 0 {
         return true;

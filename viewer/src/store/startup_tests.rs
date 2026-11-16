@@ -1054,7 +1054,7 @@ pub(super) fn row_bytes(payloads: &[&super::Payload]) -> usize {
         .collect();
     let details: std::collections::HashSet<_> = payloads
         .iter()
-        .flat_map(|payload| payload.apps())
+        .flat_map(|payload| payload.own_apps())
         .map(std::ptr::from_ref)
         .collect();
 

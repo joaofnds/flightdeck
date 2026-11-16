@@ -113,15 +113,21 @@ impl QueryContext {
                 + display_bytes,
         )?;
         let mut window = WindowRanks::default();
+        // One cursor walks the seconds in order, so a packed block's seconds take their steps
+        // instead of each being rebuilt.
+        let scratch = self.reserve_response(super::AppsCursor::WORKING_BYTES_MAX)?;
+        let mut cursor = super::AppsCursor::default();
         assert!(self.seconds().len() <= super::SECONDS_MAX);
         for second in self.seconds() {
             if response_in_range(second, range) {
-                match second.apps().ranks() {
+                match cursor.ranks(second.apps()) {
                     Ok(ranks) => window.insert(ranks)?,
                     Err(_) => window.insert_missing(&second.observation)?,
                 }
             }
         }
+        drop(cursor);
+        drop(scratch);
         let held = size_of::<ContextRanks<WindowRanks>>()
             + 2 * size_of::<usize>()
             + WindowRanks::metadata_bytes_max(count)
@@ -304,19 +310,21 @@ fn response_in_range(second: &QuerySecond, range: ContextRange) -> bool {
         .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
 }
 
+/// The bytes the names of the ranks of `second` take at most, reading no App row.
 fn response_rank_display_bytes(second: &QuerySecond) -> usize {
-    let mut cursor = super::AppsCursor::default();
-    let apps = cursor.apps(second.apps());
-    let rows = 5 * apps.len().min(RANKS_MAX);
-    let names = apps
-        .iter()
-        .map(|app| app.name.display_name.len() + 2 * app.name.bytes.len())
-        .max()
-        .unwrap_or(0);
+    let apps = second.apps();
+    let app_count = apps.app_count();
+    let rows = 5 * app_count.min(RANKS_MAX);
+    let mut names = 0;
+    apps.app_names_in(0..app_count, |name| {
+        names = names.max(name.display_name.len() + 2 * name.bytes.len());
+    });
 
     4096 + rows * (512 + names)
 }
 
+#[cfg(test)]
+mod block_merge_tests;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]

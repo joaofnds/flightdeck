@@ -1,12 +1,12 @@
 //! The seconds of a packed block: each second's header, App rows and App details as the plain
-//! second holds them, and its processes read from the block's process table.
+//! second holds them, and its processes read from the block's table.
 
 use std::sync::Arc;
 
 use super::super::{Payload, ProcessRows};
-use super::{Checked, ProcessTable, processes_read_as};
+use super::{AppRowsShare, BlockTable, Checked, processes_read_as};
 use crate::byte_budget::ByteBudget;
-use crate::store::{AppRows, AppsSecond, Missing};
+use crate::store::{AppRow, AppRows, AppsSecond, Missing};
 
 /// Why a block stays plain. Each is a state the data or the machine can bring about, and none
 /// is a defect.
@@ -18,37 +18,114 @@ pub enum KeptPlain {
     Budget,
 }
 
-/// The seconds of the block of plain `seconds`, packed, every one rebuilt equal to its plain
-/// second, sharing each process's first row with the block before, `before`, where the two
-/// read the same, and charged to `budget` before the caller lets go of anything. Or why the
-/// block stays plain.
+/// The seconds of the block of plain `seconds`, packed, and the table that holds their Apps and
+/// processes, every second read through the table equal to its plain second, sharing each
+/// process's first row with the block before, `before`, where the two read the same, its App rows
+/// packed only where `share` admits them, and charged to `budget` before the caller lets go of
+/// anything. Or why the block stays plain.
 pub(in crate::store) fn pack_seconds(
     seconds: &[Arc<AppsSecond>],
-    before: Option<&ProcessTable>,
+    before: Option<&BlockTable>,
     budget: &Arc<ByteBudget>,
-) -> Result<Vec<Arc<AppsSecond>>, KeptPlain> {
-    let table = ProcessTable::pack(seconds, before, budget)?;
+    share: AppRowsShare,
+) -> Result<(Vec<Arc<AppsSecond>>, Arc<BlockTable>), KeptPlain> {
+    let table = BlockTable::pack(seconds, before, budget, share)?;
     let mut packed = Vec::with_capacity(crate::store::block::BLOCK_SECONDS_MAX);
     for (second_index, plain) in (0..).zip(seconds) {
         packed.push(Arc::new(pack_second(plain, &table, second_index, budget)?));
     }
 
     // A rebuilt second that differs is a defect of the packer, and nothing the data can cause,
-    // since what keeps a block plain is found before the block is built.
+    // since what keeps a block plain is found before the block is built. A second's Apps are
+    // read both ways a reader reads whole seconds, walked from the second before through the
+    // second's steps and rebuilt from the first rows and their changes over the rows of the
+    // second before, since the two are held apart and a defect in one does not show through the
+    // other. Every other read of a packed App is built on the rebuild's reading of one App, but
+    // each App over the block's seconds, which is read on its own after the seconds.
     let mut checked = table.checked();
-    for (index, (packed, plain)) in packed.iter().zip(seconds).enumerate() {
+    let mut walked = AppRowsRead::default();
+    let mut rebuilt = AppRowsRead::default();
+    for (index, (packed, plain)) in (0..).zip(packed.iter().zip(seconds)) {
+        let reads_as = if table.app_rows_packed() {
+            if index == 0 {
+                walked.rebuild(&table, index);
+            } else {
+                table.step_app_rows(index, &mut walked.rows, &mut walked.places);
+            }
+            rebuilt.rebuild(&table, index);
+            let apps_read = [walked.rows.as_slice(), rebuilt.rows.as_slice()];
+            // The table holds the second's Apps, so the second holds no row of its own.
+            packed.apps.is_empty() && second_reads_as(packed, plain, &apps_read, &mut checked)
+        } else {
+            second_reads_as(packed, plain, &[packed.apps.as_slice()], &mut checked)
+        };
         assert!(
-            second_reads_as(packed, plain, &mut checked),
+            reads_as,
             "packed second {index} reads otherwise than its plain second"
         );
     }
+    if table.app_rows_packed() {
+        assert!(
+            pack_seconds_apps_over(&table, seconds),
+            "a packed App over its block's seconds reads otherwise than its plain seconds"
+        );
+    }
 
-    Ok(packed)
+    Ok((packed, table))
 }
 
-/// Whether the packed `second` reads as its `plain` second, as `==` would find, its processes
-/// checked as `processes_read_as` checks them with `checked`.
-fn second_reads_as(second: &AppsSecond, plain: &AppsSecond, checked: &mut [Checked]) -> bool {
+/// Whether each App of the block of `table`, read over the block's seconds as the readers that
+/// sum over a block read it, reads as the plain `seconds` the block was built from.
+pub(super) fn pack_seconds_apps_over(table: &BlockTable, seconds: &[Arc<AppsSecond>]) -> bool {
+    // The index the next App held at each second takes among that second's Apps, which are in
+    // key order, the order of their places.
+    let mut index_at = [0_usize; crate::store::block::BLOCK_SECONDS_MAX];
+    let mut reads_as = true;
+    for place in 0..table.block_app_count() {
+        table.app_rows_over(place, u64::MAX, |second_index, row| {
+            let second_index = collector::usize_from_u32(second_index);
+            let index = &mut index_at[second_index];
+            reads_as &= seconds[second_index].apps.get(*index) == Some(row);
+            *index += 1;
+        });
+    }
+
+    reads_as
+        && seconds
+            .iter()
+            .zip(index_at)
+            .all(|(second, index)| second.apps.len() == index)
+}
+
+/// The rows of a packed second's Apps as one way of reading them leaves them.
+#[derive(Default)]
+struct AppRowsRead {
+    rows: Vec<AppRow>,
+    places: Vec<u32>,
+    spare: Vec<AppRow>,
+}
+
+impl AppRowsRead {
+    /// Rebuilds the rows as the Apps of the second at `second_index` of the block of `table`.
+    fn rebuild(&mut self, table: &BlockTable, second_index: u32) {
+        table.rebuild_app_rows(
+            second_index,
+            &mut self.rows,
+            &mut self.places,
+            &mut self.spare,
+        );
+    }
+}
+
+/// Whether the packed `second` reads as its `plain` second, as `==` would find, its Apps read
+/// as each of `apps_read`, and its processes checked as `processes_read_as` checks them with
+/// `checked`.
+pub(super) fn second_reads_as(
+    second: &AppsSecond,
+    plain: &AppsSecond,
+    apps_read: &[&[AppRow]],
+    checked: &mut [Checked],
+) -> bool {
     // Every field is named, so a field added to a second is one the check has to compare.
     let AppsSecond {
         metadata,
@@ -62,7 +139,7 @@ fn second_reads_as(second: &AppsSecond, plain: &AppsSecond, checked: &mut [Check
         live_ungrouped_members,
         usage_refused,
         usage_gone,
-        apps,
+        apps: _,
         totals,
     } = second;
     let processes_read = match (processes, &plain.processes) {
@@ -82,7 +159,7 @@ fn second_reads_as(second: &AppsSecond, plain: &AppsSecond, checked: &mut [Check
         && *live_ungrouped_members == plain.live_ungrouped_members
         && *usage_refused == plain.usage_refused
         && *usage_gone == plain.usage_gone
-        && *apps == plain.apps
+        && apps_read.iter().all(|read| **read == *plain.apps)
         && *totals == plain.totals
 }
 
@@ -104,11 +181,11 @@ fn payload_reads_as(payload: &Payload, plain: &Payload, checked: &mut [Checked])
         && processes_read_as(payload, plain, checked)
 }
 
-/// The second at `second_index` of a packed block whose process table is `table`, as the plain
+/// The second at `second_index` of a packed block whose block table is `table`, as the plain
 /// `second` holds it.
-fn pack_second(
+pub(super) fn pack_second(
     second: &AppsSecond,
-    table: &Arc<ProcessTable>,
+    table: &Arc<BlockTable>,
     second_index: u32,
     budget: &Arc<ByteBudget>,
 ) -> Result<AppsSecond, KeptPlain> {
@@ -116,6 +193,7 @@ fn pack_second(
         .metadata
         .packed(pack_second_copied_bytes(second), budget)
         .ok_or(KeptPlain::Budget)?;
+    // The second's Apps and their details are read from the block's table where it packs them.
     let processes = match &second.processes {
         Ok(payload) => Ok(Arc::new(pack_payload(
             payload,
@@ -138,7 +216,11 @@ fn pack_second(
         live_ungrouped_members: second.live_ungrouped_members,
         usage_refused: second.usage_refused,
         usage_gone: second.usage_gone,
-        apps: pack_app_rows(&second.apps, budget)?,
+        apps: if table.app_rows_packed() {
+            AppRows::default()
+        } else {
+            pack_second_app_rows(&second.apps, budget)?
+        },
         totals: second.totals,
     })
 }
@@ -156,7 +238,7 @@ fn pack_second_copied_bytes(second: &AppsSecond) -> usize {
 }
 
 /// A copy of `rows`, charged to `budget` before it is allocated.
-fn pack_app_rows(rows: &AppRows, budget: &Arc<ByteBudget>) -> Result<AppRows, KeptPlain> {
+fn pack_second_app_rows(rows: &AppRows, budget: &Arc<ByteBudget>) -> Result<AppRows, KeptPlain> {
     if rows.is_empty() {
         return Ok(AppRows::default());
     }
@@ -178,18 +260,24 @@ fn pack_app_rows(rows: &AppRows, budget: &Arc<ByteBudget>) -> Result<AppRows, Ke
 }
 
 /// The payload of `payload`'s second as the second at `second_index` of a packed block whose
-/// process table is `table` holds it: the same header and App details, and no rows of its own.
+/// table is `table` holds it: the same header, no process rows of its own, and its App details
+/// only where the table does not hold them.
 fn pack_payload(
     payload: &Payload,
-    table: &Arc<ProcessTable>,
+    table: &Arc<BlockTable>,
     second_index: u32,
     budget: &Arc<ByteBudget>,
 ) -> Result<Payload, KeptPlain> {
+    let app_count = if table.app_rows_packed() {
+        0
+    } else {
+        payload.apps.len()
+    };
     let reservation = budget
-        .reserve(Payload::header_bytes(payload.apps.len()))
+        .reserve(Payload::header_bytes(app_count))
         .ok_or(KeptPlain::Budget)?;
-    let mut apps = Vec::with_capacity(payload.apps.len());
-    apps.extend(payload.apps.iter().map(Arc::clone));
+    let mut apps = Vec::with_capacity(app_count);
+    apps.extend(payload.apps.iter().take(app_count).map(Arc::clone));
 
     Ok(Payload {
         selected: payload.selected,

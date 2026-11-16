@@ -36,7 +36,7 @@ pub struct Payload {
 }
 
 /// A second's processes: rows of its own, each shared with the second before where the two
-/// read the same, or its place in the process table of the packed block that holds it.
+/// read the same, or its place in the block table of the packed block that holds it.
 #[derive(Debug)]
 enum ProcessRows {
     Plain {
@@ -48,7 +48,7 @@ enum ProcessRows {
         app_indexes: Vec<AppIndex>,
     },
     Packed {
-        table: Arc<packed::ProcessTable>,
+        table: Arc<packed::BlockTable>,
         /// The second's index in its block, the oldest at 0.
         second_index: u32,
         /// How many processes the second holds.
@@ -100,10 +100,43 @@ struct Shared<Row> {
 }
 
 /// The rows of one kind of one payload in its sample's order, borrowed from their owners.
+#[cfg(any(test, feature = "fixtures"))]
 #[derive(Debug)]
 pub struct Rows<'payload, Row> {
     rows: std::slice::Iter<'payload, Arc<Shared<Row>>>,
 }
+
+/// The additional measures of each App of one payload, in the sample's order.
+#[derive(Clone, Debug)]
+pub struct AppDetailsOf<'payload> {
+    details: DetailsKind<'payload>,
+}
+
+#[derive(Clone, Debug)]
+enum DetailsKind<'payload> {
+    Plain(std::slice::Iter<'payload, Arc<Shared<AppDetails>>>),
+    Packed(packed::PackedDetails<'payload>),
+}
+
+impl Iterator for AppDetailsOf<'_> {
+    type Item = AppDetails;
+
+    fn next(&mut self) -> Option<AppDetails> {
+        match &mut self.details {
+            DetailsKind::Plain(details) => details.next().map(|shared| shared.row),
+            DetailsKind::Packed(details) => details.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.details {
+            DetailsKind::Plain(details) => details.size_hint(),
+            DetailsKind::Packed(details) => details.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for AppDetailsOf<'_> {}
 
 /// The processes of one payload whose App index is one index, in the sample's order. A plain
 /// payload's reads each row's index from the payload's indexes and no row it passes over, and a
@@ -236,12 +269,79 @@ const _: () = {
 };
 
 /// Measures displayed in App detail, aligned with the observation's App rows.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppDetails {
     pub live_members: u32,
     pub disk_read_bytes: Measure,
     pub disk_written_bytes: Measure,
     pub footprint_bytes: Measure,
+}
+
+/// The measures of App details, each three words of a packed block.
+const DETAILS_MEASURE_COUNT: usize = 3;
+
+/// The words of App details a packed block holds: the live members, then each measure's
+/// amount, its member counts and whether it overflowed.
+const APP_DETAILS_WORDS: usize = 1 + 3 * DETAILS_MEASURE_COUNT;
+
+impl AppDetails {
+    /// The details' fields as words, in the order `of_words` reads them. Every field is named,
+    /// so a field added to the details is one a packed block has to hold.
+    fn words(&self) -> [u64; APP_DETAILS_WORDS] {
+        let Self {
+            live_members,
+            disk_read_bytes,
+            disk_written_bytes,
+            footprint_bytes,
+        } = self;
+        let measures: [&Measure; DETAILS_MEASURE_COUNT] =
+            [disk_read_bytes, disk_written_bytes, footprint_bytes];
+        let mut words = [0; APP_DETAILS_WORDS];
+        words[0] = u64::from(*live_members);
+        for (index, measure) in measures.into_iter().enumerate() {
+            let Measure {
+                known,
+                measured_members,
+                unavailable_members,
+                overflowed,
+            } = *measure;
+            words[1 + 3 * index] = known;
+            words[2 + 3 * index] =
+                u64::from(measured_members) | u64::from(unavailable_members) << 32;
+            words[3 + 3 * index] = u64::from(overflowed);
+        }
+
+        words
+    }
+
+    /// The details whose fields `words` gives, as `words` gave them.
+    fn of_words(words: &[u64; APP_DETAILS_WORDS]) -> Self {
+        let measure = |index: usize| {
+            let members = words[2 + 3 * index];
+            Measure {
+                known: words[1 + 3 * index],
+                measured_members: details_word_low(members),
+                unavailable_members: details_word_low(members >> 32),
+                overflowed: words[3 + 3 * index] != 0,
+            }
+        };
+
+        Self {
+            live_members: details_word_low(words[0]),
+            disk_read_bytes: measure(0),
+            disk_written_bytes: measure(1),
+            footprint_bytes: measure(2),
+        }
+    }
+}
+
+/// The low 32 bits of `word`, a count the details' words hold.
+fn details_word_low(word: u64) -> u32 {
+    let Ok(low) = u32::try_from(word & u64::from(u32::MAX)) else {
+        unreachable!("the low 32 bits of a word fit a u32");
+    };
+
+    low
 }
 
 /// What a capture shares with: the payload the second before holds, and that second's App
@@ -276,18 +376,48 @@ impl Payload {
     /// the second's own.
     pub const APP_DETAILS_REFERENCE_BYTES: usize = size_of::<Arc<Shared<AppDetails>>>();
 
-    /// The additional measures of each App in the sample's order, borrowed from their owners.
+    /// The additional measures of each App in the sample's order, read from the second's own
+    /// details or from its block's App table.
     #[must_use]
-    pub fn apps(&self) -> Rows<'_, AppDetails> {
-        Rows {
-            rows: self.apps.iter(),
-        }
+    pub fn apps(&self) -> AppDetailsOf<'_> {
+        let details = match &self.rows {
+            ProcessRows::Packed {
+                table,
+                second_index,
+                ..
+            } if table.app_rows_packed() => {
+                assert!(self.apps.is_empty());
+                DetailsKind::Packed(table.app_details_of(*second_index))
+            }
+            ProcessRows::Plain { .. } | ProcessRows::Packed { .. } => {
+                DetailsKind::Plain(self.apps.iter())
+            }
+        };
+
+        AppDetailsOf { details }
     }
 
-    /// The additional measures of the App at `index` of the sample's Apps.
-    #[must_use]
-    pub fn app(&self, index: usize) -> &AppDetails {
+    /// The additional measures the payload holds as allocations of its own, which a packed
+    /// payload's block holds in its table instead.
+    pub(super) fn own_apps(&self) -> impl ExactSizeIterator<Item = &AppDetails> {
+        self.apps.iter().map(|shared| &shared.row)
+    }
+
+    /// The additional measures of the App at `index` of a plain payload's Apps, as the payload
+    /// holds them, which a test of sharing compares by address.
+    #[cfg(test)]
+    pub(super) fn own_app(&self, index: usize) -> &AppDetails {
         &self.apps[index].row
+    }
+
+    /// The additional measures of the App at `index` of the sample's Apps, of a payload that
+    /// holds them of its own. A reader of a packed second reaches its Apps through `AppAt`.
+    #[must_use]
+    pub fn app(&self, index: usize) -> AppDetails {
+        let Some(app) = self.apps.get(index) else {
+            unreachable!("a reader asks a payload for an App it holds of its own");
+        };
+        app.row
     }
 
     /// Every process of the second, in the sample's order, each with its App index.
@@ -307,11 +437,10 @@ impl Payload {
         Places { places }
     }
 
-    /// The processes whose App is the App at `app_index` of the second's Apps, `apps`, or that
-    /// belong to no App where `app_index` is `None`, in the sample's order.
+    /// The processes whose App is the App at `app_index` of the second's Apps, or that belong to
+    /// no App where `app_index` is `None`, in the sample's order.
     #[must_use]
-    pub fn members(&self, app_index: Option<u32>, apps: &[AppRow]) -> Members<'_> {
-        assert_eq!(apps.len(), self.apps.len());
+    pub fn members(&self, app_index: Option<u32>) -> Members<'_> {
         let members = match &self.rows {
             ProcessRows::Plain { rows, app_indexes } => MembersKind::Plain {
                 rows: rows.iter().zip(app_indexes.iter()),
@@ -322,12 +451,36 @@ impl Payload {
                 second_index,
                 ..
             } => {
-                let app = app_index.map(|index| &apps[collector::usize_from_u32(index)]);
-                MembersKind::Packed(table.members(*second_index, app))
+                let place = app_index.map(|index| {
+                    let place = table.app_place_at(*second_index, collector::usize_from_u32(index));
+                    let Some(place) = place else {
+                        unreachable!("a reader asks for the members of an App the second holds");
+                    };
+                    place
+                });
+                MembersKind::Packed(table.members(*second_index, place))
             }
         };
 
         Members { members, app_index }
+    }
+
+    /// The processes of the App at `app_place` among the Apps of the packed block that holds
+    /// the second, whose index at the second is `app_index`, in the sample's order.
+    pub(super) fn members_of_place(&self, app_place: u32, app_index: u32) -> Members<'_> {
+        let ProcessRows::Packed {
+            table,
+            second_index,
+            ..
+        } = &self.rows
+        else {
+            unreachable!("an App place names an App of a packed block");
+        };
+
+        Members {
+            members: MembersKind::Packed(table.members(*second_index, Some(app_place))),
+            app_index: Some(app_index),
+        }
     }
 
     /// The process of pid `pid` created at `creation`, where the second holds it.
@@ -359,19 +512,11 @@ impl Payload {
         self.len() == 0
     }
 
-    /// Whether the second's processes are read from its packed block's process table.
+    /// Whether the second's processes are read from its packed block's table.
     #[cfg(test)]
     #[must_use]
     pub(in crate::store) fn packed(&self) -> bool {
         matches!(self.rows, ProcessRows::Packed { .. })
-    }
-
-    /// The process table of the packed block that holds the second, where one does.
-    pub(super) fn table(&self) -> Option<&Arc<packed::ProcessTable>> {
-        match &self.rows {
-            ProcessRows::Plain { .. } => None,
-            ProcessRows::Packed { table, .. } => Some(table),
-        }
     }
 
     /// Captures `sample`, sharing each process row and each App's additional measures that equal
@@ -630,6 +775,46 @@ impl<Row> Shared<Row> {
     }
 }
 
+/// What a test of a tool outside the store builds a second's payload by hand through.
+#[cfg(any(test, feature = "fixtures"))]
+impl Payload {
+    /// The payload of the second `selected` that holds no process rows and `details`, the
+    /// additional measures of each of the second's Apps in key order, each shared with the one
+    /// at the same index of `previous` where the two read the same, charged to `budget`.
+    ///
+    /// # Errors
+    ///
+    /// `Missing::Budget` where `budget` has no room for the payload.
+    pub fn of_app_details(
+        selected: Observation,
+        details: Vec<AppDetails>,
+        previous: Option<&Self>,
+        budget: &Arc<ByteBudget>,
+    ) -> Result<Self, Missing> {
+        let reservation = budget
+            .reserve(Self::header_bytes(details.len()))
+            .ok_or(Missing::Budget)?;
+        let held = previous.map_or(&[][..], |previous| previous.apps.as_slice());
+        let apps = details
+            .into_iter()
+            .enumerate()
+            .map(|(index, details)| Shared::share(details, held.get(index), budget))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            selected,
+            previous: None,
+            rows: ProcessRows::Plain {
+                rows: Vec::new(),
+                app_indexes: Vec::new(),
+            },
+            apps,
+            reservation,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "fixtures"))]
 impl<Row> Clone for Rows<'_, Row> {
     fn clone(&self) -> Self {
         Self {
@@ -638,6 +823,7 @@ impl<Row> Clone for Rows<'_, Row> {
     }
 }
 
+#[cfg(any(test, feature = "fixtures"))]
 impl<'payload, Row> Iterator for Rows<'payload, Row> {
     type Item = &'payload Row;
 
@@ -650,6 +836,7 @@ impl<'payload, Row> Iterator for Rows<'payload, Row> {
     }
 }
 
+#[cfg(any(test, feature = "fixtures"))]
 impl<Row> ExactSizeIterator for Rows<'_, Row> {}
 
 impl<'payload> Iterator for Members<'payload> {

@@ -2,8 +2,10 @@
 //! draws on a line of its own, and the other Apps added up as Other, as the worker's App
 //! histories show them.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
+use super::payload::packed::BlockTable;
 use super::{AppRow, AppsSecond};
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::live::resident_history::has_resident;
@@ -172,10 +174,12 @@ pub(super) trait PointRow: Rankable {
 
 /// The Apps one chart point shows, one second's or one stretch's.
 pub(super) trait PointApps {
-    type Row: PointRow;
+    type Row: PointRow + Clone;
 
-    /// Every App of the point, once each, in key order.
-    fn rows(&self) -> &[Self::Row];
+    /// How many Apps the point holds.
+    fn app_count(&self) -> usize;
+    /// The row of the App `name` names, where the point holds it.
+    fn found(&self, name: &RankedApp) -> Option<Cow<'_, Self::Row>>;
     /// Every App of `rows` added up, as `Totals::of` adds them.
     fn totals(&self) -> &Totals;
     /// The interval the point's rates are taken over, where it is known.
@@ -201,7 +205,7 @@ pub struct Completeness {
 impl AppsSecond {
     /// What the second shows on the App chart of `metric` whose own lines draw `cohort`.
     #[must_use]
-    pub fn attribution(
+    pub(in crate::store) fn attribution(
         &self,
         metric: AppAttributionMetric,
         cohort: &[Arc<RankedApp>],
@@ -212,8 +216,45 @@ impl AppsSecond {
     /// What the second shows on the chart of resident memory by App whose own lines draw
     /// `cohort`.
     #[must_use]
-    pub fn resident(&self, cohort: &[Arc<RankedApp>]) -> Resident {
+    pub(in crate::store) fn resident(&self, cohort: &[Arc<RankedApp>]) -> Resident {
         resident(self, cohort)
+    }
+
+    /// What the second shows on the App chart of `metric`, as `attribution` shows it, where the
+    /// packed block of `table` holds its Apps as the second at `second_index`.
+    #[must_use]
+    pub(in crate::store) fn attribution_of(
+        &self,
+        table: &BlockTable,
+        second_index: u32,
+        metric: AppAttributionMetric,
+        cohort: &[Arc<RankedApp>],
+    ) -> Attribution {
+        let point = PackedPoint {
+            second: self,
+            table,
+            second_index,
+        };
+
+        attribution(&point, metric, cohort)
+    }
+
+    /// What the second shows on the chart of resident memory, as `resident` shows it, where the
+    /// packed block of `table` holds its Apps as the second at `second_index`.
+    #[must_use]
+    pub(in crate::store) fn resident_of(
+        &self,
+        table: &BlockTable,
+        second_index: u32,
+        cohort: &[Arc<RankedApp>],
+    ) -> Resident {
+        let point = PackedPoint {
+            second: self,
+            table,
+            second_index,
+        };
+
+        resident(&point, cohort)
     }
 
     /// How completely the second's readings found the Mac's processes.
@@ -229,11 +270,55 @@ impl AppsSecond {
     }
 }
 
+/// A second whose Apps a packed block holds, as a chart point, which reads each App it is asked
+/// for from the block and rebuilds no row of the rest.
+struct PackedPoint<'second> {
+    second: &'second AppsSecond,
+    table: &'second BlockTable,
+    second_index: u32,
+}
+
+impl PointApps for PackedPoint<'_> {
+    type Row = AppRow;
+
+    fn app_count(&self) -> usize {
+        self.table.app_count(self.second_index)
+    }
+
+    fn found(&self, name: &RankedApp) -> Option<Cow<'_, AppRow>> {
+        let place = self
+            .table
+            .app_place_of(self.second_index, name.kind, &name.bytes)?;
+
+        Some(Cow::Owned(self.table.app_row(place, self.second_index)))
+    }
+
+    fn totals(&self) -> &Totals {
+        &self.second.totals
+    }
+
+    fn elapsed_ns(&self) -> Option<u64> {
+        self.second.elapsed_ns
+    }
+
+    fn holds_apps(&self) -> bool {
+        self.second.missing.is_none()
+    }
+
+    fn completeness(&self) -> Completeness {
+        self.second.completeness()
+    }
+}
+
 impl PointApps for AppsSecond {
     type Row = AppRow;
 
-    fn rows(&self) -> &[AppRow] {
-        &self.apps
+    fn app_count(&self) -> usize {
+        self.apps.len()
+    }
+
+    fn found(&self, name: &RankedApp) -> Option<Cow<'_, AppRow>> {
+        found_in(&self.apps, name).map(Cow::Borrowed)
     }
 
     fn totals(&self) -> &Totals {
@@ -285,9 +370,10 @@ pub(super) fn attribution<P: PointApps>(
     let mut taken = Totals::default();
     let mut found = 0;
     for (reading, name) in attribution.apps.iter_mut().zip(cohort) {
-        let Some(row) = row(point, name) else {
+        let Some(row) = point.found(name) else {
             continue;
         };
+        let row = &*row;
         let measure = row.measure(ranked_metric(metric));
 
         *reading = Some(AttributionReading {
@@ -312,8 +398,8 @@ fn attribution_other<P: PointApps>(
     taken: &Totals,
     found: usize,
 ) -> OtherReading {
-    assert!(found <= point.rows().len());
-    let Ok(app_count) = u32::try_from(point.rows().len() - found) else {
+    assert!(found <= point.app_count());
+    let Ok(app_count) = u32::try_from(point.app_count() - found) else {
         unreachable!("a point holds at most `APPS_PER_SECOND_MAX` Apps");
     };
 
@@ -376,9 +462,10 @@ pub(super) fn resident<P: PointApps>(point: &P, cohort: &[Arc<RankedApp>]) -> Re
 
     let mut taken = Totals::default();
     for (reading, name) in resident.apps.iter_mut().zip(cohort) {
-        let Some(row) = row(point, name) else {
+        let Some(row) = point.found(name) else {
             continue;
         };
+        let row = &*row;
         let measure = row.measure(Metric::Resident);
         if !has_resident(&measure) {
             continue;
@@ -419,10 +506,9 @@ fn resident_other<P: PointApps>(point: &P, taken: &Totals) -> ResidentOther {
     }
 }
 
-/// The row of the App `name` names, where `point` holds it.
-fn row<'point, P: PointApps>(point: &'point P, name: &RankedApp) -> Option<&'point P::Row> {
+/// The row of the App `name` names among `rows`, which are in key order.
+pub(super) fn found_in<'rows, R: PointRow>(rows: &'rows [R], name: &RankedApp) -> Option<&'rows R> {
     let key = name.kind.key(&name.bytes);
-    let rows = point.rows();
     let index = rows
         .binary_search_by(|row| row.name().kind.key(&row.name().bytes).cmp(&key))
         .ok()?;

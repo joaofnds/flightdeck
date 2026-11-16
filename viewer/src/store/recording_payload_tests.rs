@@ -2086,8 +2086,8 @@ fn a_full_minute_keeps_app_details_its_seconds_repeat_once() {
     let second = seconds[1].processes.as_ref().unwrap();
     let third = seconds[2].processes.as_ref().unwrap();
     assert_eq!(second.apps().len(), 2);
-    assert!(std::ptr::eq(second.app(0), third.app(0)));
-    assert!(std::ptr::eq(second.app(1), third.app(1)));
+    assert!(std::ptr::eq(second.own_app(0), third.own_app(0)));
+    assert!(std::ptr::eq(second.own_app(1), third.own_app(1)));
 }
 
 /// The seconds the real loader makes of one sealed minute of three ticks whose processes read

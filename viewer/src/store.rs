@@ -66,6 +66,7 @@ pub use attribution::{
     ResidentOther, Totals,
 };
 use block::Block;
+pub(in crate::store) use block::BlockSeconds;
 pub use block::{AppAt, AppsCursor, AppsSpan, Processes, Second, Seconds};
 pub use buffers::{Buffers, Mailbox, Span, Waker};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
@@ -301,7 +302,8 @@ impl Store {
     pub fn start_with_budget(root: &Path, budget: Arc<ByteBudget>) -> io::Result<Self> {
         let shared = Arc::new(Shared::starting());
         let root = root.to_owned();
-        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        let (store_end, packing_end) =
+            packing::pair(Arc::clone(&budget), payload::packed::APP_ROWS_PACKED_SHARE);
         let mut held = Held::new(root.clone(), budget, store_end);
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
@@ -556,7 +558,8 @@ impl Held {
     /// answer and ends once the store is gone.
     #[cfg(test)]
     fn with_packing_thread(budget: Arc<ByteBudget>) -> Self {
-        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        let (store_end, packing_end) =
+            packing::pair(Arc::clone(&budget), payload::packed::APP_ROWS_PACKED_ALWAYS);
         // The thread ends once the store's end is gone, so the test lets go of its handle.
         drop(packing_end.start(thread::current()).unwrap());
 
@@ -566,7 +569,8 @@ impl Held {
     /// A store as `new` makes it, which keeps the packing thread's end for the test to run.
     #[cfg(test)]
     fn keeping_packing_end(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
-        let (store_end, packing_end) = packing::pair(Arc::clone(&budget));
+        let (store_end, packing_end) =
+            packing::pair(Arc::clone(&budget), payload::packed::APP_ROWS_PACKED_ALWAYS);
         let mut held = Self::new(root, budget, store_end);
         held.apps.keep_packing_end(packing_end);
 

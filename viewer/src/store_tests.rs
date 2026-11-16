@@ -161,20 +161,24 @@ fn assert_saved_app_readings(saved: &View, live: &View) {
     use super::native::Origin;
     assert_eq!(saved.apps.len(), live.apps.len());
     assert!(saved.apps.len() <= super::SECONDS_MAX);
-    for (saved, live) in saved.apps.iter().zip(live.apps.iter()) {
+    for (saved, live) in saved.apps.seconds().zip(live.apps.seconds()) {
         assert_eq!(
-            saved.metadata.origin,
+            saved.origin(),
             Origin::Saved(persistence::Losses::default())
         );
-        assert_eq!(
-            live.metadata.origin,
-            Origin::Live(persistence::Losses::default())
-        );
+        assert_eq!(live.origin(), Origin::Live(persistence::Losses::default()));
         assert_app_facts_equal(saved, live);
     }
 }
 
-pub(super) fn assert_app_facts_equal(actual: &super::AppsSecond, expected: &super::AppsSecond) {
+/// Asserts `actual` and `expected` hold the same readings, wherever each came from, and read the
+/// same Apps, whether their blocks hold them plain or packed.
+pub(super) fn assert_app_facts_equal(actual: super::Second<'_>, expected: super::Second<'_>) {
+    let mut actual_cursor = super::AppsCursor::default();
+    let mut expected_cursor = super::AppsCursor::default();
+    assert_eq!(actual_cursor.apps(actual), expected_cursor.apps(expected));
+
+    let (actual, expected) = (actual.stored(), expected.stored());
     assert_eq!(actual.processes, expected.processes);
     assert_eq!(actual.missing, expected.missing);
     assert_eq!(actual.observation, expected.observation);
@@ -188,7 +192,6 @@ pub(super) fn assert_app_facts_equal(actual: &super::AppsSecond, expected: &supe
     );
     assert_eq!(actual.usage_refused, expected.usage_refused);
     assert_eq!(actual.usage_gone, expected.usage_gone);
-    assert_eq!(actual.apps, expected.apps);
     assert_eq!(actual.totals, expected.totals);
 }
 

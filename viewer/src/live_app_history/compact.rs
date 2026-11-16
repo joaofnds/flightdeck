@@ -40,6 +40,25 @@ impl CompactMeasure {
         }
     }
 
+    /// The measure as the two words a packed block holds it in: the amount, then its coverage.
+    pub(crate) fn words(self) -> [u64; 2] {
+        let Self { known, coverage } = self;
+
+        [u64::from_le_bytes(known), u64::from(coverage)]
+    }
+
+    /// The measure whose words `words` gives, as `words` gave them.
+    pub(crate) fn of_words(words: [u64; 2]) -> Self {
+        let Ok(coverage) = u32::try_from(words[1]) else {
+            unreachable!("a measure's second word holds its coverage");
+        };
+
+        Self {
+            known: words[0].to_le_bytes(),
+            coverage,
+        }
+    }
+
     pub(super) fn json(self) -> serde_json::Value {
         self.measure().json()
     }

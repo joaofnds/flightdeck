@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
-use viewer::store::{AppsSecond, ByteBudget, MachineSecond, SampledSecond, View};
+use viewer::store::{AppsSecond, ByteBudget, MachineSecond, SampledSecond, Second, View};
 
 use super::super::LiveDashboard;
 use super::{InputDriver, InputHarness, PlotExit};
@@ -593,7 +593,8 @@ fn reading_following(panel_id: &str, seconds: &[MachineSecond]) -> (Option<u64>,
 
 /// The top Apps of `second` and its `held_apps`, as the worker ranks a second's Apps.
 fn top_apps(second: &MachineSecond) -> TopApps {
-    let ranks = held_apps(second).ranks();
+    let apps = held_apps(second);
+    let ranks = Second::plain(&apps).ranks();
     let Rankings::Ready(top) = from_selected(ranks.map_err(|missing| missing.to_string())) else {
         panic!("the Apps of {} rank", second.publication);
     };

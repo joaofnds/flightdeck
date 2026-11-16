@@ -88,9 +88,36 @@ impl<'operation> Reduction<'operation> {
         apps: impl Iterator<Item = AppReading<'key>>,
         source: Source,
     ) -> Result<()> {
+        if !self.observe_point(capture, source)? {
+            return Ok(());
+        }
+        for (index, app) in apps.enumerate() {
+            self.operation.check()?;
+            if index == APPS_MAX {
+                return Err(Error::Bound("resident history observation Apps"));
+            }
+
+            self.means.observe(&app.key, &app.resident)?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds to the means the readings of the App `key` names over seconds whose points
+    /// `observe_point` added, `samples` of them, as `observe` adds the App's reading of each of
+    /// those seconds.
+    pub(crate) fn merge(&mut self, key: &AppKey<'_>, samples: super::Samples) -> Result<()> {
+        self.operation.check()?;
+        self.means.merge(key, samples)
+    }
+
+    /// Adds the point of `capture` as `observe` adds it, failing where it fails, and returns
+    /// whether `observe` would go on to add the point's Apps, which the caller then adds through
+    /// `merge`.
+    pub(crate) fn observe_point(&mut self, capture: &Capture, source: Source) -> Result<bool> {
         self.operation.check()?;
         if !self.in_range(&capture.observation)? {
-            return Ok(());
+            return Ok(false);
         }
 
         let index = self
@@ -106,7 +133,7 @@ impl<'operation> Reduction<'operation> {
                 }
                 if source == Source::Saved {
                     if point.source == Source::Live {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
 
@@ -129,16 +156,8 @@ impl<'operation> Reduction<'operation> {
                 source,
             },
         );
-        for (index, app) in apps.enumerate() {
-            self.operation.check()?;
-            if index == APPS_MAX {
-                return Err(Error::Bound("resident history observation Apps"));
-            }
 
-            self.means.observe(&app.key, &app.resident)?;
-        }
-
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn choose(&mut self) -> Result<()> {

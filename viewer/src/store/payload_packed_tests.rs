@@ -6,57 +6,135 @@ use collector::ring::{IdentityUnavailable, ProcessCreation};
 use super::super::{
     AppDetails, AppIndex, CompactAmount, Payload, ProcessName, ProcessRow, ProcessRows, Shared,
 };
-use super::{KeptPlain, ProcessTable, pack_seconds, processes_read_as};
+use super::{
+    APP_ROWS_PACKED_ALWAYS, AppRowsShare, AppStep, BlockTable, KeptPlain, pack_seconds,
+    processes_read_as,
+};
 use crate::apps::{Amount, PROCESS_INTERVALS_MAX, ProcessState, Stamp, Unavailable};
-use crate::live_app_response::{App, Bytes, Key, KeyKind, Measure, Observation, Sample};
-use crate::store::{APPS_PER_SECOND_MAX, AppsSecond, ByteBudget, Missing};
+use crate::live_app_response::{
+    APPS_PAGE_ROWS_MAX, App, Bytes, Detail, Key, KeyKind, Measure, Observation,
+    PROCESSES_PAGE_ROWS_MAX, Page, RankedApp, Sample,
+};
+use crate::store::{APPS_PER_SECOND_MAX, AppsCursor, AppsSecond, ByteBudget, Missing, Second};
 
 const BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const NS: u64 = 1_000_000_000;
 const SEEDS: u64 = 40;
 /// One App more than half of what a block holds.
 pub(in crate::store) const APPS_PAST_HALF: usize = APPS_PER_SECOND_MAX / 2 + 1;
+/// The share under which no block packs its App rows, whatever they save.
+pub(in crate::store) const APP_ROWS_PACKED_NEVER: AppRowsShare = AppRowsShare {
+    numerator: 0,
+    denominator: 1,
+};
 
-#[test]
-fn every_second_of_a_generated_block_rebuilds_equal_to_its_plain_second() {
-    // Goal: a packed block reads at each of its seconds exactly what the plain second held:
-    // its header, each process in its order with every reading and its App index, and each
-    // App detail.
-    // Method: generate a block of 31 to 64 plain seconds from each of forty seeds, holding an
-    // exec, an exit, unavailable amounts, a process and Apps absent from some seconds, an App
-    // that comes and goes twice, a process first listed between two the block holds, one pid
-    // held twice with two creations, values that need all 64 bits, a second with no Apps, a
-    // second whose process rows were refused and a restart, where about one process in five
-    // changes its amounts each second and the rest keep their rows, pack it, and compare every
-    // second with its plain second by `==`, and each of its processes as `find` reads it.
-    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+macro_rules! generated_block_case {
+    ($name:ident, $share:expr, $rows_packed:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: a packed block reads at each of its seconds exactly what the plain second
+            // held: its header, each process in its order with every reading and its App index,
+            // and each App detail.
+            // Method: generate a block of 31 to 64 plain seconds from each of forty seeds,
+            // holding an exec, an exit, unavailable amounts, a process and Apps absent from some
+            // seconds, an App that comes and goes twice, a process first listed between two the
+            // block holds, one pid held twice with two creations, values that need all 64 bits,
+            // a second with no Apps, a second whose process rows were refused and a restart,
+            // where about one process in five changes its amounts each second and the rest keep
+            // their rows, and Apps whose readings change at some seconds and not at others, pack
+            // it under this case's share, and read every second back as `assert_reads_as` reads
+            // it, and each of its processes as `find` reads it.
+            let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
 
-    for seed in 1..=SEEDS {
-        let plain = generated_block(seed, &budget);
-        let (shared_count, row_count) = shared_rows(&plain);
-        assert!(
-            4 * shared_count >= row_count,
-            "seed {seed}: {shared_count} of {row_count}"
-        );
-        let packed = pack_seconds(&plain, None, &budget).unwrap();
-
-        assert_eq!(packed.len(), plain.len(), "seed {seed}");
-        for (index, (packed, plain)) in packed.iter().zip(&plain).enumerate() {
-            let message = format!("seed {seed} second {index}");
-            if let Ok(payload) = &packed.processes {
-                assert!(payload.packed(), "{message}");
-            }
-            assert!(**packed == **plain, "{message}");
-            let (Ok(packed), Ok(plain)) = (&packed.processes, &plain.processes) else {
-                continue;
-            };
-            for process in plain.processes() {
-                let (pid, creation) = (process.pid(), process.creation());
+            for seed in 1..=SEEDS {
+                let plain = generated_block(seed, &budget);
+                let (shared_count, row_count) = shared_rows(&plain);
                 assert!(
-                    packed.find(pid, creation) == plain.find(pid, creation),
-                    "{message} pid {pid}"
+                    4 * shared_count >= row_count,
+                    "seed {seed}: {shared_count} of {row_count}"
                 );
+                let message = format!("seed {seed}");
+                let (packed, table) = pack_seconds(&plain, None, &budget, $share).unwrap();
+                assert_eq!(table.app_rows_packed(), $rows_packed, "{message}");
+                assert_reads_as(&packed, &table, &plain, &message);
+                assert_processes_find_as(&packed, &plain, &message);
             }
+        }
+    };
+}
+
+generated_block_case!(
+    every_second_of_a_generated_block_with_app_rows_packed_rebuilds_equal_to_its_plain_second,
+    APP_ROWS_PACKED_ALWAYS,
+    true
+);
+generated_block_case!(
+    every_second_of_a_generated_block_with_app_rows_plain_rebuilds_equal_to_its_plain_second,
+    APP_ROWS_PACKED_NEVER,
+    false
+);
+
+macro_rules! share_boundary_case {
+    ($name:ident, $bytes_past:expr, $rows_packed:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: the packer keeps a block's App rows plain where packed they take exactly the
+            // share it is handed of their plain bytes, packs them where the share is one byte
+            // more, and the block reads as its plain seconds in either form.
+            // Method: pack generated blocks once to learn the bytes of their App rows in each
+            // form, pack each again under the share of those packed bytes and this case's bytes
+            // past them, and read it back as `assert_reads_as` reads it.
+            let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+
+            for seed in 1..=SEEDS / 4 {
+                let plain = generated_block(seed, &budget);
+                let (_, learned) =
+                    pack_seconds(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
+                let bytes = learned.app_rows_bytes();
+                assert!(bytes.packed < bytes.plain, "seed {seed}");
+                let share = AppRowsShare {
+                    numerator: u64::try_from(bytes.packed + $bytes_past).unwrap(),
+                    denominator: u64::try_from(bytes.plain).unwrap(),
+                };
+
+                let message = format!("seed {seed}");
+                let (packed, table) = pack_seconds(&plain, None, &budget, share).unwrap();
+                assert_eq!(table.app_rows_packed(), $rows_packed, "{message}");
+                assert_eq!(table.app_rows_bytes(), bytes, "{message}");
+                assert_reads_as(&packed, &table, &plain, &message);
+            }
+        }
+    };
+}
+
+share_boundary_case!(
+    a_block_whose_packed_app_rows_take_exactly_the_share_keeps_them_plain,
+    0,
+    false
+);
+share_boundary_case!(
+    a_block_whose_packed_app_rows_take_one_byte_less_than_the_share_packs_them,
+    1,
+    true
+);
+
+/// Checks that each process of each `plain` second is found in its `packed` second as `find`
+/// finds it in the plain one.
+fn assert_processes_find_as(packed: &[Arc<AppsSecond>], plain: &[Arc<AppsSecond>], message: &str) {
+    for (index, (packed, plain)) in packed.iter().zip(plain).enumerate() {
+        let message = format!("{message} second {index}");
+        if let Ok(payload) = &packed.processes {
+            assert!(payload.packed(), "{message}");
+        }
+        let (Ok(packed), Ok(plain)) = (&packed.processes, &plain.processes) else {
+            continue;
+        };
+        for process in plain.processes() {
+            let (pid, creation) = (process.pid(), process.creation());
+            assert!(
+                packed.find(pid, creation) == plain.find(pid, creation),
+                "{message} pid {pid}"
+            );
         }
     }
 }
@@ -112,11 +190,9 @@ fn a_block_the_app_producer_reads_packs_and_reads_as_its_plain_seconds() {
         .collect();
     assert_eq!(sevens, [7, 700]);
 
-    let packed = pack_seconds(&seconds, None, &budget).unwrap();
+    let (packed, table) = pack_seconds(&seconds, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
 
-    for (index, (packed, plain)) in packed.iter().zip(&seconds).enumerate() {
-        assert!(**packed == **plain, "second {index}");
-    }
+    assert_reads_as(&packed, &table, &seconds, "the producer's block");
 }
 
 /// How many process rows of the plain seconds of `block` are the row of the second before,
@@ -150,7 +226,7 @@ fn a_packed_process_reads_each_case_the_generator_holds() {
     let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
     let plain = generated_block(7, &budget);
 
-    let packed = pack_seconds(&plain, None, &budget).unwrap();
+    let (packed, _) = pack_seconds(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
 
     let at = |index: usize, pid: i32, unique_id: u64| {
         let payload = packed[index].processes.as_ref().unwrap();
@@ -188,6 +264,146 @@ fn a_packed_process_reads_each_case_the_generator_holds() {
 }
 
 #[test]
+fn a_packed_app_reads_each_case_the_generator_holds() {
+    // Goal: the App cases the round trip is built to hold reach the packed block, so its
+    // equality is not met by blocks that lack them.
+    // Method: pack the block of one seed and read, through the packed seconds alone, an App
+    // absent from some seconds, an App that comes and goes twice, a second with no Apps, a
+    // second whose process rows were refused, a value that needs all 64 bits, an unavailable
+    // measure, an overflowed count, readings that change and readings that stay, a restart, and
+    // more than thirty ticks.
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+    let plain = generated_block(7, &budget);
+    let layout = Layout::of(7, plain.len());
+
+    let (packed, table) = pack_seconds(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
+
+    let second = |index: usize| Second::packed_at(&packed[index], &table, index);
+    let held = |key: &[u8], index: usize| second(index).app_of(KeyKind::Bundle, key);
+    let arrivals = |key: &[u8]| {
+        (1..packed.len())
+            .filter(|&index| held(key, index).is_some() && held(key, index - 1).is_none())
+            .count()
+    };
+    assert!(packed.len() > 30);
+    assert!((0..packed.len()).any(|index| held(b"/B.app", index).is_none()));
+    assert!((0..packed.len()).any(|index| held(b"/B.app", index).is_some()));
+    assert!(arrivals(b"/C.app") >= 2);
+    assert_eq!(second(layout.empty).app_count(), 0);
+    assert!(second(layout.refused).app_count() > 0);
+    assert!(second(layout.refused).processes().is_err());
+    assert!(!packed[layout.restart].consecutive);
+    let mut cursor = AppsCursor::default();
+    let mut words: BTreeSet<u64> = BTreeSet::new();
+    let mut unavailable = false;
+    let mut overflowed = false;
+    for index in 0..packed.len() {
+        for row in cursor.apps(second(index)) {
+            let view = row.presentation(&details_of(row));
+            words.insert(view.cpu_ns.known);
+            unavailable |= view.cpu_ns.unavailable_members > 0;
+            overflowed |= view.cpu_ns.overflowed;
+        }
+    }
+    assert!(words.contains(&u64::MAX));
+    assert!(unavailable);
+    assert!(overflowed);
+    let readings = |key: &[u8]| -> BTreeSet<u32> {
+        (0..packed.len())
+            .filter_map(|index| held(key, index))
+            .map(crate::store::block::AppAt::members)
+            .collect()
+    };
+    assert!(readings(b"/B.app").len() > 1);
+    assert_eq!(readings(b"/A.app").len(), 1);
+}
+
+/// Details for `row` that no reading of this test looks at, to give a row its presentation.
+fn details_of(row: &crate::store::AppRow) -> AppDetails {
+    let measure = Measure {
+        known: 0,
+        measured_members: 0,
+        unavailable_members: 0,
+        overflowed: false,
+    };
+
+    AppDetails {
+        live_members: row.members,
+        disk_read_bytes: measure,
+        disk_written_bytes: measure,
+        footprint_bytes: measure,
+    }
+}
+
+#[test]
+fn a_cursor_shows_each_second_as_its_plain_second_and_holds_one_reference_to_each_app_it_shows() {
+    // Goal: a cursor over packed blocks shows at each second the rows its plain second holds,
+    // whether it moves to the next second, jumps back or crosses into the next block, and holds
+    // one reference to the name of each App it shows and none to any other, so no reference
+    // leaks or goes missing when it replaces rows. A count touched and restored during a move
+    // is not observable without a seam in the cursor, so this test does not show one.
+    // Method: split a generated block into two packed blocks, count each App name's references
+    // with no cursor, then move a cursor through every second of both blocks in order, back to
+    // the first, to the second block's first second, which holds the same index, and across
+    // the boundary again, and after each move compare the rows it shows with the plain
+    // second's, and each name's references with the count without the cursor, one more for
+    // each App the plain second holds, over all its name's allocations.
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+    let plain = generated_block(5, &budget);
+    let half = plain.len() / 2;
+    let (first, first_table) =
+        pack_seconds(&plain[..half], None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
+    let (second, second_table) = pack_seconds(
+        &plain[half..],
+        Some(&first_table),
+        &budget,
+        APP_ROWS_PACKED_ALWAYS,
+    )
+    .unwrap();
+    let at = |index: usize| {
+        if index < half {
+            Second::packed_at(&first[index], &first_table, index)
+        } else {
+            Second::packed_at(&second[index - half], &second_table, index - half)
+        }
+    };
+    // Each allocation of an App's name once, by address. The generator may give one App
+    // several, and the cursor holds the one the block's table holds.
+    let mut names: BTreeMap<usize, Arc<RankedApp>> = BTreeMap::new();
+    for row in plain.iter().flat_map(|second| &second.apps) {
+        names.insert(Arc::as_ptr(&row.name).addr(), Arc::clone(&row.name));
+    }
+    let alone: BTreeMap<usize, usize> = names
+        .iter()
+        .map(|(address, name)| (*address, Arc::strong_count(name)))
+        .collect();
+
+    let mut cursor = AppsCursor::default();
+    let order = (0..plain.len()).chain([0, half, half - 1, half, half + 1, half - 1]);
+    for index in order {
+        assert_eq!(
+            cursor.apps(at(index)),
+            plain[index].apps.as_slice(),
+            "second {index}"
+        );
+        // Every generated App is a bundle, so its key's bytes name it.
+        let mut held: BTreeMap<&[u8], usize> = BTreeMap::new();
+        for (address, name) in &names {
+            *held.entry(&name.bytes).or_default() += Arc::strong_count(name) - alone[address];
+        }
+        for (key, references) in held {
+            let shown = plain[index].apps.iter().any(|row| row.name.bytes == key);
+            assert_eq!(
+                references,
+                usize::from(shown),
+                "second {index} {}",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+}
+
+#[test]
 fn the_members_of_an_app_or_of_none_in_a_packed_block_walk_only_the_processes_ever_there() {
     // Goal: a reader that asks for one App's members at a second of a packed block, or for the
     // processes outside any App, reads the members the plain second holds, in its order, and
@@ -201,17 +417,17 @@ fn the_members_of_an_app_or_of_none_in_a_packed_block_walk_only_the_processes_ev
 
     for seed in 1..=SEEDS {
         let plain = generated_block(seed, &budget);
-        let packed = pack_seconds(&plain, None, &budget).unwrap();
+        let (packed, _) = pack_seconds(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
         let mut under: BTreeMap<Vec<u8>, BTreeSet<(i32, u64)>> = BTreeMap::new();
         let mut outside: BTreeSet<(i32, u64)> = BTreeSet::new();
         for second in &plain {
             let Ok(payload) = &second.processes else {
                 continue;
             };
-            let members = payload.members(None, &second.apps);
+            let members = payload.members(None);
             outside.extend(members.map(|process| (process.pid(), unique(process.creation()))));
             for (app_index, app) in (0..).zip(second.apps.iter()) {
-                let members = payload.members(Some(app_index), &second.apps);
+                let members = payload.members(Some(app_index));
                 let keys = members.map(|process| (process.pid(), unique(process.creation())));
                 under
                     .entry(app.name.bytes.clone())
@@ -232,13 +448,13 @@ fn the_members_of_an_app_or_of_none_in_a_packed_block_walk_only_the_processes_ev
             };
             let message = format!("seed {seed} second {index}");
             for (app_index, app) in (0..).zip(plain.apps.iter()) {
-                let packed_members = packed_payload.members(Some(app_index), &packed.apps);
+                let packed_members = packed_payload.members(Some(app_index));
                 let bound = under[&app.name.bytes].len();
                 assert_eq!(packed_members.size_hint().1, Some(bound), "{message}");
-                let plain_members = plain_payload.members(Some(app_index), &plain.apps);
+                let plain_members = plain_payload.members(Some(app_index));
                 assert_eq!(keys(packed_members), keys(plain_members), "{message}");
             }
-            let packed_outside = packed_payload.members(None, &packed.apps);
+            let packed_outside = packed_payload.members(None);
             assert_eq!(
                 packed_outside.size_hint().1,
                 Some(outside.len()),
@@ -246,7 +462,7 @@ fn the_members_of_an_app_or_of_none_in_a_packed_block_walk_only_the_processes_ev
             );
             assert_eq!(
                 keys(packed_outside),
-                keys(plain_payload.members(None, &plain.apps)),
+                keys(plain_payload.members(None)),
                 "{message}"
             );
         }
@@ -262,7 +478,10 @@ fn a_block_of_more_apps_than_a_block_holds_stays_plain() {
     let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
     let seconds: Vec<Arc<AppsSecond>> = past_the_app_bound(&budget).map(Arc::new).into();
 
-    assert_eq!(pack_seconds(&seconds, None, &budget), Err(KeptPlain::Bound));
+    assert_eq!(
+        pack_seconds(&seconds, None, &budget, APP_ROWS_PACKED_ALWAYS).err(),
+        Some(KeptPlain::Bound)
+    );
 }
 
 #[test]
@@ -281,7 +500,7 @@ fn a_block_of_more_processes_than_a_block_holds_stays_plain() {
         .collect();
 
     assert_eq!(
-        pack_seconds(&seconds, None, &budget).err(),
+        pack_seconds(&seconds, None, &budget, APP_ROWS_PACKED_ALWAYS).err(),
         Some(KeptPlain::Bound)
     );
 }
@@ -295,9 +514,9 @@ fn a_block_the_budget_refuses_stays_plain_and_leaves_the_budget_as_it_was() {
     let rest = budget.reserve(budget.maximum() - budget.used()).unwrap();
     let used = budget.used();
 
-    let packed = pack_seconds(&plain, None, &budget);
+    let packed = pack_seconds(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS);
 
-    assert_eq!(packed, Err(KeptPlain::Budget));
+    assert_eq!(packed.err(), Some(KeptPlain::Budget));
     assert_eq!(budget.used(), used);
     drop(rest);
 }
@@ -312,7 +531,7 @@ fn the_check_refuses_a_packed_second_that_holds_a_process_past_its_count() {
     let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
     for seed in 1..=SEEDS {
         let plain = generated_block(seed, &budget);
-        let mut table = ProcessTable::pack(&plain, None, &budget).unwrap();
+        let mut table = BlockTable::pack(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
         let last = table.processes.len() - 1;
         let found = (0..plain.len()).find(|&index| {
             let bit = 1 << index;
@@ -336,7 +555,7 @@ fn the_check_refuses_a_packed_second_that_holds_a_process_past_its_count() {
                 second_index: u32::try_from(index).unwrap(),
                 count: plain_payload.len(),
             },
-            apps: plain_payload.apps.clone(),
+            apps: Vec::new(),
             reservation: budget.reserve(0).unwrap(),
         };
 
@@ -347,6 +566,366 @@ fn the_check_refuses_a_packed_second_that_holds_a_process_past_its_count() {
         return;
     }
     panic!("no seed holds a second at which the block's last process is absent");
+}
+
+#[test]
+fn the_check_refuses_a_packed_block_whose_apps_read_otherwise_than_its_plain_seconds() {
+    // Goal: the check that a packed block's Apps read as its plain seconds refuses a table that
+    // holds one App value, one App step, one App's presence or one App detail otherwise than
+    // the plain seconds, through the read that reads what changed: the rows walked through each
+    // second's steps, the rows rebuilt from the first rows and their changes, each App over the
+    // block's seconds, or the second's details, and a step, which only the walk reads, leaves
+    // the other reads passing.
+    // Method: pack a generated block's table with its App rows packed four times, and in each
+    // change one thing: the first changed value of an App's row, the value of the first step
+    // that changes a word, the first changed value of an App's details, or the presence of two
+    // Apps at a second, one held there and at the second before and one not held there,
+    // swapped so the second's count stays. Pack the block's seconds over each table and read
+    // them each way the check reads them.
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+    let plain = generated_block(5, &budget);
+    let table = |corrupt: &dyn Fn(&mut BlockTable)| {
+        let mut table = BlockTable::pack(&plain, None, &budget, APP_ROWS_PACKED_ALWAYS).unwrap();
+        corrupt(Arc::get_mut(&mut table).unwrap());
+        table
+    };
+    let first_change = |kind: usize| {
+        let table = table(&|_| {});
+        (0..table.block_app_count())
+            .find_map(|place| table.app_first_changes(place)[kind])
+            .unwrap()
+    };
+    let (row_value, details_value) = (first_change(0), first_change(1));
+    let swapped = swapped_presence(&table(&|_| {}), plain.len());
+
+    let refused =
+        |corrupt: &dyn Fn(&mut BlockTable)| refused_reads(&table(corrupt), &plain, &budget);
+
+    let intact = refused(&|_| {});
+    assert!(intact.is_empty(), "intact: {intact:?}");
+    let row = refused(&|table| table.values[row_value] ^= 1);
+    assert!(
+        row.is_superset(&BTreeSet::from([CheckRead::Rebuilt, CheckRead::Over])),
+        "row value: {row:?}"
+    );
+    let step = refused(&step_changed);
+    assert_eq!(step, BTreeSet::from([CheckRead::Walked]), "step");
+    let details = refused(&|table| table.values[details_value] ^= 1);
+    assert!(
+        details.contains(&CheckRead::Details),
+        "details: {details:?}"
+    );
+    // Last, since a process of the App taken out of the second names an App the second does
+    // not hold, which only the details check, refusing first, keeps the process reader from.
+    let presence = refused(&|table| {
+        let (held, absent, bit) = swapped;
+        table.apps[held].seconds &= !bit;
+        table.apps[absent].seconds |= bit;
+    });
+    assert!(
+        presence.is_superset(&BTreeSet::from([CheckRead::Rebuilt, CheckRead::Over])),
+        "presence: {presence:?}"
+    );
+}
+
+/// Changes the value of the first step of `table` that changes a word of an App's row.
+fn step_changed(table: &mut BlockTable) {
+    let Some(AppStep::Change { value, .. }) = table
+        .steps
+        .iter_mut()
+        .find(|step| matches!(step, AppStep::Change { .. }))
+    else {
+        unreachable!("a generated block changes a word of an App's row");
+    };
+    *value ^= 1;
+}
+
+/// One of the reads the packer's check compares with a block's plain seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CheckRead {
+    /// A second's header, processes or App details.
+    Details,
+    /// A second's Apps walked from the second before through the second's steps.
+    Walked,
+    /// A second's Apps rebuilt from the first rows and their changes.
+    Rebuilt,
+    /// Each App over the block's seconds.
+    Over,
+}
+
+/// Which reads of the check refuse the `plain` seconds packed over `table`.
+fn refused_reads(
+    table: &Arc<BlockTable>,
+    plain: &[Arc<AppsSecond>],
+    budget: &Arc<ByteBudget>,
+) -> BTreeSet<CheckRead> {
+    let mut refused = BTreeSet::new();
+    if !super::seconds::pack_seconds_apps_over(table, plain) {
+        refused.insert(CheckRead::Over);
+    }
+    let (mut walked, mut walked_places) = (Vec::new(), Vec::new());
+    let (mut rebuilt, mut rebuilt_places, mut spare) = (Vec::new(), Vec::new(), Vec::new());
+    for (index, plain) in (0..).zip(plain) {
+        let packed = super::seconds::pack_second(plain, table, index, budget).unwrap();
+        if index == 0 {
+            table.rebuild_app_rows(index, &mut walked, &mut walked_places, &mut spare);
+        } else {
+            table.step_app_rows(index, &mut walked, &mut walked_places);
+        }
+        table.rebuild_app_rows(index, &mut rebuilt, &mut rebuilt_places, &mut spare);
+        let reads_as = |apps_read: &[&[crate::store::AppRow]]| {
+            super::seconds::second_reads_as(&packed, plain, apps_read, &mut table.checked())
+        };
+        for (read, apps_read) in [
+            (CheckRead::Details, &[][..]),
+            (CheckRead::Walked, &[walked.as_slice()][..]),
+            (CheckRead::Rebuilt, &[rebuilt.as_slice()][..]),
+        ] {
+            if !reads_as(apps_read) {
+                refused.insert(read);
+            }
+        }
+    }
+
+    refused
+}
+
+/// Two App places of the block of `table`, of `count` seconds, and the bit of one second: the
+/// first App is held at that second and the second before, and the second is not held at it.
+fn swapped_presence(table: &BlockTable, count: usize) -> (usize, usize, u64) {
+    for index in 1..count {
+        let bit = 1 << index;
+        let before = 1 << (index - 1);
+        let held = table
+            .apps
+            .iter()
+            .position(|app| app.seconds & bit != 0 && app.seconds & before != 0);
+        let absent = table.apps.iter().position(|app| app.seconds & bit == 0);
+        if let (Some(held), Some(absent)) = (held, absent) {
+            return (held, absent, bit);
+        }
+    }
+    unreachable!("a generated block holds an App at two seconds in a row and lacks another");
+}
+
+/// Checks that every second of the packed block `packed`, whose table is `table`, reads as its
+/// plain second of `plain`: its header, processes and App details, its Apps through a cursor that
+/// walks the seconds in order and through one that visits them back, by jumps and again, and
+/// each one-second read of its Apps.
+pub(in crate::store) fn assert_reads_as(
+    packed: &[Arc<AppsSecond>],
+    table: &Arc<BlockTable>,
+    plain: &[Arc<AppsSecond>],
+    message: &str,
+) {
+    assert_eq!(packed.len(), plain.len(), "{message}");
+    let second = |index: usize| Second::packed_at(&packed[index], table, index);
+    let mut walked = AppsCursor::default();
+    for (index, plain) in plain.iter().enumerate() {
+        let message = format!("{message} second {index}");
+        assert_header_reads_as(&packed[index], plain, table.app_rows_packed(), &message);
+        assert_eq!(
+            walked.apps(second(index)),
+            plain.apps.as_slice(),
+            "{message}"
+        );
+        assert_second_reads_as(second(index), plain, &message);
+    }
+
+    let count = plain.len();
+    let order = (0..count)
+        .rev()
+        .step_by(2)
+        .chain((0..count).step_by(3))
+        .chain((0..count).rev());
+    let mut scattered = AppsCursor::default();
+    for index in order {
+        assert_eq!(
+            scattered.apps(second(index)),
+            plain[index].apps.as_slice(),
+            "{message} second {index} out of order"
+        );
+    }
+}
+
+/// Checks that the packed `second` holds the header, processes and App details of `plain`, and
+/// either no App rows of its own, where its block packs them, or the rows of `plain`.
+fn assert_header_reads_as(
+    second: &AppsSecond,
+    plain: &AppsSecond,
+    rows_packed: bool,
+    message: &str,
+) {
+    let AppsSecond {
+        metadata,
+        processes,
+        missing,
+        observation,
+        consecutive,
+        elapsed_ns,
+        membership_complete,
+        ungrouped_members,
+        live_ungrouped_members,
+        usage_refused,
+        usage_gone,
+        apps,
+        totals,
+    } = second;
+
+    if rows_packed {
+        assert!(apps.is_empty(), "{message}");
+    } else {
+        assert_eq!(*apps, plain.apps, "{message}");
+    }
+    assert_eq!(*metadata, plain.metadata, "{message}");
+    assert!(*processes == plain.processes, "{message}");
+    assert_eq!(*missing, plain.missing, "{message}");
+    assert_eq!(*observation, plain.observation, "{message}");
+    assert_eq!(*consecutive, plain.consecutive, "{message}");
+    assert_eq!(*elapsed_ns, plain.elapsed_ns, "{message}");
+    assert_eq!(*membership_complete, plain.membership_complete, "{message}");
+    assert_eq!(*ungrouped_members, plain.ungrouped_members, "{message}");
+    assert_eq!(
+        *live_ungrouped_members, plain.live_ungrouped_members,
+        "{message}"
+    );
+    assert_eq!(*usage_refused, plain.usage_refused, "{message}");
+    assert_eq!(*usage_gone, plain.usage_gone, "{message}");
+    assert_eq!(*totals, plain.totals, "{message}");
+}
+
+/// Checks that each one-second read of the Apps of the packed `second` gives what it gives of
+/// `plain`: the count, the ranks, the charts, the pages, and each App found by key with its
+/// readings, index and members.
+fn assert_second_reads_as(second: Second<'_>, plain: &AppsSecond, message: &str) {
+    let plain_second = Second::unheld(plain);
+    assert_eq!(second.app_count(), plain.apps.len(), "{message}");
+    assert_eq!(second.ranks(), plain_second.ranks(), "{message}");
+    let cohort: Vec<Arc<RankedApp>> = plain
+        .apps
+        .iter()
+        .step_by(2)
+        .map(|row| Arc::clone(&row.name))
+        .collect();
+    for metric in crate::store::attribution::METRICS {
+        assert_eq!(
+            second.attribution(metric, &cohort),
+            plain_second.attribution(metric, &cohort),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        second.resident(&cohort),
+        plain_second.resident(&cohort),
+        "{message}"
+    );
+    assert_pages_read_as(second, plain, message);
+    for index in 0..plain.apps.len() {
+        assert_app_reads_as(second, plain, index, &format!("{message} App {index}"));
+    }
+}
+
+/// Checks that each page of Apps of the packed `second`, over page sizes, and its page of the
+/// processes in no App, are the pages of `plain`, and that a second that presents its pages
+/// gives each page asked of it.
+fn assert_pages_read_as(second: Second<'_>, plain: &AppsSecond, message: &str) {
+    let plain_second = Second::unheld(plain);
+    let presented = plain_second.presentation().is_ok();
+    for page in pages_over(plain.apps.len(), APPS_PAGE_ROWS_MAX) {
+        let read = refused_on(plain_second.apps_page(page));
+        let message = format!("{message} page {} {}", page.offset, page.limit);
+        if presented {
+            assert!(read.is_ok(), "{message}");
+        }
+        assert_eq!(refused_on(second.apps_page(page)), read, "{message}");
+    }
+    let page = Page {
+        offset: 0,
+        limit: PROCESSES_PAGE_ROWS_MAX,
+    };
+    let read = refused_on(plain_second.ungrouped_page(page));
+    if presented {
+        assert!(read.is_ok(), "{message}");
+    }
+    assert_eq!(refused_on(second.ungrouped_page(page)), read, "{message}");
+}
+
+/// `read` as its JSON, or as the bound it was refused on, the one error a read of a held second
+/// gives.
+fn refused_on(
+    read: persistence::Result<serde_json::Value>,
+) -> Result<serde_json::Value, &'static str> {
+    match read {
+        Ok(value) => Ok(value),
+        Err(persistence::Error::Bound(bound)) => Err(bound),
+        Err(error) => panic!("a read of a held second is refused only on a bound: {error}"),
+    }
+}
+
+/// Checks that the App at `index` of `plain`, found by key in the packed `second`, has the
+/// name, members and index it has in `plain`, and, where the second holds its process rows, the
+/// readings, the processes and the page of members.
+fn assert_app_reads_as(second: Second<'_>, plain: &AppsSecond, index: usize, message: &str) {
+    let plain_second = Second::unheld(plain);
+    let row = &plain.apps[index];
+    let Some(found) = second.app(&row.name) else {
+        panic!("{message}: not found");
+    };
+    assert_eq!(**found.name(), *row.name, "{message}");
+    assert_eq!(found.members(), row.members, "{message}");
+    assert_eq!(found.index(), index, "{message}");
+    let Ok(processes) = second.processes() else {
+        return;
+    };
+    let plain_found = plain_second.app(&row.name).unwrap();
+    let json = |found: crate::store::block::AppAt<'_>| {
+        refused_on(
+            found
+                .presentation()
+                .map(|view| crate::live_app_response::json::app(&view, index, None)),
+        )
+    };
+    assert_eq!(json(found), json(plain_found), "{message}");
+    let keys = |members: &mut dyn Iterator<Item = super::super::ProcessAt<'_>>| -> Vec<(i32, u64)> {
+        members
+            .map(|process| (process.pid(), unique(process.creation())))
+            .collect()
+    };
+    let plain_processes = plain_second.processes().unwrap();
+    assert_eq!(
+        keys(&mut processes.members_of(found)),
+        keys(&mut plain_processes.members_of(plain_found)),
+        "{message}"
+    );
+    if let Some(observation) = &plain.observation {
+        let detail = Detail {
+            selected: observation,
+            app_index: u32::try_from(index).unwrap(),
+            page: Page {
+                offset: 0,
+                limit: PROCESSES_PAGE_ROWS_MAX,
+            },
+        };
+        let read = refused_on(plain_second.app_detail(&detail));
+        assert!(read.is_ok(), "{message}");
+        assert_eq!(refused_on(second.app_detail(&detail)), read, "{message}");
+    }
+}
+
+/// The pages a reader of `count` rows is asked for, at most `limit_max` rows each: one row,
+/// a few, and the most a page holds, from the first row, the second, the middle, the last and
+/// the end.
+fn pages_over(count: usize, limit_max: u32) -> impl Iterator<Item = Page> {
+    let count = u32::try_from(count).unwrap();
+    let offsets: BTreeSet<u32> = [0, 1, count / 2, count.saturating_sub(1), count]
+        .into_iter()
+        .filter(|offset| *offset <= count)
+        .collect();
+    offsets.into_iter().flat_map(move |offset| {
+        [1, 2, 3, 7, limit_max]
+            .into_iter()
+            .map(move |limit| Page { offset, limit })
+    })
 }
 
 /// Where the cases of the block of `seed` lie, as second indexes of a block of `len` seconds.
@@ -622,8 +1201,7 @@ fn apps_of(
 ) -> AppsSecond {
     let apps = keys
         .iter()
-        .zip(1..)
-        .map(|(key, amount)| app(key, amount))
+        .map(|key| app(key, observation.run_tick))
         .collect();
     let sample = Sample::of_apps(observation, Some(NS), apps);
     let mut second = AppsSecond::default();
@@ -686,8 +1264,34 @@ fn processes_only(
     second
 }
 
-fn app(key: &[u8], amount: u64) -> App {
-    let measure = measure(amount);
+/// The App `key` as the generator reads it at tick `tick`. About one App in three changes its
+/// readings at every tick and the rest keep them, and at some ticks an App reads a value that
+/// needs all 64 bits, an unavailable measure, an overflowed count or an incomplete membership.
+fn app(key: &[u8], tick: u64) -> App {
+    let seed: u64 = key.iter().map(|&byte| u64::from(byte)).sum();
+    let changes = seed.is_multiple_of(3);
+    let amount = if changes {
+        seed * 1_000 + tick
+    } else {
+        seed * 1_000
+    };
+    let known = if seed.is_multiple_of(7) && tick % 4 == 2 {
+        u64::MAX
+    } else {
+        amount
+    };
+    let unavailable = seed % 5 == 2 && tick % 3 == 1;
+    let measure = Measure {
+        known,
+        measured_members: u32::from(!unavailable),
+        unavailable_members: u32::from(unavailable),
+        overflowed: seed % 11 == 6 && tick % 5 == 3,
+    };
+    let details = Measure {
+        known: amount * 3,
+        ..measure
+    };
+    let members = 1 + u32::try_from(seed % 4).unwrap() + u32::from(changes && tick % 2 == 1);
     let display = String::from_utf8(key.to_vec()).unwrap();
 
     App {
@@ -697,26 +1301,40 @@ fn app(key: &[u8], amount: u64) -> App {
             display: display.clone(),
         },
         display_name: display,
-        members: 1,
-        live_members: 1,
-        membership_complete: true,
+        members,
+        live_members: members - u32::from(tick % 6 == 5),
+        membership_complete: !(seed % 6 == 5 && tick.is_multiple_of(2)),
         cpu_ns: measure,
-        energy_nj: measure,
+        energy_nj: Measure {
+            known: amount + 1,
+            ..measure
+        },
         gpu_ns: measure,
-        disk_read_bytes: measure,
-        disk_written_bytes: measure,
+        disk_read_bytes: details,
+        disk_written_bytes: Measure {
+            known: amount * 5,
+            ..details
+        },
         disk_io_bytes: measure,
-        resident_bytes: measure,
-        footprint_bytes: measure,
+        resident_bytes: Measure {
+            known: seed,
+            ..measure
+        },
+        footprint_bytes: details,
     }
 }
 
-fn measure(known: u64) -> Measure {
-    Measure {
-        known,
-        measured_members: 1,
-        unavailable_members: 0,
-        overflowed: false,
+/// The details of the App `key` as the generator reads them at tick `tick`, which vary as `app`
+/// varies the App's readings by its key and the tick: the live members change, and at some ticks
+/// a measure needs all 64 bits, is unavailable for its member or overflowed.
+fn details(key: &[u8], tick: u64) -> AppDetails {
+    let app = app(key, tick);
+
+    AppDetails {
+        live_members: app.live_members,
+        disk_read_bytes: app.disk_read_bytes,
+        disk_written_bytes: app.disk_written_bytes,
+        footprint_bytes: app.cpu_ns,
     }
 }
 
@@ -747,16 +1365,7 @@ fn payload_of(
     }
     let details = keys
         .iter()
-        .zip(1..)
-        .map(|(_, amount)| {
-            let details = AppDetails {
-                live_members: 1,
-                disk_read_bytes: measure(amount),
-                disk_written_bytes: measure(amount),
-                footprint_bytes: measure(amount),
-            };
-            Shared::admit(details, budget).unwrap()
-        })
+        .map(|key| Shared::admit(details(key, observation.run_tick), budget).unwrap())
         .collect();
 
     Payload {

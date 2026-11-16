@@ -9,7 +9,10 @@ use super::{
 use crate::store::Buffers;
 use crate::store::apps::{AppRows, TickApps};
 use crate::store::packing::BLOCKS_OUT_MAX;
-use crate::store::payload::packed::tests::{APPS_PAST_HALF, generated_block, past_the_app_bound};
+use crate::store::payload::packed::tests::{
+    APP_ROWS_PACKED_NEVER, APPS_PAST_HALF, generated_block, past_the_app_bound,
+};
+use crate::store::payload::packed::{APP_ROWS_PACKED_ALWAYS, APP_ROWS_PACKED_SHARE};
 use crate::store::payload::row_tests::{process, seconds_of};
 use crate::store::{
     AppRow, AppsSecond, ByteBudget, Held, MachineSecond, Mailbox, Missing, Payload, SECONDS_MAX,
@@ -84,9 +87,10 @@ fn a_cursor_reads_exactly_the_apps_of_each_second_in_key_order() {
 }
 
 #[test]
-fn an_app_followed_through_a_block_reads_its_row_at_each_second() {
-    // Goal: a reader that follows one App through a block reads the row each second holds for
-    // it, at the App's place in that second, and nothing where the second does not hold it.
+fn an_app_followed_through_a_block_is_found_with_its_name_members_and_place_at_each_second() {
+    // Goal: a reader that follows one App through a block finds, at each second that holds it,
+    // the name and member count of that second's row for it and the App's place in that
+    // second, and nothing where the second does not hold it.
     // Method: find both Apps of a three second block by key at every second, where one App
     // arrives at the third second ahead of the other in key order.
     let seconds = owner_then_arrival();
@@ -99,12 +103,17 @@ fn an_app_followed_through_a_block_reads_its_row_at_each_second() {
 
     for (index, place) in [(0, 0), (1, 0), (2, 1)] {
         let found = owner(index).unwrap();
-        assert_eq!(found.row(), &seconds[index].apps[place], "second {index}");
+        let row = &seconds[index].apps[place];
+        assert!(Arc::ptr_eq(found.name(), &row.name), "second {index}");
+        assert_eq!(found.members(), row.members, "second {index}");
         assert_eq!(found.index(), place, "second {index}");
     }
     assert!(arrival(0).is_none());
     assert!(arrival(1).is_none());
-    assert_eq!(arrival(2).unwrap().row(), &seconds[2].apps[0]);
+    assert!(Arc::ptr_eq(
+        arrival(2).unwrap().name(),
+        &seconds[2].apps[0].name
+    ));
     assert_eq!(arrival(2).unwrap().index(), 0);
 }
 
@@ -939,31 +948,176 @@ fn a_block_the_budget_refuses_is_kept_plain_counted_by_its_cause_and_read_as_bef
     drop(rest);
 }
 
+macro_rules! packing_charge_case {
+    ($name:ident, $share:expr, $rows_packed:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: a packed block is charged, before it replaces anything, at the exact size of
+            // what packing allocated: the block table, each second with its App rows and its
+            // payload, and the block with its list of seconds.
+            // Method: pack a generated block under this case's share, take the budget's growth
+            // across the packing, and compare it with the bytes summed from the packed block's
+            // parts.
+            let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+            let plain = generated_block(3, &budget);
+            let mut block = Block::starting(WALL_NS, Arc::clone(&plain[0]), false);
+            for (offset, second) in (1..).zip(&plain[1..]) {
+                let wall_ns = WALL_NS + offset * NS / 4;
+                block = block.joining(wall_ns, Arc::clone(second), false).unwrap();
+            }
+            let used = budget.used();
+
+            let packed = block.packing(None, &budget, $share);
+
+            assert_eq!(packed.form, Form::Packed);
+            let table = packed.table().unwrap();
+            assert_eq!(table.app_rows_packed(), $rows_packed);
+            assert_eq!(budget.used() - used, packed_block_bytes(&packed));
+            assert_eq!(table.reserved_bytes(), table.held_bytes());
+        }
+    };
+}
+
+packing_charge_case!(
+    packing_a_block_with_app_rows_packed_charges_exactly_what_it_allocates,
+    APP_ROWS_PACKED_ALWAYS,
+    true
+);
+packing_charge_case!(
+    packing_a_block_with_app_rows_plain_charges_exactly_what_it_allocates,
+    APP_ROWS_PACKED_NEVER,
+    false
+);
+
 #[test]
-fn packing_a_block_charges_exactly_what_the_packed_block_allocates() {
-    // Goal: a packed block is charged, before it replaces anything, at the exact size of what
-    // packing allocated: the process table, each second with its App rows and its payload, and
-    // the block with its list of seconds.
-    // Method: pack a generated block, take the budget's growth across the packing, and compare
-    // it with the bytes summed from the packed block's parts.
+fn a_span_counts_the_packed_blocks_that_hold_their_app_rows_plain() {
+    // Goal: the View counts each packed block whose App rows did not pay to pack, and no block
+    // that packs them, so the payload report shows how many blocks hold their Apps plain.
+    // Method: pack five generated blocks, the second and the fifth with their App rows held
+    // plain and the rest packed, into one span, and compare the span's count of blocks holding
+    // their App rows plain with two, and its packed count with five.
     let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
-    let plain = generated_block(3, &budget);
-    let mut block = Block::starting(WALL_NS, Arc::clone(&plain[0]), false);
-    for (offset, second) in (1..).zip(&plain[1..]) {
-        let wall_ns = WALL_NS + offset * NS / 4;
-        block = block.joining(wall_ns, Arc::clone(second), false).unwrap();
+    let plain_at = [1, 4];
+    let blocks: Vec<Arc<Block>> = (0..5_u64)
+        .map(|block| {
+            let index = usize::try_from(block).unwrap();
+            let share = if plain_at.contains(&index) {
+                APP_ROWS_PACKED_NEVER
+            } else {
+                APP_ROWS_PACKED_ALWAYS
+            };
+            let seconds = generated_block(block + 1, &budget);
+            let block_wall_ns = WALL_NS + block * BLOCK_WALL_NS;
+            Block::packed_of(
+                &seconds,
+                |index| block_wall_ns + u64::try_from(index).unwrap() * NS / 4,
+                share,
+                &budget,
+            )
+        })
+        .collect();
+
+    let span = AppsSpan::of_blocks(blocks);
+
+    assert_eq!(span.apps_plain_count(), plain_at.len());
+    assert_eq!(span.packed_count(), 5);
+}
+
+#[test]
+fn a_span_at_the_production_share_holds_both_forms_and_a_cursor_reads_each_second_as_taken() {
+    // Goal: under the share the app packs with, a block whose Apps hold still packs its App
+    // rows and a block whose Apps change every second holds them plain, side by side in one
+    // span, and one cursor walking every second across both reads each as the store took it.
+    // Method: take 81 seconds through the real producer, one wall second apart, into a span
+    // under the production share. The seconds of the first two blocks hold processes whose
+    // readings never change, those of the third hold processes whose CPU time and disk bytes
+    // grow by more each second, and the last second opens a fourth block, which closes the
+    // third. One App is gone through the second block, so the other changes its place there.
+    // Pack what is ready, compare each block's form with the one its seconds call for, and
+    // read every second through one cursor, oldest first, then newest first, then the
+    // first second and the next block's second second, which shares its index past the first
+    // second's, against the same ticks read again through another fixture.
+    const SECOND_COUNT: u64 = 81;
+    const STILL_UNTIL: u64 = 50;
+    assert!((WALL_NS + BLOCK_SECOND * NS).is_multiple_of(BLOCK_WALL_NS));
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+    let mut taken = production_share_rows(&budget, SECOND_COUNT, STILL_UNTIL);
+    let plain = production_share_rows(&budget, SECOND_COUNT, STILL_UNTIL);
+    let capacity = usize::try_from(SECOND_COUNT).unwrap();
+    let buffers = Buffers::new(2 * (capacity + BLOCK_DEPARTED_MAX), AppsSecond::default);
+    let mut span = BlockSpan::keeping_packing_end_under(
+        capacity,
+        buffers,
+        Arc::clone(&budget),
+        APP_ROWS_PACKED_SHARE,
+    );
+    for (wall_second, second) in (0..).zip(&mut taken) {
+        predecessor_push(&mut span, wall_second, second);
     }
-    let used = budget.used();
 
-    let packed = block.packing(None, &budget);
+    span.pack_ready();
 
-    assert_eq!(packed.form, Form::Packed);
-    assert_eq!(budget.used() - used, packed_block_bytes(&packed));
+    let forms: Vec<Option<bool>> = span
+        .blocks()
+        .map(|block| block.table().map(super::BlockTable::app_rows_packed))
+        .collect();
+    assert_eq!(forms, [Some(true), Some(true), Some(false), None]);
+    let seconds: Vec<(&Arc<Block>, usize)> = span
+        .blocks()
+        .flat_map(|block| (0..block.len()).map(move |index| (block, index)))
+        .collect();
+    assert_eq!(seconds.len(), plain.len());
+    let mut cursor = AppsCursor::default();
+    let next_block_second = usize::try_from(BLOCK_SECOND + 1).unwrap();
+    let order = (0..seconds.len())
+        .chain((0..seconds.len()).rev())
+        .chain([0, next_block_second]);
+    for index in order {
+        let (block, at) = seconds[index];
+        assert_eq!(
+            cursor.apps(block.second(at)),
+            plain[index].apps.as_slice(),
+            "second {index}"
+        );
+    }
+}
+
+/// The first wall second past `WALL_NS` that begins a block.
+const BLOCK_SECOND: u64 = 20;
+
+/// `count` seconds of two Apps read through the real producer, whose readings hold still
+/// before `still_until` and grow by more each second from it on. `/Arrival.app`, which sorts
+/// first, is gone from `BLOCK_SECOND` until `still_until`, so `/Owner.app` stands at another
+/// place in the second block than in the first.
+fn production_share_rows(
+    budget: &Arc<ByteBudget>,
+    count: u64,
+    still_until: u64,
+) -> Vec<AppsSecond> {
+    let ticks: Vec<Vec<Process>> = (0..count)
+        .map(|tick| {
+            let offset = tick.saturating_sub(still_until).pow(2);
+            [7, 9, 11]
+                .into_iter()
+                .filter(|&pid| pid != 9 || !(BLOCK_SECOND..still_until).contains(&tick))
+                .map(|pid| Process {
+                    pid,
+                    usage: crate::store::startup_tests::usage(offset * u64::try_from(pid).unwrap()),
+                    task: crate::store::payload::row_tests::task(1),
+                })
+                .collect()
+        })
+        .collect();
+
+    seconds_of(budget, &ticks, |pid| match pid {
+        9 => b"/Arrival.app",
+        _ => b"/Owner.app",
+    })
 }
 
 /// The bytes of what packing allocated for `block`, summed from its parts: the block in its
 /// `Arc` with its list of seconds, each second in its `Arc` with the reservation its header
-/// holds, the strings it copied, its App rows and its payload, and the process table once.
+/// holds, the strings it copied, its App rows and its payload, and the block table once.
 fn packed_block_bytes(block: &Block) -> usize {
     let counts_bytes = 2 * size_of::<usize>();
     let mut bytes =
@@ -987,7 +1141,7 @@ fn packed_block_bytes(block: &Block) -> usize {
         }
     }
 
-    bytes + block.table().unwrap().reserved_bytes()
+    bytes + block.table().unwrap().held_bytes()
 }
 
 /// Checks that the oldest block of `span` is kept plain for `cause` and holds the seconds

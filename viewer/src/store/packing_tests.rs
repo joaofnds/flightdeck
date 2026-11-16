@@ -5,11 +5,12 @@ use collector::processes::Process;
 
 use crate::live::identity_fixture::Fixture;
 use crate::store::block::AppsSpan;
+use crate::store::payload::packed::APP_ROWS_PACKED_ALWAYS;
 use crate::store::payload::row_tests::{process, seconds_of};
 use crate::store::query::{CheckedCoverage, Queries};
 use crate::store::{
-    ByteBudget, Held, Mailbox, Publication, QueryOutcome, QueryRequest, QuerySelection,
-    SourceGeneration, View,
+    ByteBudget, Held, Mailbox, Publication, QueryOutcome, QueryRequest, QuerySelection, Ring,
+    Shared, SourceGeneration, View,
 };
 
 #[test]
@@ -89,7 +90,7 @@ fn the_packing_thread_wakes_the_store_thread_with_each_answer() {
     // on it without waiting for a step.
     // Method: hand two batches over, run the packing loop's body, and count the wakes.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let (store_end, mut packing_end) = super::pair(budget);
+    let (store_end, mut packing_end) = super::pair(budget, APP_ROWS_PACKED_ALWAYS);
     let wakes = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&wakes);
     packing_end.wake_with(Box::new(move || {
@@ -113,7 +114,7 @@ fn the_started_packing_thread_unparks_the_store_thread_with_its_answer() {
     // most twenty seconds, and check the park ended well before that with the answer waiting.
     const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let (store_end, packing_end) = super::pair(budget);
+    let (store_end, packing_end) = super::pair(budget, APP_ROWS_PACKED_ALWAYS);
     let packing = packing_end.start(std::thread::current()).unwrap();
     let parked = std::time::Instant::now();
     let batch = vec![crate::store::AppsSecond::default()];
@@ -137,7 +138,7 @@ fn the_exchange_hands_over_at_most_two_batches_of_at_most_a_block_of_buffers() {
     // let go of them all at once, exchange, and read what the queue holds; then answer it,
     // exchange again and check a batch more comes, so more than two batches' buffers were free.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let (store_end, mut packing_end) = super::pair(budget);
+    let (store_end, mut packing_end) = super::pair(budget, APP_ROWS_PACKED_ALWAYS);
     let buffers = crate::store::buffers::Buffers::new(400, crate::store::AppsSecond::default);
     let mut span = crate::store::block::BlockSpan::new(8, buffers, store_end);
     let mut held = Vec::new();
@@ -171,7 +172,7 @@ fn the_tally_counts_each_batch_the_packing_thread_frees() {
     // freeing took, so the benchmark can report the freeing a second.
     // Method: hand two batches of seconds over, run the packing loop's body, and read the tally.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let (store_end, mut packing_end) = super::pair(budget);
+    let (store_end, mut packing_end) = super::pair(budget, APP_ROWS_PACKED_ALWAYS);
     for _ in 0..2 {
         let batch = vec![crate::store::AppsSecond::default()];
         store_end.hand(super::Handed::Batch(super::Batch::Seconds(batch)));
@@ -239,7 +240,7 @@ fn the_packing_thread_packs_what_the_store_hands_over_until_the_store_is_gone() 
     // three blocks, exchange each time the test's thread wakes, within a bound, until the span
     // has settled, check every closed block is packed, then let go of the span and join.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let (store_end, packing_end) = super::pair(Arc::clone(&budget));
+    let (store_end, packing_end) = super::pair(Arc::clone(&budget), APP_ROWS_PACKED_ALWAYS);
     let packing = packing_end.start(std::thread::current()).unwrap();
     let buffers = crate::store::buffers::Buffers::new(256, crate::store::AppsSecond::default);
     let mut span = crate::store::block::BlockSpan::new(64, buffers, store_end);
@@ -267,13 +268,13 @@ fn settling_leaves_no_ready_block_plain_after_a_continued_load_and_a_launch() {
     // runs and figure 9 stays an exact count.
     // Method: in each of two runs, take seconds ten wall seconds apart, which close a block every
     // three, into a span before its packing thread starts, so no answer is acted on between,
-    // as in a continued load, check more blocks wait than can be out, start the thread, settle and read the
-    // budget; then take seconds that wait for their Apps, install them with the launch's wait
-    // before each half minute, end the launch, settle and read it again.
+    // as in a continued load, check more blocks wait than can be out, start the thread, settle
+    // and read the budget; then take seconds that wait for their Apps, install them with the
+    // launch's wait before each half minute, end the launch, settle and read it again.
     let mut bytes_of_runs = Vec::with_capacity(2);
     for _ in 0..2 {
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-        let (store_end, packing_end) = super::pair(Arc::clone(&budget));
+        let (store_end, packing_end) = super::pair(Arc::clone(&budget), APP_ROWS_PACKED_ALWAYS);
         let buffers = crate::store::buffers::Buffers::new(256, crate::store::AppsSecond::default);
         let mut span = crate::store::block::BlockSpan::new(64, buffers, store_end);
         let ticks: Vec<Vec<Process>> = (0..100).map(|tick| vec![process(7, tick)]).collect();
@@ -316,9 +317,7 @@ fn settling_leaves_no_ready_block_plain_after_a_continued_load_and_a_launch() {
 /// Takes seconds that close three blocks, hides the window, and runs `turn`, the turn of the
 /// store's thread that parks, and the packing loop's body by turns, as each answer would wake
 /// it, then checks no ready block is plain and nothing is out or waits to be freed.
-fn parked_store_settles(
-    mut turn: impl FnMut(&std::path::Path, &mut Held, &mut crate::store::Ring, &crate::store::Shared),
-) {
+fn parked_store_settles(mut turn: impl FnMut(&std::path::Path, &mut Held, &mut Ring, &Shared)) {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
@@ -327,7 +326,7 @@ fn parked_store_settles(
         take(&mut held, &fixture, publication, second);
     }
     let mut ring = crate::store::make_ring(&fixture.root, &held.payload_budget);
-    let shared = crate::store::Shared::starting();
+    let shared = Shared::starting();
     shared.active.store(false, Ordering::Release);
     assert!(held.apps.ready_plain_count() > 2);
 
@@ -354,7 +353,7 @@ fn batch_sizes(handed: &[super::Handed]) -> Vec<usize> {
 }
 
 /// Steps the store as its thread does after a take, and returns the View it published.
-fn step(held: &mut Held, ring: &mut crate::store::Ring, mailbox: &Mailbox<View>) -> Arc<View> {
+fn step(held: &mut Held, ring: &mut Ring, mailbox: &Mailbox<View>) -> Arc<View> {
     held.unpublished = true;
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)

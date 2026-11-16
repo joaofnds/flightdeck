@@ -9,25 +9,56 @@ use crate::live_app_response::RankedApp;
 #[path = "key_order_tests.rs"]
 mod tests;
 
-/// A row of one App that rows held in key order hold, which the Apps of `R` add to.
-pub(super) trait HeldRow<R> {
-    /// The App the row holds.
+/// Something of one App that is held or merged in the key order of its App.
+pub(super) trait Named {
+    /// The App it is of.
     fn name(&self) -> &RankedApp;
+}
+
+impl<R: PointRow> Named for &R {
+    fn name(&self) -> &RankedApp {
+        PointRow::name(*self)
+    }
+}
+
+/// A row of one App that rows held in key order hold, which the Apps of `R` add to.
+pub(super) trait HeldRow<R>: Named {
     /// A row of the App `row` holds, with nothing added to it yet.
     fn starting(row: &R) -> Self;
 }
 
 /// Writes into `merged` the rows of `held` with those of `incoming` added with `add`, in key
 /// order. Returns false where they come to more than `apps_max` Apps.
-// Out of line, since choosing the leaders of a span took 7% longer with this merge compiled
-// into its caller.
-#[inline(never)]
 pub(super) fn add_merged<H: HeldRow<R>, R: PointRow>(
     held: &mut Vec<H>,
     incoming: &[R],
     merged: &mut Vec<H>,
     apps_max: usize,
     add: impl Fn(&mut H, &R),
+) -> bool {
+    merged_by_key(
+        held,
+        incoming,
+        merged,
+        apps_max,
+        |app| H::starting(app),
+        |row, app| add(row, app),
+    )
+}
+
+/// Writes into `merged` the rows of `held` with the Apps of `incoming`, both in key order, each
+/// App of `incoming` added with `add` to its row of `held`, or to the row `start` makes of it
+/// where `held` holds none. Returns false where they come to more than `apps_max` Apps.
+// Out of line, since choosing the leaders of a span took 7% longer with this merge compiled
+// into its caller.
+#[inline(never)]
+pub(super) fn merged_by_key<H: Named, I: Named>(
+    held: &mut Vec<H>,
+    incoming: impl IntoIterator<Item = I>,
+    merged: &mut Vec<H>,
+    apps_max: usize,
+    mut start: impl FnMut(&I) -> H,
+    mut add: impl FnMut(&mut H, I),
 ) -> bool {
     assert!(merged.is_empty());
 
@@ -44,12 +75,14 @@ pub(super) fn add_merged<H: HeldRow<R>, R: PointRow>(
         if let Some(last) = merged.last() {
             assert!(key_of(last.name()) < key);
         }
+        // One call of `add` for a row held and a row started, since choosing the leaders took
+        // 9% longer with a call in each arm.
         let mut row = match held.next_if(|row| key_of(row.name()) == key) {
             Some(row) => row,
-            None => H::starting(app),
+            None => start(&app),
         };
-
         add(&mut row, app);
+
         if merged.len() == apps_max {
             return false;
         }

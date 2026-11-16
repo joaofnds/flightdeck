@@ -670,8 +670,8 @@ fn selected_startup_payloads_keep_app_details_their_seconds_repeat_once() {
     let earlier = held.apps.get(4).unwrap().processes.as_ref().unwrap();
     let later = held.apps.get(5).unwrap().processes.as_ref().unwrap();
     assert_eq!(earlier.apps().len(), 2);
-    assert!(std::ptr::eq(earlier.app(0), later.app(0)));
-    assert!(std::ptr::eq(earlier.app(1), later.app(1)));
+    assert!(std::ptr::eq(earlier.own_app(0), later.own_app(0)));
+    assert!(std::ptr::eq(earlier.own_app(1), later.own_app(1)));
 }
 
 /// What the staged startup holds once it has loaded the selected minute of `fixture`.

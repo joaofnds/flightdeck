@@ -23,6 +23,8 @@ fixtures = []
 
 [dev-dependencies]
 persistence = { path = "../persistence", features = ["fixtures"] }
+# The `store_payload` tool's tests build a View of packed blocks through these fixtures.
+viewer = { path = ".", features = ["fixtures"] }
 
 [lints]
 workspace = true

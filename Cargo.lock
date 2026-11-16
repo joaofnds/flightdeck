@@ -3329,6 +3329,7 @@ dependencies = [
  "persistence",
  "polars",
  "serde_json",
+ "viewer",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 //! App chart of the loaded hour draws one point for each stretch that shows what its Apps used
 //! over all of its seconds, where the older tail of a machine chart draws one reading of them.
 
+use std::borrow::Cow;
 use std::mem;
 use std::sync::Arc;
 
@@ -653,8 +654,12 @@ impl Amount {
 impl PointApps for AppsStretch {
     type Row = StretchRow;
 
-    fn rows(&self) -> &[StretchRow] {
-        &self.rows
+    fn app_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn found(&self, name: &RankedApp) -> Option<Cow<'_, StretchRow>> {
+        attribution::found_in(&self.rows, name).map(Cow::Borrowed)
     }
 
     fn totals(&self) -> &Totals {
@@ -684,11 +689,13 @@ impl PointRow for StretchRow {
     }
 }
 
-impl<R: PointRow> key_order::HeldRow<R> for StretchRow {
+impl key_order::Named for StretchRow {
     fn name(&self) -> &RankedApp {
         &self.name
     }
+}
 
+impl<R: PointRow> key_order::HeldRow<R> for StretchRow {
     fn starting(row: &R) -> Self {
         Self::new(row.ranked())
     }

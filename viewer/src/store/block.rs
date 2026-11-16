@@ -1,6 +1,7 @@
 //! The App seconds of the live span as a row of blocks of seconds, which readers reach only
 //! through a second's header, one App or process of a second, and a whole second's Apps.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,12 +19,15 @@ use super::packing::{
     Answer, BATCH_BUFFERS_MAX, BATCHES_OUT_MAX, BLOCKS_OUT_MAX, Batch, Before, Handed, QUEUE_MAX,
     StoreEnd,
 };
-use super::payload::packed::{KeptPlain, ProcessTable, pack_seconds};
+use super::payload::packed::{AppRowsShare, BlockTable, KeptPlain, pack_seconds};
 use super::{AppDetails, AppRow, AppsSecond, Missing, Payload, ProcessAt};
 use crate::app_attribution_history::AppAttributionMetric;
+use crate::apps::AppKey;
 use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::live_app_response::json::{AppView, Header};
-use crate::live_app_response::{Detail, KeyKind, Observation, Page, RankedApp, Ranks};
+use crate::live_app_response::{
+    Detail, KeyKind, Measure, Metric, Observation, Page, Rankable, RankedApp, Ranks,
+};
 
 #[cfg(test)]
 #[path = "block_tests.rs"]
@@ -31,6 +35,20 @@ mod tests;
 
 /// The seconds a block holds at most.
 pub(super) const BLOCK_SECONDS_MAX: usize = 64;
+
+/// The values of one block's Apps a packed block holds at most: each App of each second, with a
+/// row and details that change in at most 32 words each.
+const BLOCK_APP_VALUES_MAX: usize = BLOCK_SECONDS_MAX * super::APPS_PER_SECOND_MAX * 2 * 32;
+
+const _: () = assert!(BLOCK_APP_VALUES_MAX < 1 << 32);
+
+/// `value`, an index, a count, a place or a change record of one block's Apps, which is at most
+/// `BLOCK_APP_VALUES_MAX`, as the `u32` a packed block holds it in.
+pub(super) fn block_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or_else(|_| {
+        unreachable!("a block's Apps hold at most {BLOCK_APP_VALUES_MAX} values, which fit 32 bits")
+    })
+}
 
 /// The seconds that have left the span and stay in its oldest block, which holds at least one
 /// second of the span until its last second leaves, so each holds a buffer past the span's.
@@ -72,6 +90,9 @@ pub struct Block {
     /// `None` for a plain block, which no budget charges. It is held only to be dropped with
     /// the block, as `BufferOwner` holds its reservations in the persistence crate.
     _reservation: Option<ByteReservation>,
+    /// The table of a packed block, which holds its seconds' Apps and processes, `None` for a
+    /// plain block.
+    table: Option<Arc<BlockTable>>,
 }
 
 /// How a block holds its seconds.
@@ -100,6 +121,7 @@ impl Block {
             form: Form::Plain,
             awaiting: u64::from(awaiting),
             _reservation: None,
+            table: None,
         }
     }
 
@@ -128,6 +150,7 @@ impl Block {
             seconds,
             form: Form::Plain,
             _reservation: None,
+            table: None,
         })
     }
 
@@ -150,6 +173,7 @@ impl Block {
             form: Form::Plain,
             awaiting: self.awaiting & !(1 << index),
             _reservation: None,
+            table: None,
         }
     }
 
@@ -167,14 +191,20 @@ impl Block {
             form: Form::Plain,
             awaiting: 0,
             _reservation: None,
+            table: None,
         }
     }
 
-    /// This block packed, sharing each process's first row with `before`, the process table of
-    /// the block before, where the two read the same, and charged to `budget`. Or this block
-    /// kept plain for good, with why.
+    /// This block packed, sharing each process's first row with `before`, the block table of
+    /// the block before, where the two read the same, its App rows packed only where `share`
+    /// admits them, and charged to `budget`. Or this block kept plain for good, with why.
     #[must_use]
-    pub(super) fn packing(&self, before: Option<&ProcessTable>, budget: &Arc<ByteBudget>) -> Self {
+    pub(super) fn packing(
+        &self,
+        before: Option<&BlockTable>,
+        budget: &Arc<ByteBudget>,
+        share: AppRowsShare,
+    ) -> Self {
         assert_eq!(self.form, Form::Plain);
         assert_eq!(self.awaiting, 0);
 
@@ -182,15 +212,17 @@ impl Block {
             .reserve(packing_bytes())
             .ok_or(KeptPlain::Budget)
             .and_then(|reservation| {
-                let seconds = pack_seconds(&self.seconds, before, budget)?;
-                Ok((seconds, reservation))
+                let (seconds, table) = pack_seconds(&self.seconds, before, budget, share)?;
+                Ok((seconds, table, reservation))
             });
-        let (seconds, form, reservation) = match packed {
-            Ok((seconds, reservation)) => (seconds, Form::Packed, Some(reservation)),
+        let (seconds, form, reservation, table) = match packed {
+            Ok((seconds, table, reservation)) => {
+                (seconds, Form::Packed, Some(reservation), Some(table))
+            }
             Err(cause) => {
                 let mut seconds = Vec::with_capacity(BLOCK_SECONDS_MAX);
                 seconds.extend(self.seconds.iter().map(Arc::clone));
-                (seconds, Form::KeptPlain(cause), None)
+                (seconds, Form::KeptPlain(cause), None, None)
             }
         };
         assert_eq!(seconds.len(), self.seconds.len());
@@ -201,21 +233,15 @@ impl Block {
             form,
             awaiting: 0,
             _reservation: reservation,
+            table,
         }
     }
 
-    /// The process table of a packed block, which a second holding processes carries, or
-    /// `None` for a plain block or one with no processes at any second.
+    /// The table of a packed block, which holds its seconds' Apps and processes, or `None` for
+    /// a plain block.
     #[must_use]
-    pub(super) fn table(&self) -> Option<&ProcessTable> {
-        if self.form != Form::Packed {
-            return None;
-        }
-
-        self.seconds.iter().find_map(|second| {
-            let payload = second.processes.as_ref().ok()?;
-            payload.table().map(AsRef::as_ref)
-        })
+    pub(super) fn table(&self) -> Option<&BlockTable> {
+        self.table.as_deref()
     }
 
     /// Whether the second at `index` waits for its Apps.
@@ -237,8 +263,19 @@ impl Block {
     pub fn second(&self, index: usize) -> Second<'_> {
         assert!(index < self.seconds.len());
 
+        // A block whose table does not hold its Apps' rows reads them as a plain block does.
+        let packed = self
+            .table
+            .as_ref()
+            .filter(|table| table.app_rows_packed())
+            .map(|table| PackedSecond {
+                table,
+                index: block_u32(index),
+            });
+
         Second {
             second: &self.seconds[index],
+            packed,
         }
     }
 }
@@ -741,6 +778,7 @@ impl AppsSpan {
     }
 
     /// Where each second of the span lies, oldest first: its block and its index there.
+    #[cfg(any(test, feature = "fixtures"))]
     pub(super) fn places(&self) -> impl Iterator<Item = (&Arc<Block>, usize)> {
         self.block_ranges()
             .flat_map(|(block, indices)| indices.map(move |index| (block, index)))
@@ -785,6 +823,30 @@ impl AppsSpan {
             .iter()
             .filter(|block| block.form == Form::Packed)
             .count()
+    }
+
+    /// How many packed blocks of the span hold their Apps' rows and details plain, since packing
+    /// them would not pay, which a View counts beside the blocks kept plain.
+    #[must_use]
+    pub fn apps_plain_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter_map(|block| block.table())
+            .filter(|table| !table.app_rows_packed())
+            .count()
+    }
+
+    /// The bytes each packed block's Apps take packed and held plain, each counting what its
+    /// form holds, oldest block first, which decided the form the block holds them in, which
+    /// the benchmark reports.
+    #[cfg(all(test, feature = "read-benchmark"))]
+    pub(in crate::store) fn app_rows_bytes(
+        &self,
+    ) -> impl Iterator<Item = super::payload::packed::AppRowsBytes> {
+        self.blocks
+            .iter()
+            .filter_map(|block| block.table())
+            .map(BlockTable::app_rows_bytes)
     }
 
     /// Whether the block at `block_index` waits to be packed: it is closed and plain, and
@@ -912,11 +974,15 @@ impl PartialEq for AppsSpan {
             return false;
         }
 
-        self.places()
-            .zip(other.places())
-            .all(|((block, index), (other_block, other_index))| {
-                block.seconds[index] == other_block.seconds[other_index]
-            })
+        self.seconds().eq(other.seconds())
+    }
+}
+
+/// Two seconds are equal where their headers are and they read the same Apps, whether a block
+/// holds them plain or packed.
+impl PartialEq for Second<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.second.header_eq(other.second) && *self.app_rows() == *other.app_rows()
     }
 }
 
@@ -925,6 +991,50 @@ impl PartialEq for AppsSpan {
 #[derive(Clone, Copy, Debug)]
 pub struct Second<'block> {
     second: &'block AppsSecond,
+    /// The table of the packed block that holds the second's Apps and the second's index in it,
+    /// or `None` where the second holds its own Apps.
+    packed: Option<PackedSecond<'block>>,
+}
+
+/// An App of a packed second as the ranking reads it: its name, and its readings in a row that
+/// names another App.
+struct PackedRank<'row> {
+    name: &'row Arc<RankedApp>,
+    readings: &'row AppRow,
+}
+
+impl Rankable for PackedRank<'_> {
+    fn measure(&self, metric: Metric) -> Measure {
+        self.readings.measure(metric)
+    }
+
+    fn key(&self) -> AppKey<'_> {
+        self.name.kind.key(&self.name.bytes)
+    }
+
+    fn ranked(&self) -> Arc<RankedApp> {
+        Arc::clone(self.name)
+    }
+}
+
+/// One second of a packed block.
+#[derive(Clone, Copy, Debug)]
+struct PackedSecond<'block> {
+    table: &'block Arc<BlockTable>,
+    /// The second's index in its block, the oldest at 0.
+    index: u32,
+}
+
+impl PackedSecond<'_> {
+    /// The rows of every App of the second, in key order, rebuilt from the block's first rows
+    /// and their changes.
+    fn rows(self) -> Vec<AppRow> {
+        let mut rows = Vec::new();
+        self.table
+            .rebuild_app_rows(self.index, &mut rows, &mut Vec::new(), &mut Vec::new());
+
+        rows
+    }
 }
 
 impl<'block> Second<'block> {
@@ -973,25 +1083,79 @@ impl<'block> Second<'block> {
     /// How many Apps the second holds, read from no row.
     #[must_use]
     pub fn app_count(self) -> usize {
-        self.second.apps.len()
+        match self.packed {
+            None => self.second.apps.len(),
+            Some(packed) => packed.table.app_count(packed.index),
+        }
+    }
+
+    /// Calls `each` with the name of each App of the second whose index among its Apps is in
+    /// `range`, in key order, reading no row.
+    pub(in crate::store) fn app_names_in(self, range: Range<usize>, each: impl FnMut(&RankedApp)) {
+        match self.packed {
+            None => self.second.apps[range]
+                .iter()
+                .map(|row| &*row.name)
+                .for_each(each),
+            Some(packed) => packed.table.app_names_in(packed.index, range, each),
+        }
+    }
+
+    /// The rows of every App of the second, in key order, its own where its block is plain and
+    /// rebuilt where it is packed.
+    fn app_rows(self) -> Cow<'block, [AppRow]> {
+        match self.packed {
+            None => Cow::Borrowed(self.second.apps.as_slice()),
+            Some(packed) => Cow::Owned(packed.rows()),
+        }
     }
 
     /// How many App rows the second has room for, which a tool that measures the store reads.
+    /// A packed second holds no rows of its own.
     #[must_use]
     pub fn app_row_capacity(self) -> usize {
         self.second.apps.capacity()
     }
 
+    /// How many App rows the second holds of its own, which a tool that measures the store
+    /// reads. A second whose block packs its App rows holds none.
+    #[must_use]
+    pub fn app_row_count(self) -> usize {
+        self.second.apps.len()
+    }
+
     /// A second no block holds, one a launch is about to install.
     #[must_use]
     pub(super) fn unheld(second: &'block AppsSecond) -> Self {
-        Self { second }
+        Self {
+            second,
+            packed: None,
+        }
+    }
+
+    /// `second` as a second no block holds, which a test outside the store builds plain and
+    /// reads as the store reads it.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn plain(second: &'block AppsSecond) -> Self {
+        Self::unheld(second)
     }
 
     /// The Apps that used the most of each resource at this second, or why the second holds no
     /// Apps to rank.
     pub fn ranks(self) -> std::result::Result<Ranks, Missing> {
-        self.second.ranks()
+        match self.packed {
+            None => self.second.ranks(),
+            Some(packed) => self
+                .second
+                .ranks_by(packed.table.app_count(packed.index), |ranking| {
+                    packed
+                        .table
+                        .app_readings_of(packed.index, |name, readings| {
+                            ranking.add(&PackedRank { name, readings });
+                        });
+                }),
+        }
     }
 
     /// What the second shows on the App chart of `metric` whose own lines draw `cohort`.
@@ -1001,42 +1165,54 @@ impl<'block> Second<'block> {
         metric: AppAttributionMetric,
         cohort: &[Arc<RankedApp>],
     ) -> Attribution {
-        self.second.attribution(metric, cohort)
+        match self.packed {
+            None => self.second.attribution(metric, cohort),
+            Some(packed) => self
+                .second
+                .attribution_of(packed.table, packed.index, metric, cohort),
+        }
     }
 
     /// What the second shows on the chart of resident memory by App whose own lines draw
     /// `cohort`.
     #[must_use]
     pub fn resident(self, cohort: &[Arc<RankedApp>]) -> Resident {
-        self.second.resident(cohort)
+        match self.packed {
+            None => self.second.resident(cohort),
+            Some(packed) => self.second.resident_of(packed.table, packed.index, cohort),
+        }
     }
 
     /// The requested page of the second's Apps.
     pub fn apps_page(self, page: Page) -> Result<Value> {
-        self.second.apps_page(page)
+        match self.packed {
+            None => self.second.apps_page(page),
+            Some(packed) => self
+                .second
+                .apps_page_packed(packed.table, packed.index, page),
+        }
     }
 
     /// The requested page of one App's members.
     pub fn app_detail(self, detail: &Detail<'_>) -> Result<Value> {
-        self.second.app_detail(detail)
+        match self.packed {
+            None => self.second.app_detail(detail),
+            Some(packed) => self
+                .second
+                .app_detail_packed(packed.table, packed.index, detail),
+        }
     }
 
     /// The requested page of the processes in no App.
     pub fn ungrouped_page(self, page: Page) -> Result<Value> {
-        self.second.ungrouped_page(page)
+        self.second.ungrouped_page_of(self.app_count(), page)
     }
 
     /// The header a page of the second shows, and its processes, where it holds both.
     pub(crate) fn presentation(self) -> Result<(Header, Processes<'block>)> {
-        let (header, payload) = self.second.presentation()?;
+        let (header, payload) = self.second.presentation_of(self.app_count())?;
 
-        Ok((
-            header,
-            Processes {
-                payload,
-                apps: self.second.apps.as_slice(),
-            },
-        ))
+        Ok((header, Processes { payload }))
     }
 
     /// The App `name` names at this second, where the second holds it.
@@ -1048,66 +1224,271 @@ impl<'block> Second<'block> {
     /// The App of kind `kind` named `bytes` at this second, where the second holds it.
     #[must_use]
     pub fn app_of(self, kind: KeyKind, bytes: &[u8]) -> Option<AppAt<'block>> {
-        let key = kind.key(bytes);
-        let rows = self.second.apps.as_slice();
-        let index = rows
-            .binary_search_by(|row| row.name.kind.key(&row.name.bytes).cmp(&key))
-            .ok()?;
+        let app = match self.packed {
+            None => {
+                let key = kind.key(bytes);
+                let rows = self.second.apps.as_slice();
+                let index = rows
+                    .binary_search_by(|row| row.name.kind.key(&row.name.bytes).cmp(&key))
+                    .ok()?;
+                AppOf::Plain {
+                    row: &rows[index],
+                    index,
+                }
+            }
+            Some(packed) => AppOf::Packed {
+                table: packed.table,
+                second_index: packed.index,
+                place: packed.table.app_place_of(packed.index, kind, bytes)?,
+            },
+        };
 
         Some(AppAt {
-            row: &rows[index],
-            index,
+            app,
             second: self.second,
+        })
+    }
+
+    /// The Apps of the packed block that holds the second, where its table holds their rows,
+    /// and the second's index in that block, so a reader that adds up the block's seconds
+    /// reads each App once. `None` where the second holds its own Apps.
+    #[must_use]
+    pub(in crate::store) fn block_apps(self) -> Option<(BlockApps<'block>, u32)> {
+        self.packed.map(|packed| {
+            (
+                BlockApps {
+                    table: packed.table,
+                },
+                packed.index,
+            )
         })
     }
 
     /// The second's processes, or why the second holds none.
     pub fn processes(self) -> std::result::Result<Processes<'block>, &'block Missing> {
         match &self.second.processes {
-            Ok(payload) => Ok(Processes {
-                payload,
-                apps: self.second.apps.as_slice(),
-            }),
+            Ok(payload) => Ok(Processes { payload }),
             Err(missing) => Err(missing),
         }
     }
 }
 
+/// The Apps of a packed block whose table holds their rows, which a reader that adds up several
+/// seconds of the block reads once an App rather than once a second.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::store) struct BlockApps<'block> {
+    table: &'block Arc<BlockTable>,
+}
+
+impl<'block> BlockApps<'block> {
+    /// Whether `other` holds the Apps of the same block.
+    #[must_use]
+    pub(in crate::store) fn same_block(self, other: Self) -> bool {
+        Arc::ptr_eq(self.table, other.table)
+    }
+
+    /// How many Apps the block holds over all its seconds, each at a place in key order.
+    #[must_use]
+    pub(in crate::store) fn count(self) -> u32 {
+        self.table.block_app_count()
+    }
+
+    /// The key and name of the App at `place`.
+    #[must_use]
+    pub(in crate::store) fn name(self, place: u32) -> &'block Arc<RankedApp> {
+        self.table.app_name(place)
+    }
+
+    /// Calls `each` with the index in the block of each second of `seconds`, one bit each by
+    /// that index, that holds the App at `place`, oldest first, and the App's row there.
+    pub(in crate::store) fn rows(self, place: u32, seconds: u64, each: impl FnMut(u32, &AppRow)) {
+        self.table.app_rows_over(place, seconds, each);
+    }
+}
+
+/// The seconds of one packed block a reader took, whose Apps it adds up once an App when its
+/// walk leaves the block, rather than once a second.
+pub(in crate::store) struct BlockSeconds<'block> {
+    pub(in crate::store) apps: BlockApps<'block>,
+    /// The seconds taken, one bit each by their index in the block.
+    pub(in crate::store) seconds: u64,
+    /// The interval the reader took with each of `seconds`, by its index in the block.
+    pub(in crate::store) elapsed_ns: [Option<u64>; BLOCK_SECONDS_MAX],
+}
+
+// A block's seconds are bits of one `u64`.
+const _: () = assert!(1_u128 << BLOCK_SECONDS_MAX == 1_u128 << u64::BITS);
+
+impl<'block> BlockSeconds<'block> {
+    /// Whether `second` is a second of the block of `block`, where there is one.
+    #[must_use]
+    pub(in crate::store) fn holds(block: Option<&Self>, second: Second<'_>) -> bool {
+        match (block, second.block_apps()) {
+            (Some(block), Some((apps, _))) => block.apps.same_block(apps),
+            (Some(_), None) | (None, _) => false,
+        }
+    }
+
+    /// Adds the second at `index` of the block of `apps`, with the interval `elapsed_ns`, to
+    /// `block`, which holds that block's seconds where it holds any.
+    pub(in crate::store) fn add(
+        block: &mut Option<Self>,
+        apps: BlockApps<'block>,
+        index: u32,
+        elapsed_ns: Option<u64>,
+    ) {
+        let block = block.get_or_insert(Self {
+            apps,
+            seconds: 0,
+            elapsed_ns: [None; BLOCK_SECONDS_MAX],
+        });
+        assert!(block.apps.same_block(apps));
+        block.seconds |= 1 << index;
+        block.elapsed_ns[collector::usize_from_u32(index)] = elapsed_ns;
+    }
+}
+
 /// What a reader that walks whole seconds reads each second's Apps through, as a slice in key
 /// order holding exactly the Apps of that second. A plain block's slice is the second's own
-/// rows, so the plain kind keeps nothing here.
+/// rows. For a packed block the cursor keeps the rows of the second it last showed: the next
+/// second of the same block takes that second's steps, and any other second is rebuilt from the
+/// block's first rows and their changes, writing a row in place where it already shows the App.
 #[derive(Debug, Default)]
 pub struct AppsCursor {
-    _rows: (),
+    rows: Vec<AppRow>,
+    /// The App place in its block of each of `rows`.
+    places: Vec<u32>,
+    /// Room the next rebuild fills, so a rebuild allocates only where the rows grow.
+    spare: Vec<AppRow>,
+    /// The table of the block whose second `rows` show, and that second's index in it.
+    at: Option<(Arc<BlockTable>, u32)>,
 }
 
 impl AppsCursor {
+    /// The most a cursor holds as working memory, which every response that walks one reserves:
+    /// room for a second's bound of App rows twice, the rows it shows and the room the next
+    /// rebuild fills, and the place of each. A cursor takes it all the first time it shows a
+    /// packed second, and holds nothing before.
+    pub const WORKING_BYTES_MAX: usize =
+        super::APPS_PER_SECOND_MAX * (2 * size_of::<AppRow>() + size_of::<u32>());
+
     /// Every App of `second`, once each, in key order.
     pub fn apps<'cursor>(&'cursor mut self, second: Second<'cursor>) -> &'cursor [AppRow] {
-        second.second.apps.as_slice()
+        let Some(packed) = second.packed else {
+            return second.second.apps.as_slice();
+        };
+        // Sized once to the bound, so no step or rebuild grows the rows past it.
+        if self.rows.capacity() < super::APPS_PER_SECOND_MAX {
+            self.apps_reserve();
+        }
+
+        let shown = match &self.at {
+            Some((table, index)) if Arc::ptr_eq(table, packed.table) => Some(*index),
+            Some(_) | None => None,
+        };
+        match shown {
+            Some(index) if index == packed.index => {}
+            Some(index) if index + 1 == packed.index => {
+                packed
+                    .table
+                    .step_app_rows(packed.index, &mut self.rows, &mut self.places);
+            }
+            Some(_) | None => {
+                packed.table.rebuild_app_rows(
+                    packed.index,
+                    &mut self.rows,
+                    &mut self.places,
+                    &mut self.spare,
+                );
+            }
+        }
+        // A cursor that showed a second of this block keeps its reference to the block's table.
+        let table = match self.at.take() {
+            Some((table, _)) if shown.is_some() => table,
+            Some(_) | None => Arc::clone(packed.table),
+        };
+        self.at = Some((table, packed.index));
+        assert!(self.rows.len() <= super::APPS_PER_SECOND_MAX);
+
+        &self.rows
+    }
+
+    /// Gives the cursor's working memory the room of a second's bound of Apps.
+    fn apps_reserve(&mut self) {
+        assert!(self.rows.is_empty());
+        assert!(self.spare.is_empty());
+        self.rows.reserve_exact(super::APPS_PER_SECOND_MAX);
+        self.spare.reserve_exact(super::APPS_PER_SECOND_MAX);
+        self.places.reserve_exact(super::APPS_PER_SECOND_MAX);
+    }
+
+    /// The Apps of `second` ranked, as `Second::ranks` ranks them, from the rows the cursor
+    /// keeps, so a reader that ranks seconds in order applies each second's changes.
+    pub fn ranks<'cursor>(
+        &'cursor mut self,
+        second: Second<'cursor>,
+    ) -> std::result::Result<Ranks, Missing> {
+        second.second.ranks_of(self.apps(second))
     }
 }
 
-/// One App at one second: its row, its place among the Apps of that second, and that second,
-/// so a reader never pairs the App with another second's measures.
+/// One App at one second: its readings, its place among the Apps of that second, and that
+/// second, so a reader never pairs the App with another second's measures.
 #[derive(Clone, Copy, Debug)]
 pub struct AppAt<'block> {
-    row: &'block AppRow,
-    index: usize,
+    app: AppOf<'block>,
     second: &'block AppsSecond,
 }
 
+/// Where an App's readings at one second are held.
+#[derive(Clone, Copy, Debug)]
+enum AppOf<'block> {
+    /// The second's own row, at `index` among its Apps.
+    Plain { row: &'block AppRow, index: usize },
+    /// The App at `place` among the Apps of the packed block whose table is `table`, at the
+    /// second at `second_index` of the block.
+    Packed {
+        table: &'block BlockTable,
+        second_index: u32,
+        place: u32,
+    },
+}
+
 impl<'block> AppAt<'block> {
-    /// The App's readings at the second.
+    /// The App's key and name.
     #[must_use]
-    pub fn row(self) -> &'block AppRow {
-        self.row
+    pub fn name(self) -> &'block Arc<RankedApp> {
+        match self.app {
+            AppOf::Plain { row, .. } => &row.name,
+            AppOf::Packed { table, place, .. } => table.app_name(place),
+        }
     }
 
-    /// The App's place among the Apps of the second, in key order.
+    /// How many processes the App holds at the second.
+    #[must_use]
+    pub fn members(self) -> u32 {
+        match self.app {
+            AppOf::Plain { row, .. } => row.members,
+            AppOf::Packed {
+                table,
+                second_index,
+                place,
+            } => table.app_members(place, second_index),
+        }
+    }
+
+    /// The App's place among the Apps of the second, in key order. A packed second counts the
+    /// Apps it holds before the App.
     #[must_use]
     pub fn index(self) -> usize {
-        self.index
+        match self.app {
+            AppOf::Plain { index, .. } => index,
+            AppOf::Packed {
+                table,
+                second_index,
+                place,
+            } => table.app_index_of(second_index, place),
+        }
     }
 
     /// The App as a page shows it, with the additional measures its own second gives it, where
@@ -1119,7 +1500,20 @@ impl<'block> AppAt<'block> {
             .as_ref()
             .map_err(|_| Error::Bound("live App empty sample"))?;
 
-        Ok(self.row.presentation(payload.app(self.index)))
+        Ok(match self.app {
+            AppOf::Plain { row, index } => row.presentation(&payload.app(index)),
+            AppOf::Packed {
+                table,
+                second_index,
+                place,
+            } => {
+                let name = table.app_name(place);
+                let details = table.app_details(place, second_index);
+                table
+                    .app_row(place, second_index)
+                    .presentation_named(name, &details)
+            }
+        })
     }
 }
 
@@ -1128,8 +1522,6 @@ impl<'block> AppAt<'block> {
 #[derive(Clone, Copy, Debug)]
 pub struct Processes<'block> {
     payload: &'block Payload,
-    /// The second's Apps, which name the App a reader asks for the members of.
-    apps: &'block [AppRow],
 }
 
 impl<'block> Processes<'block> {
@@ -1156,7 +1548,26 @@ impl<'block> Processes<'block> {
         self,
         app_index: Option<u32>,
     ) -> impl Iterator<Item = ProcessAt<'block>> + Clone {
-        self.payload.members(app_index, self.apps)
+        self.payload.members(app_index)
+    }
+
+    /// The processes of the App `app` of the second, in the sample's order, where `app` is an
+    /// App of this second and not of another. A packed second finds them by the App's place,
+    /// with no walk of the second's Apps to its index but the one that gives each process its
+    /// App index.
+    pub fn members_of(self, app: AppAt<'block>) -> impl Iterator<Item = ProcessAt<'block>> + Clone {
+        assert!(
+            app.second
+                .processes
+                .as_ref()
+                .is_ok_and(|payload| std::ptr::eq(Arc::as_ptr(payload), self.payload)),
+            "an App's members are read from the processes of its own second"
+        );
+        let index = block_u32(app.index());
+        match app.app {
+            AppOf::Plain { .. } => self.payload.members(Some(index)),
+            AppOf::Packed { place, .. } => self.payload.members_of_place(place, index),
+        }
     }
 
     /// The process of pid `pid` created at `creation`, where the second holds it.
@@ -1165,22 +1576,18 @@ impl<'block> Processes<'block> {
         self.payload.find(pid, creation)
     }
 
-    /// The additional measures of the App at `app_index` of the second's Apps.
-    #[must_use]
-    pub fn app_details(self, app_index: usize) -> &'block AppDetails {
-        self.payload.app(app_index)
-    }
-
     /// The additional measures of every App of the second, in key order.
     #[must_use]
-    pub fn details(self) -> impl ExactSizeIterator<Item = &'block AppDetails> {
+    pub fn details(self) -> impl ExactSizeIterator<Item = AppDetails> + 'block {
         self.payload.apps()
     }
 
-    /// How many Apps the second holds additional measures of.
+    /// The additional measures a plain second holds as allocations of its own, in key order,
+    /// which a tool that measures the store tells apart by address. A packed second holds its
+    /// Apps' measures in its block's table and gives none here.
     #[must_use]
-    pub fn app_details_count(self) -> usize {
-        self.payload.apps().len()
+    pub fn own_details(self) -> impl ExactSizeIterator<Item = &'block AppDetails> {
+        self.payload.own_apps()
     }
 }
 
@@ -1189,6 +1596,35 @@ impl<'block> Processes<'block> {
 /// they reach a second as the store took it.
 #[cfg(any(test, feature = "fixtures"))]
 impl AppsSpan {
+    /// This span with each block packed as the packing thread packs a block with none before
+    /// it, charged to `budget`, its App rows packed where `app_rows_packed` gives true for the
+    /// block's index, the oldest at 0, and held plain where not.
+    #[must_use]
+    pub fn packing_each_block(
+        mut self,
+        budget: &Arc<ByteBudget>,
+        app_rows_packed: impl Fn(usize) -> bool,
+    ) -> Self {
+        for (index, block) in self.blocks.iter_mut().enumerate() {
+            let share = if app_rows_packed(index) {
+                AppRowsShare {
+                    numerator: 1,
+                    denominator: 0,
+                }
+            } else {
+                AppRowsShare {
+                    numerator: 0,
+                    denominator: 1,
+                }
+            };
+            let packed = block.packing(None, budget, share);
+            assert_eq!(packed.form, Form::Packed);
+            *block = Arc::new(packed);
+        }
+
+        self
+    }
+
     /// The second at `index`, the oldest at 0, as the store took it.
     #[must_use]
     pub fn stored(&self, index: usize) -> &Arc<AppsSecond> {
@@ -1275,6 +1711,62 @@ impl<'block> Second<'block> {
     pub(crate) fn stored(self) -> &'block AppsSecond {
         self.second
     }
+
+    /// The packed `second` at `index` of the block whose table is `table`, as a reader of that
+    /// block reaches it.
+    pub(in crate::store) fn packed_at(
+        second: &'block AppsSecond,
+        table: &'block Arc<BlockTable>,
+        index: usize,
+    ) -> Self {
+        Self {
+            second,
+            packed: table.app_rows_packed().then(|| PackedSecond {
+                table,
+                index: block_u32(index),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Block {
+    /// The block of the plain `seconds`, which the store took at the wall times `wall_ns` gives
+    /// each by its index, packed with no block before it, its App rows packed only where `share`
+    /// admits them, and charged to `budget`.
+    pub(in crate::store) fn packed_of(
+        seconds: &[Arc<AppsSecond>],
+        wall_ns: impl Fn(usize) -> u64,
+        share: AppRowsShare,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let mut block = Self::starting(wall_ns(0), Arc::clone(&seconds[0]), false);
+        for (index, second) in seconds.iter().enumerate().skip(1) {
+            let Some(joined) = block.joining(wall_ns(index), Arc::clone(second), false) else {
+                panic!("the seconds fit one block");
+            };
+            block = joined;
+        }
+        let packed = block.packing(None, budget, share);
+        assert_eq!(packed.form, Form::Packed);
+
+        Arc::new(packed)
+    }
+}
+
+#[cfg(test)]
+impl AppsSpan {
+    /// The span of every second of `blocks`, oldest first.
+    pub(in crate::store) fn of_blocks(blocks: Vec<Arc<Block>>) -> Self {
+        let len = blocks.iter().map(|block| block.len()).sum();
+
+        Self {
+            blocks,
+            departed_count: 0,
+            len,
+            departed_let_go_count: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1307,7 +1799,23 @@ impl BlockSpan {
         buffers: Buffers<AppsSecond>,
         budget: Arc<ByteBudget>,
     ) -> Self {
-        let (store_end, packing_end) = super::packing::pair(budget);
+        Self::keeping_packing_end_under(
+            capacity,
+            buffers,
+            budget,
+            super::payload::packed::APP_ROWS_PACKED_ALWAYS,
+        )
+    }
+
+    /// A span as `keeping_packing_end` makes it, which packs each block's App rows only where
+    /// `share` admits them.
+    pub(super) fn keeping_packing_end_under(
+        capacity: usize,
+        buffers: Buffers<AppsSecond>,
+        budget: Arc<ByteBudget>,
+        share: AppRowsShare,
+    ) -> Self {
+        let (store_end, packing_end) = super::packing::pair(budget, share);
         let mut span = Self::new(capacity, buffers, store_end);
         span.keep_packing_end(packing_end);
 
@@ -1321,7 +1829,8 @@ impl BlockSpan {
         buffers: Buffers<AppsSecond>,
         budget: Arc<ByteBudget>,
     ) -> Self {
-        let (store_end, packing_end) = super::packing::pair(budget);
+        let (store_end, packing_end) =
+            super::packing::pair(budget, super::payload::packed::APP_ROWS_PACKED_ALWAYS);
         // The thread ends once the store's end is gone, so the test lets go of its handle.
         drop(packing_end.start(std::thread::current()).unwrap());
 

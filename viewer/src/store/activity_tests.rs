@@ -125,7 +125,10 @@ fn resumed_payload_ingestion_matches_a_fresh_store_without_changing_a_retained_v
         expected.apps[0].metadata.origin,
         super::native::Origin::Saved(persistence::Losses::default())
     );
-    assert_app_facts_equal(&retained.apps[0], &expected.apps[0]);
+    assert_app_facts_equal(
+        retained.apps.seconds().next().unwrap(),
+        expected.apps.seconds().next().unwrap(),
+    );
     assert!(retained.apps[0].processes.is_ok());
 }
 

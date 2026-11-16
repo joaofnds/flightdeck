@@ -18,7 +18,7 @@ use serde_json::Value;
 use super::query::{CheckedCoverage, Queries};
 use super::recording::{self, Continuity};
 use super::{
-    AppDetails, AppRow, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
+    AppDetails, AppRow, AppsCursor, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
     CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox, Payload,
     ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Readings,
     Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond, SourceGeneration,
@@ -225,7 +225,10 @@ fn load_hour(
     mut take: impl FnMut(&mut Held, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Loaded {
     let budget = Arc::new(ByteBudget::new(super::BYTES_MAX));
-    let (store_end, packing_end) = super::packing::pair(Arc::clone(&budget));
+    let (store_end, packing_end) = super::packing::pair(
+        Arc::clone(&budget),
+        super::payload::packed::APP_ROWS_PACKED_SHARE,
+    );
     drop(packing_end.start(std::thread::current()).unwrap());
     let mut held = Held::new(root.to_path_buf(), Arc::clone(&budget), store_end);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -766,24 +769,30 @@ fn report_span(label: &str, view: &View) {
     );
 }
 
-/// Says how many App rows the span holds and how often the Apps held change from one second
-/// to the next, and gives the bytes the rows take.
+/// Says how many App rows the span's seconds hold of their own and how often the Apps they show
+/// change from one second to the next, and gives the bytes those rows take. A packed second's
+/// block holds its rows in its table, which the process rows' figure counts, but the second
+/// still shows its Apps.
 fn report_apps(view: &View) -> usize {
-    let mut apps_before: Vec<&AppIdentity> = Vec::new();
+    let mut cursor = AppsCursor::default();
+    let mut apps_before: Vec<Arc<RankedApp>> = Vec::new();
     let (mut rows, mut bytes) = (0_usize, 0_usize);
     let (mut sets_changed, mut apps_changed) = (0_usize, 0_usize);
-    for second in view.apps.iter() {
-        let rows_held = second.apps.as_slice();
-        let apps: Vec<&AppIdentity> = rows_held
-            .iter()
-            .map(|row| app_identity(&row.name))
-            .collect();
+    for (held, second) in view.apps.iter().zip(view.apps.seconds()) {
+        assert_eq!(held.observation, second.observation());
+        let rows_held = held.apps.as_slice();
         rows += rows_held.len();
         bytes += size_of_val(rows_held);
-        if !apps_before.is_empty() && apps != apps_before {
+        let apps: Vec<Arc<RankedApp>> = cursor
+            .apps(second)
+            .iter()
+            .map(|row| Arc::clone(&row.name))
+            .collect();
+        let (now, before) = (shown(&apps), shown(&apps_before));
+        if !before.is_empty() && now != before {
             sets_changed += 1;
-            apps_changed += apps.iter().filter(|app| !apps_before.contains(app)).count();
-            apps_changed += apps_before.iter().filter(|app| !apps.contains(app)).count();
+            apps_changed += now.iter().filter(|app| !before.contains(app)).count();
+            apps_changed += before.iter().filter(|app| !now.contains(app)).count();
         }
         apps_before = apps;
     }
@@ -791,6 +800,11 @@ fn report_apps(view: &View) -> usize {
     println!("App rows: {rows} in {bytes} bytes, the Apps held changed at {sets_changed} seconds");
     println!("Apps that came or went at those seconds: {apps_changed}");
     bytes
+}
+
+/// The identities of `apps`, in their order.
+fn shown(apps: &[Arc<RankedApp>]) -> Vec<&AppIdentity> {
+    apps.iter().map(|app| app_identity(app)).collect()
 }
 
 /// Says how many App details the span's seconds name and how many the store holds once, and
@@ -802,8 +816,10 @@ fn report_details(view: &View) -> usize {
         .apps
         .iter()
         .filter_map(|second| second.processes.as_ref().ok());
+    // A packed second holds its Apps' details in its block's table, which the process rows'
+    // figure counts.
     for payload in payloads {
-        for details in payload.apps() {
+        for details in payload.own_apps() {
             references += 1;
             distinct.insert(std::ptr::from_ref(details));
         }
@@ -849,9 +865,15 @@ fn report_processes(view: &View) -> usize {
     // No line below names a figure the gate reads, so a build before packing prints none of
     // them and the gate refuses nothing.
     println!(
-        "  {} more read from {} packed blocks, whose process tables take {} bytes",
+        "  {} more read from {} packed blocks, whose block tables take {} bytes",
         census.packed_rows, census.tables, census.table_bytes,
     );
+    println!(
+        "  {} of those blocks pack their App rows and {} keep them plain",
+        census.app_rows_packed,
+        census.tables - census.app_rows_packed,
+    );
+    report_app_rows_shares(view);
     println!(
         "Blocks of the span packed {} of {}, kept plain for a bound {} and for the budget {}",
         view.apps.packed_count(),
@@ -884,8 +906,11 @@ struct ProcessCensus {
     packed_rows: usize,
     /// The packed blocks, each counted once.
     tables: usize,
-    /// The bytes the process tables of the packed blocks are charged.
+    /// The bytes the tables of the packed blocks, which hold their processes and their Apps,
+    /// are charged.
     table_bytes: usize,
+    /// How many of the packed blocks hold their App rows in their table.
+    app_rows_packed: usize,
 }
 
 /// A process row of a second and the App index the second gives it.
@@ -897,7 +922,6 @@ impl ProcessCensus {
         let mut before: HashMap<(i32, String), Listed> = HashMap::new();
         let mut now: HashMap<(i32, String), Listed> = HashMap::new();
         let mut distinct: HashSet<usize> = HashSet::new();
-        let mut tables: HashSet<*const super::payload::packed::ProcessTable> = HashSet::new();
         for second in view.apps.iter() {
             let Ok(payload) = &second.processes else {
                 before.clear();
@@ -905,11 +929,8 @@ impl ProcessCensus {
             };
             // A packed second's processes read their first row in the block, which the rows
             // held once count, and its changes from the block's table.
-            if let Some(table) = payload.table() {
+            if payload.packed() {
                 census.packed_rows += payload.len();
-                if tables.insert(Arc::as_ptr(table)) {
-                    census.table_bytes += table.reserved_bytes();
-                }
                 distinct.extend(payload.processes().map(|process| process.row_address()));
                 before.clear();
                 continue;
@@ -925,7 +946,16 @@ impl ProcessCensus {
             std::mem::swap(&mut before, &mut now);
         }
         census.distinct = distinct.len();
-        census.tables = tables.len();
+        // A packed block's table holds its Apps too, and a block whose every second refused its
+        // processes still holds one, so the tables are counted by block.
+        let tables = view.apps.blocks().iter().filter_map(|block| block.table());
+        for table in tables {
+            census.tables += 1;
+            census.table_bytes += table.reserved_bytes();
+            if table.app_rows_packed() {
+                census.app_rows_packed += 1;
+            }
+        }
 
         census
     }
@@ -950,6 +980,33 @@ impl ProcessCensus {
             self.readings_differ += usize::from(!same);
         }
     }
+}
+
+/// Prints the lowest, the median and the highest share of their plain bytes that the packed
+/// blocks' Apps take packed, which decides whether a block packs them.
+fn report_app_rows_shares(view: &View) {
+    let mut shares: Vec<f64> = view
+        .apps
+        .app_rows_bytes()
+        .map(|bytes| {
+            let packed = u32::try_from(bytes.packed).unwrap();
+            let plain = u32::try_from(bytes.plain).unwrap();
+            f64::from(packed) / f64::from(plain)
+        })
+        .collect();
+    if shares.is_empty() {
+        return;
+    }
+    shares.sort_unstable_by(f64::total_cmp);
+
+    // The median of an even count is the higher of its two middle blocks.
+    println!(
+        "  their packed App parts take of their plain App bytes: lowest {:.1}%, median {:.1}%, \
+         highest {:.1}%",
+        100.0 * shares[0],
+        100.0 * shares[shares.len() / 2],
+        100.0 * shares[shares.len() - 1],
+    );
 }
 
 /// Whether two rows of one process hold the same readings.
@@ -1008,9 +1065,10 @@ fn hash_machine(second: &MachineSecond, hasher: &mut DefaultHasher) {
 /// its App rows and process rows.
 fn apps_digest(view: &View) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for second in view.apps.iter() {
+    let mut cursor = AppsCursor::default();
+    for second in view.apps.seconds() {
         hash_ranked(&second.ranks(), &mut hasher);
-        hash_second(second, &mut hasher);
+        hash_second(second.stored(), cursor.apps(second), &mut hasher);
     }
 
     hasher.finish()
@@ -1026,7 +1084,8 @@ fn sampled_digest(view: &View) -> u64 {
     hasher.finish()
 }
 
-fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
+/// Hashes `second` with `apps`, the rows of its Apps as a reader reads them.
+fn hash_second(second: &AppsSecond, apps: &[AppRow], hasher: &mut DefaultHasher) {
     let AppsSecond {
         metadata,
         processes,
@@ -1039,7 +1098,7 @@ fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
         live_ungrouped_members,
         usage_refused,
         usage_gone,
-        apps,
+        apps: _,
         totals,
     } = second;
     let facts = (
@@ -1056,7 +1115,6 @@ fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
         totals,
     );
     digest(&facts).hash(hasher);
-    let apps = apps.as_slice();
     for row in apps {
         let measures = METRICS.map(|metric| row.measure(metric));
         let facts = (
@@ -1070,7 +1128,7 @@ fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
         Ok(payload) => {
             digest(&(payload.selected, payload.previous)).hash(hasher);
             for details in payload.apps() {
-                digest(details).hash(hasher);
+                digest(&details).hash(hasher);
             }
             for process in payload.processes() {
                 hash_process(process, apps, hasher);

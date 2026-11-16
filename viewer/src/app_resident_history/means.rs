@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
+use super::Samples;
 use crate::apps::AppKey;
 use crate::live_app_response::Measure;
 
@@ -52,6 +53,29 @@ impl Means {
     }
 
     pub(super) fn observe(&mut self, key: &AppKey<'_>, measure: &Measure) -> Result<()> {
+        let mut samples = Samples::default();
+        samples.add(measure);
+
+        self.merge(key, samples)
+    }
+
+    /// Adds `samples`, measured readings of the App `key` names, as `observe` adds them one by
+    /// one, failing where the App's samples come to more than `observe` takes.
+    pub(super) fn merge(&mut self, key: &AppKey<'_>, samples: Samples) -> Result<()> {
+        let index = self.slot(key)?;
+        let entry = &mut self.entries[index];
+        assert!(entry.samples <= 4096);
+        if samples.count > 4096 - entry.samples {
+            return Err(Error::Bound("resident history mean samples"));
+        }
+        entry.sum += samples.sum;
+        entry.samples += samples.count;
+
+        Ok(())
+    }
+
+    /// The entry of the App `key` names, added where none holds it yet.
+    fn slot(&mut self, key: &AppKey<'_>) -> Result<usize> {
         let found = crate::apps::search_ordered(&self.ordered, self.next, key, |index| {
             self.entries[usize::from(index)].key.view()
         });
@@ -62,17 +86,7 @@ impl Means {
         let (Ok(position) | Err(position)) = found;
         self.next = position + 1;
 
-        if let Some(known) = measure.measured() {
-            let entry = &mut self.entries[index];
-            if entry.samples == 4096 {
-                return Err(Error::Bound("resident history mean samples"));
-            }
-
-            entry.sum += u128::from(known);
-            entry.samples += 1;
-        }
-
-        Ok(())
+        Ok(index)
     }
 
     fn observe_insert(&mut self, key: &AppKey<'_>, position: usize) -> Result<usize> {

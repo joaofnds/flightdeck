@@ -24,6 +24,28 @@ pub(crate) struct Total {
     pub elapsed_ns: u128,
 }
 
+impl Total {
+    /// What one App's reading of one second, `measure`, adds to its mean over a second that
+    /// lasted `elapsed_ns`: its amount and the second's length where the clock moved and the
+    /// amount is measured, and nothing otherwise.
+    pub(crate) fn of_reading(measure: &Measure, elapsed_ns: Option<u64>) -> Self {
+        let elapsed_ns = elapsed_ns.filter(|elapsed_ns| *elapsed_ns > 0);
+        match (elapsed_ns, measure.measured()) {
+            (Some(elapsed_ns), Some(amount)) => Self {
+                amount: u128::from(amount),
+                elapsed_ns: u128::from(elapsed_ns),
+            },
+            (Some(_), None) | (None, _) => Self::default(),
+        }
+    }
+
+    /// Adds `other` to this total.
+    pub(crate) fn add(&mut self, other: Self) {
+        self.amount += other.amount;
+        self.elapsed_ns += other.elapsed_ns;
+    }
+}
+
 /// One App of one second, with its CPU, power, disk and GPU measures in that order.
 pub(crate) trait Summed {
     type Key: SumKey;

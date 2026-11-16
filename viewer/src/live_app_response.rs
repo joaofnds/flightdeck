@@ -12,7 +12,7 @@ pub(crate) use json::{Header, bounded};
 pub use part::AppPart;
 pub(crate) use part::Present;
 pub use ranks::{AppIdentity, Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
-pub(crate) use ranks::{METRICS, Rankable, Ranked, rank_apps};
+pub(crate) use ranks::{METRICS, RankApps, Rankable, Ranked, rank_apps};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;

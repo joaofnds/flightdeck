@@ -11,8 +11,8 @@ use super::attribution::{COHORT_MAX, METRICS, ranked_metric};
 use super::key_order::{self, key_of};
 use super::stretch::StretchRow;
 use super::{
-    AppRow, AppsCursor, AppsSpan, AppsStretch, EARLIER_STRIDE_SECONDS, MachineSecond, SECONDS_MAX,
-    STRETCHES_MAX,
+    APPS_PER_SECOND_MAX, AppRow, AppsCursor, AppsSpan, AppsStretch, BlockSeconds,
+    EARLIER_STRIDE_SECONDS, MachineSecond, SECONDS_MAX, STRETCHES_MAX,
 };
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::app_attribution_history::means::{Comparison, Mean, compare};
@@ -115,6 +115,9 @@ pub struct Leaders {
     /// Where adding a second or a stretch writes the entries, which then trade places with
     /// `entries`.
     spare: Vec<Entry>,
+    /// Each App of one packed block added up over the block's seconds, in key order, before
+    /// they are added to `entries`.
+    sums: Vec<Entry>,
     /// The entries a chart draws, the most first.
     chosen: Vec<usize>,
 }
@@ -128,17 +131,36 @@ struct Entry {
     resident: Gauge,
 }
 
-impl<R: PointRow> key_order::HeldRow<R> for Entry {
+impl key_order::Named for Entry {
     fn name(&self) -> &RankedApp {
         &self.name
     }
+}
 
+impl<R: PointRow> key_order::HeldRow<R> for Entry {
     fn starting(row: &R) -> Self {
+        Self::of(row.ranked())
+    }
+}
+
+impl Entry {
+    /// The App `name` with nothing added to it yet.
+    fn of(name: Arc<RankedApp>) -> Self {
         Self {
-            name: row.ranked(),
+            name,
             means: [Mean::ZERO; METRICS.len()],
             resident: Gauge::ZERO,
         }
+    }
+
+    /// Adds `other`, what the same App used over other seconds.
+    fn add(&mut self, other: &Self) {
+        for (mean, added) in self.means.iter_mut().zip(&other.means) {
+            mean.amount += added.amount;
+            mean.elapsed_ns += added.elapsed_ns;
+        }
+        self.resident.bytes += other.resident.bytes;
+        self.resident.seconds += other.resident.seconds;
     }
 }
 
@@ -171,6 +193,7 @@ impl Leaders {
         Self {
             entries: Vec::with_capacity(APPS_MAX),
             spare: Vec::with_capacity(APPS_MAX),
+            sums: Vec::with_capacity(APPS_PER_SECOND_MAX),
             chosen: Vec::with_capacity(COHORT_MAX),
         }
     }
@@ -200,12 +223,8 @@ impl Leaders {
         let Some(newest) = readings.seconds.last() else {
             return;
         };
-        let wholly = choose_stretches(readings.stretches, super::stretch(newest), window);
-        let stretches = &readings.stretches[wholly];
 
-        let fits = self.choose_add_stretches(stretches)
-            && self.choose_add_seconds(readings, run, stretches);
-        if fits {
+        if self.choose_add_window(readings, run, newest, window) {
             self.choose_cohorts(cohorts);
         } else {
             cohorts.refused = true;
@@ -213,6 +232,56 @@ impl Leaders {
 
         self.entries.clear();
         self.spare.clear();
+    }
+
+    /// Each App's sums over `window` of `readings`, in key order, as `choose` adds them up
+    /// before it chooses, or none where they come to more than `APPS_MAX` Apps, which a test
+    /// compares exactly where the cohorts show only the eight Apps each chart draws.
+    #[cfg(test)]
+    pub(in crate::store) fn sums_over(
+        &mut self,
+        readings: &Readings<'_>,
+        window: WallSeconds,
+    ) -> Option<Vec<String>> {
+        assert!(self.entries.is_empty());
+        let run = choose_run(readings.seconds, window);
+        let newest = readings.seconds.last().unwrap();
+
+        let fits = self.choose_add_window(readings, run, newest, window);
+        let sums = fits.then(|| {
+            self.entries
+                .iter()
+                .map(|entry| {
+                    let means: Vec<(u128, u128)> = entry
+                        .means
+                        .iter()
+                        .map(|mean| (mean.amount, mean.elapsed_ns))
+                        .collect();
+                    let Gauge { bytes, seconds } = entry.resident;
+                    format!("{} {means:?} {bytes} {seconds}", entry.name.display_name)
+                })
+                .collect()
+        });
+
+        self.entries.clear();
+        self.spare.clear();
+        sums
+    }
+
+    /// Adds to the entries the Apps of the closed stretches that lie wholly in `window`, whose
+    /// newest second is `newest`, and of the seconds `run` names of `readings` outside them.
+    /// Returns false where they come to more than `APPS_MAX` Apps.
+    fn choose_add_window(
+        &mut self,
+        readings: &Readings<'_>,
+        run: Range<usize>,
+        newest: &MachineSecond,
+        window: WallSeconds,
+    ) -> bool {
+        let wholly = choose_stretches(readings.stretches, super::stretch(newest), window);
+        let stretches = &readings.stretches[wholly];
+
+        self.choose_add_stretches(stretches) && self.choose_add_seconds(readings, run, stretches)
     }
 
     /// Adds the Apps of `stretches`, none of a stretch that held too many to add them up, as a
@@ -239,6 +308,7 @@ impl Leaders {
         stretches: &[Arc<AppsStretch>],
     ) -> bool {
         let mut cursor = AppsCursor::default();
+        let mut block: Option<BlockSeconds<'_>> = None;
         let seconds = readings.apps.seconds_from(run.start);
         for (index, second) in run.zip(seconds) {
             let id = super::stretch(&readings.seconds[index]);
@@ -250,13 +320,62 @@ impl Leaders {
             }
 
             let elapsed_ns = second.elapsed_ns().filter(|elapsed_ns| *elapsed_ns > 0);
+            if !BlockSeconds::holds(block.as_ref(), second) && !self.choose_add_block(block.take())
+            {
+                return false;
+            }
+            // A packed block's seconds are added up an App at a time when the walk leaves the
+            // block, which leaves the entries as adding them a second at a time leaves them, and
+            // refuses as that refuses, since the Apps the entries hold only grow.
+            if let Some((apps, index)) = second.block_apps() {
+                BlockSeconds::add(&mut block, apps, index, elapsed_ns);
+                continue;
+            }
             if !self.choose_add(cursor.apps(second), |entry, row| {
                 choose_add_second(entry, row, elapsed_ns);
             }) {
                 return false;
             }
         }
-        true
+        self.choose_add_block(block.take())
+    }
+
+    /// Adds the Apps of `block`, where there is one, each added up over the block's seconds
+    /// as `choose_add_second` adds it one second at a time. Returns false where they come to
+    /// more than `APPS_MAX` Apps.
+    fn choose_add_block(&mut self, block: Option<BlockSeconds<'_>>) -> bool {
+        let Some(block) = block else {
+            return true;
+        };
+        // A block holds at most a second's bound of Apps, so the sums never grow past the room
+        // they were made with.
+        let app_count = collector::usize_from_u32(block.apps.count());
+        assert!(app_count <= self.sums.capacity());
+        self.sums.clear();
+        for place in 0..block.apps.count() {
+            let mut sum = Entry::of(Arc::clone(block.apps.name(place)));
+            let mut held = false;
+            block.apps.rows(place, block.seconds, |second_index, row| {
+                held = true;
+                let elapsed_ns = block.elapsed_ns[collector::usize_from_u32(second_index)];
+                choose_add_second(&mut sum, row, elapsed_ns);
+            });
+            if held {
+                self.sums.push(sum);
+            }
+        }
+
+        self.spare.clear();
+        let fits = key_order::merged_by_key(
+            &mut self.entries,
+            self.sums.drain(..),
+            &mut self.spare,
+            APPS_MAX,
+            |sum| Entry::of(Arc::clone(&sum.name)),
+            |entry, sum| entry.add(&sum),
+        );
+        std::mem::swap(&mut self.entries, &mut self.spare);
+        fits
     }
 
     /// Adds `rows`, Apps in key order, to the entries with `add`. Returns false where they come

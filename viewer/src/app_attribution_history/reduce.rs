@@ -88,9 +88,26 @@ impl<'operation> Reduction<'operation> {
         apps: impl Iterator<Item = Reading<'key>>,
         source: Source,
     ) -> Result<()> {
+        if !self.observe_point(capture, source)? {
+            return Ok(());
+        }
+        for (index, app) in apps.enumerate() {
+            self.operation.check()?;
+            if index == 24_000 {
+                return Err(Error::Bound("attribution observation Apps"));
+            }
+            self.means.observe(&app, capture.elapsed_ns)?;
+        }
+        Ok(())
+    }
+
+    /// Adds the point of `capture` as `observe` adds it, failing where it fails, and returns
+    /// whether `observe` would go on to add the point's Apps, which the caller then adds through
+    /// `merge`.
+    pub(crate) fn observe_point(&mut self, capture: &Capture, source: Source) -> Result<bool> {
         self.operation.check()?;
         if !self.in_range(&capture.coverage.observation)? {
-            return Ok(());
+            return Ok(false);
         }
         let index = self
             .points
@@ -104,7 +121,7 @@ impl<'operation> Reduction<'operation> {
                 }
                 if source == Source::Saved {
                     if self.points[index].source == Source::Live {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
                 return Err(Error::Bound("duplicate attribution observation"));
@@ -115,14 +132,7 @@ impl<'operation> Reduction<'operation> {
             return Err(Error::Bound("attribution observations"));
         }
         self.points.insert(index, Point::new(capture, source));
-        for (index, app) in apps.enumerate() {
-            self.operation.check()?;
-            if index == 24_000 {
-                return Err(Error::Bound("attribution observation Apps"));
-            }
-            self.means.observe(&app, capture.elapsed_ns)?;
-        }
-        Ok(())
+        Ok(true)
     }
 
     /// Adds a point whose Apps reach the means through `merge` instead of one by one.

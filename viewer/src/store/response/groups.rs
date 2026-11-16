@@ -86,8 +86,7 @@ fn response_groups_visit(
         }
 
         let (header, processes) = apps.presentation()?;
-        let app_index = u32::try_from(app.index()).map_err(|_| Error::Bound("live App index"))?;
-        let processes = processes.members(Some(app_index));
+        let processes = processes.members_of(app);
         let capture = Capture {
             observation: &second.observation,
             elapsed_ns: header.elapsed_ns,
@@ -98,7 +97,7 @@ fn response_groups_visit(
         };
         cohort::visit_borrowed(
             &capture,
-            app.row().members,
+            app.members(),
             processes.map(|process| process.presentation()),
             reduction,
             phase,

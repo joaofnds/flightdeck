@@ -8,9 +8,18 @@ use std::sync::Arc;
 use super::{CompactAmount, Measured, ProcessAt, ProcessName, ProcessRow, Reading, Shared};
 use crate::apps::{PROCESS_INTERVALS_MAX, ProcessState, Unavailable};
 use crate::byte_budget::{ByteBudget, ByteReservation};
-use crate::live_app_response::RankedApp;
+use crate::store::block::block_u32;
 use crate::store::{APPS_PER_SECOND_MAX, AppRow, AppsSecond};
 use collector::ring::{IdentityUnavailable, ProcessCreation};
+
+#[path = "payload_packed_apps.rs"]
+mod apps;
+#[cfg(test)]
+pub(in crate::store) use apps::APP_ROWS_PACKED_ALWAYS;
+#[cfg(test)]
+pub(in crate::store) use apps::AppRowsBytes;
+pub(in crate::store) use apps::{APP_ROWS_PACKED_SHARE, AppRowsShare, PackedDetails};
+use apps::{AppParts, AppStep, BlockApp};
 
 #[path = "payload_packed_seconds.rs"]
 mod seconds;
@@ -121,9 +130,27 @@ const _: () = {
 
 /// The process rows of one packed block.
 #[derive(Debug)]
-pub(in crate::store) struct ProcessTable {
-    /// The block's Apps in key order, each with the seconds that hold it.
+pub(in crate::store) struct BlockTable {
+    /// The block's Apps in key order, each with the seconds that hold it, its first row and
+    /// details and where the changes of their words start.
     apps: Box<[BlockApp]>,
+    /// For each second, how many Apps it holds.
+    app_counts: Box<[u32]>,
+    /// For each second, where its steps start in `steps`, and after the last the end of its
+    /// steps.
+    step_starts: Box<[u32]>,
+    /// The changes to the rows of the Apps of each second from the second before, in the order of
+    /// the seconds and in each second in App place order.
+    steps: Box<[AppStep]>,
+    /// The seconds of the block that hold their process rows, and so their App details.
+    detailed_seconds: u64,
+    /// Whether the table holds its Apps' rows and details. Where packing them would not pay,
+    /// each second holds its own, as a plain second does, and the table only places the Apps.
+    app_rows_packed: bool,
+    /// The bytes the block's Apps take in each form, which decided `app_rows_packed`, kept for
+    /// a test and the benchmark that read them back.
+    #[cfg(test)]
+    app_rows_bytes: AppRowsBytes,
     /// The block's processes in the order of its seconds, which is the order of pid and then
     /// the creation's unique id.
     processes: Box<[PackedProcess]>,
@@ -146,12 +173,6 @@ pub(in crate::store) struct ProcessTable {
 }
 
 #[derive(Debug)]
-struct BlockApp {
-    name: Arc<RankedApp>,
-    seconds: u64,
-}
-
-#[derive(Debug)]
 struct PackedProcess {
     /// The seconds of the block that hold the process.
     seconds: u64,
@@ -167,7 +188,7 @@ struct PackedProcess {
 /// One process at one second of a packed block.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::store) struct PackedAt<'table> {
-    table: &'table ProcessTable,
+    table: &'table BlockTable,
     process: &'table PackedProcess,
     second_index: u32,
 }
@@ -176,7 +197,7 @@ pub(in crate::store) struct PackedAt<'table> {
 /// index at that second.
 #[derive(Debug)]
 pub(in crate::store) struct Places<'table> {
-    table: &'table ProcessTable,
+    table: &'table BlockTable,
     processes: std::slice::Iter<'table, PackedProcess>,
     second_index: u32,
     remaining: usize,
@@ -188,7 +209,7 @@ pub(in crate::store) struct Places<'table> {
 /// belong to no App.
 #[derive(Clone, Debug)]
 pub(in crate::store) struct Members<'table> {
-    table: &'table ProcessTable,
+    table: &'table BlockTable,
     /// The places of the processes ever under that App, or ever outside any App.
     places: std::slice::Iter<'table, u32>,
     second_index: u32,
@@ -352,12 +373,31 @@ fn seconds_through(second_index: u32) -> u64 {
     u64::MAX >> (u64::BITS - 1 - second_index)
 }
 
-impl ProcessTable {
-    /// The table's charge: its own allocation with its two reference counts, and each list.
+impl BlockTable {
+    /// The bytes of the table's own allocation in its `Arc`, with the two reference counts.
+    fn arc_bytes() -> usize {
+        2 * size_of::<usize>() + size_of::<Self>()
+    }
+
+    /// The bytes of the parts of a table of `app_count` Apps over `second_count` seconds whose
+    /// sizes are known before the table is built: its own allocation in its `Arc`, its list of
+    /// Apps, and each second's App count and step start.
+    fn pack_known_bytes(app_count: usize, second_count: usize) -> usize {
+        Self::arc_bytes()
+            + app_count * size_of::<BlockApp>()
+            + second_count * size_of::<u32>()
+            + (second_count + 1) * size_of::<u32>()
+    }
+
+    /// The table's charge: its own allocation with its two reference counts, and each list. A
+    /// table whose seconds keep their App rows holds no step starts, so this can be less than
+    /// `pack_known_bytes`.
     fn bytes(&self) -> usize {
-        2 * size_of::<usize>()
-            + size_of::<Self>()
+        Self::arc_bytes()
             + size_of_val(&*self.apps)
+            + size_of_val(&*self.app_counts)
+            + size_of_val(&*self.step_starts)
+            + size_of_val(&*self.steps)
             + size_of_val(&*self.processes)
             + size_of_val(&*self.change_seconds)
             + size_of_val(&*self.change_starts)
@@ -371,6 +411,13 @@ impl ProcessTable {
     #[cfg(test)]
     pub(in crate::store) fn reserved_bytes(&self) -> usize {
         self.reservation.bytes()
+    }
+
+    /// The bytes the table holds, summed from its parts, which a test compares with what the
+    /// budget was charged.
+    #[cfg(test)]
+    pub(in crate::store) fn held_bytes(&self) -> usize {
+        self.bytes()
     }
 
     /// The App index at `second_index` of each App place of the block, `PLACE_NONE` where the
@@ -407,20 +454,13 @@ impl ProcessTable {
         }
     }
 
-    /// The processes at `second_index` of the App `app`, a row of that second, or of no App
-    /// where `app` is `None`.
-    pub(super) fn members(&self, second_index: u32, app: Option<&AppRow>) -> Members<'_> {
-        let app_place = app.map_or(PLACE_NONE, |app| {
-            let key = app.name.kind.key(&app.name.bytes);
-            let found = self
-                .apps
-                .binary_search_by(|held| held.name.kind.key(&held.name.bytes).cmp(&key));
-            let Ok(place) = found else {
-                unreachable!("the block's Apps hold every App of its seconds");
-            };
-            assert!(self.apps[place].seconds & (1 << second_index) != 0);
+    /// The processes at `second_index` of the App at `app_place` among the block's Apps, which
+    /// that second holds, or of no App where `app_place` is `None`.
+    pub(super) fn members(&self, second_index: u32, app_place: Option<u32>) -> Members<'_> {
+        let app_place = app_place.map_or(PLACE_NONE, |place| {
+            assert!(self.block_app(place).seconds & (1 << second_index) != 0);
 
-            u32::try_from(place).unwrap_or_else(|_| unreachable!("a block's Apps are bounded"))
+            place
         });
         let list = members_list(app_place, self.apps.len());
         let start = collector::usize_from_u32(self.member_starts[list]);
@@ -495,17 +535,17 @@ impl ProcessTable {
         vec![None; self.processes.len()]
     }
 
-    /// The process table of the block of `seconds`, which shares each first row with the block
+    /// The block table of the block of `seconds`, which shares each first row with the block
     /// before, `before`, where the two read the same, or why the block stays plain.
     fn pack(
         seconds: &[Arc<AppsSecond>],
         before: Option<&Self>,
         budget: &Arc<ByteBudget>,
+        share: AppRowsShare,
     ) -> Result<Arc<Self>, KeptPlain> {
         assert!(!seconds.is_empty());
         assert!(seconds.len() <= SECONDS_MAX);
         let mut parts = Parts {
-            apps: Vec::new(),
             processes: Vec::new(),
             change_seconds: Vec::new(),
             change_starts: Vec::new(),
@@ -514,7 +554,16 @@ impl ProcessTable {
             members: Vec::new(),
         };
 
-        let places = pack_apps(seconds, &mut parts.apps)?;
+        let (places, app_count) = pack_apps(seconds)?;
+        // The table's own allocation, its list of Apps and each second's App count and step
+        // start have sizes known before they are built, so they are charged before they are
+        // allocated, and the rest once it is built.
+        let reservation = budget
+            .reserve(Self::pack_known_bytes(app_count, seconds.len()))
+            .ok_or(KeptPlain::Budget)?;
+        let app_parts = apps::pack_app_rows(seconds, &places, app_count, &mut parts);
+        let app_parts =
+            apps::pack_app_rows_where_paying(app_parts, seconds, &places, &mut parts, share);
         let rows: Vec<SecondRows<'_>> = seconds
             .iter()
             .zip(places)
@@ -522,32 +571,63 @@ impl ProcessTable {
             .collect();
         pack_processes(&rows, before, &mut parts)?;
 
-        let apps = parts.apps.into_boxed_slice();
-        let processes = parts.processes.into_boxed_slice();
-        let change_seconds = parts.change_seconds.into_boxed_slice();
-        let change_starts = parts.change_starts.into_boxed_slice();
-        let values = parts.values.into_boxed_slice();
-        let names = parts.names.into_boxed_slice();
-        let (member_starts, member_places) = pack_members(apps.len(), &parts.members);
-        // The lists' sizes are known only once they are built, so the table is charged its bytes
-        // once it holds them.
-        let reservation = budget.reserve(0).ok_or(KeptPlain::Budget)?;
-        let mut table = Self {
+        let mut table = Self::of_parts(app_parts, parts, reservation);
+        table.charge_rest()?;
+
+        Ok(Arc::new(table))
+    }
+
+    /// The table that holds `app_parts` and `parts`, as the packer built them, charged
+    /// `reservation`.
+    fn of_parts(app_parts: AppParts, parts: Parts, reservation: ByteReservation) -> Self {
+        let AppParts {
             apps,
-            processes,
-            change_seconds,
-            change_starts,
-            values,
-            names,
+            counts,
+            step_starts,
+            steps,
+            detailed_seconds,
+            rows_packed,
+            #[cfg(test)]
+            bytes,
+            #[cfg(not(test))]
+                bytes: _,
+        } = app_parts;
+        let apps = apps.into_boxed_slice();
+        let (member_starts, member_places) = pack_members(apps.len(), &parts.members);
+
+        Self {
+            apps,
+            app_counts: counts.into_boxed_slice(),
+            step_starts: step_starts.into_boxed_slice(),
+            steps: steps.into_boxed_slice(),
+            detailed_seconds,
+            app_rows_packed: rows_packed,
+            #[cfg(test)]
+            app_rows_bytes: bytes,
+            processes: parts.processes.into_boxed_slice(),
+            change_seconds: parts.change_seconds.into_boxed_slice(),
+            change_starts: parts.change_starts.into_boxed_slice(),
+            values: parts.values.into_boxed_slice(),
+            names: parts.names.into_boxed_slice(),
             member_starts,
             member_places,
             reservation,
-        };
-        if !table.reservation.grow(table.bytes()) {
+        }
+    }
+
+    /// Charges the table the rest of its bytes, since the other lists' sizes are known only once
+    /// they are built, or gives back what a block that holds its Apps plain let go of, or the
+    /// budget's refusal.
+    fn charge_rest(&mut self) -> Result<(), KeptPlain> {
+        let table_bytes = self.bytes();
+        let reserved_bytes = self.reservation.bytes();
+        if table_bytes < reserved_bytes {
+            self.reservation.shrink_to(table_bytes);
+        } else if !self.reservation.grow(table_bytes - reserved_bytes) {
             return Err(KeptPlain::Budget);
         }
 
-        Ok(Arc::new(table))
+        Ok(())
     }
 }
 
@@ -799,7 +879,6 @@ impl<'table> Iterator for Members<'table> {
 
 /// The parts of a table as the packer builds them, before they are charged.
 struct Parts {
-    apps: Vec<BlockApp>,
     processes: Vec<PackedProcess>,
     change_seconds: Vec<u64>,
     change_starts: Vec<u32>,
@@ -833,11 +912,9 @@ struct SecondRows<'second> {
 }
 
 /// Fills `apps` with the Apps of `seconds` in key order, each with the seconds that hold it,
-/// and returns the App place of each App of each second, or why the block stays plain.
-fn pack_apps(
-    seconds: &[Arc<AppsSecond>],
-    apps: &mut Vec<BlockApp>,
-) -> Result<Vec<Vec<u32>>, KeptPlain> {
+/// and returns the App place of each App of each second and how many Apps the block holds, or
+/// why the block stays plain.
+fn pack_apps(seconds: &[Arc<AppsSecond>]) -> Result<(Vec<Vec<u32>>, usize), KeptPlain> {
     let rows: Vec<&[AppRow]> = seconds
         .iter()
         .map(|second| second.apps.as_slice())
@@ -848,34 +925,29 @@ fn pack_apps(
         .collect();
     let mut cursors = vec![0; rows.len()];
     let total: usize = rows.iter().map(|rows| rows.len()).sum();
-    for _ in 0..=total {
+    // Each App found takes at least one row, so the rows run out within one more turn.
+    for app_count in 0..=total {
         let least = rows
             .iter()
             .zip(&cursors)
             .filter_map(|(rows, &cursor)| rows.get(cursor))
             .min_by(|left, right| app_order(left, right));
         let Some(least) = least else {
-            return Ok(places);
+            return Ok((places, app_count));
         };
-        if apps.len() == APPS_PER_SECOND_MAX {
+        if app_count == APPS_PER_SECOND_MAX {
             return Err(KeptPlain::Bound);
         }
 
-        let place = u32::try_from(apps.len()).unwrap_or_else(|_| unreachable!("bounded"));
-        let mut app_seconds = 0;
-        for (second_index, (rows, cursor)) in rows.iter().zip(&mut cursors).enumerate() {
+        let place = block_u32(app_count);
+        for (rows, (places, cursor)) in rows.iter().zip(places.iter_mut().zip(&mut cursors)) {
             if let Some(row) = rows.get(*cursor) {
                 if app_order(row, least) == Ordering::Equal {
-                    app_seconds |= 1 << second_index;
-                    places[second_index].push(place);
+                    places.push(place);
                     *cursor += 1;
                 }
             }
         }
-        apps.push(BlockApp {
-            name: Arc::clone(&least.name),
-            seconds: app_seconds,
-        });
     }
 
     unreachable!("each step takes at least one App row")
@@ -956,7 +1028,7 @@ fn pack_rows<'second>(second: &'second AppsSecond, places: &[u32]) -> SecondRows
 /// it, or says why the block stays plain.
 fn pack_processes(
     seconds: &[SecondRows<'_>],
-    before: Option<&ProcessTable>,
+    before: Option<&BlockTable>,
     parts: &mut Parts,
 ) -> Result<(), KeptPlain> {
     let mut cursors = vec![0; seconds.len()];
@@ -1008,7 +1080,7 @@ fn pack_processes(
 /// `present`, oldest first. `changes` is room for the process's changes.
 fn pack_process(
     present: &[PresentRow<'_>],
-    before: Option<&ProcessTable>,
+    before: Option<&BlockTable>,
     changes: &mut FieldChanges,
     parts: &mut Parts,
 ) {
@@ -1039,6 +1111,28 @@ fn pack_process(
         previous_words = Some(words);
     }
 
+    let (changing, changes_start) = pack_process_record(present, changes, parts);
+    pack_process_members(present, parts);
+    let first_row = before
+        .and_then(|before| before.first_row(process_key(&first.shared.row)))
+        .filter(|shared| shared.row == first.shared.row)
+        .unwrap_or(first.shared);
+    parts.processes.push(PackedProcess {
+        seconds,
+        changing,
+        changes_start,
+        first: Arc::clone(first_row),
+        first_app_place: first.app_place,
+    });
+}
+
+/// Adds to `parts` the record of `changes`, each field's changes of the process `present`
+/// names, and gives the bits of the fields that change and the record's first index.
+fn pack_process_record(
+    present: &[PresentRow<'_>],
+    changes: &FieldChanges,
+    parts: &mut Parts,
+) -> (u32, u32) {
     let changes_start = u32::try_from(parts.change_seconds.len())
         .unwrap_or_else(|_| unreachable!("the change records are bounded"));
     let mut changing = 0;
@@ -1065,18 +1159,7 @@ fn pack_process(
         parts.change_seconds.push(record);
     }
 
-    pack_process_members(present, parts);
-    let first_row = before
-        .and_then(|before| before.first_row(process_key(&first.shared.row)))
-        .filter(|shared| shared.row == first.shared.row)
-        .unwrap_or(first.shared);
-    parts.processes.push(PackedProcess {
-        seconds,
-        changing,
-        changes_start,
-        first: Arc::clone(first_row),
-        first_app_place: first.app_place,
-    });
+    (changing, changes_start)
 }
 
 /// Adds to the members of `parts` each App place the process `present` names was under at any

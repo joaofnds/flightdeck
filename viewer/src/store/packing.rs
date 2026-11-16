@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle, Thread};
 
 use super::AppsSecond;
 use super::block::{BLOCK_SECONDS_MAX, Block};
+use super::payload::packed::AppRowsShare;
 use crate::byte_budget::ByteBudget;
 
 #[cfg(test)]
@@ -88,6 +89,8 @@ pub(super) struct PackingEnd {
     handed: Receiver<Handed>,
     answers: SyncSender<Answer>,
     budget: Arc<ByteBudget>,
+    /// The share under which a block packs its App rows.
+    share: AppRowsShare,
     /// The block the packing thread answered last and its replacement, held weakly so neither
     /// keeps its bytes alive and the address of neither passes to another block.
     last: Option<Last>,
@@ -182,8 +185,8 @@ struct Last {
 }
 
 /// The two ends of the queues between the store's thread and the packing thread, which packs
-/// within `budget`.
-pub(super) fn pair(budget: Arc<ByteBudget>) -> (StoreEnd, PackingEnd) {
+/// within `budget`, packing a block's App rows only where `share` admits them.
+pub(super) fn pair(budget: Arc<ByteBudget>, share: AppRowsShare) -> (StoreEnd, PackingEnd) {
     let (handed_sender, handed_receiver) = sync_channel(QUEUE_MAX);
     let (answer_sender, answer_receiver) = sync_channel(QUEUE_MAX);
     #[cfg(all(test, feature = "read-benchmark"))]
@@ -199,6 +202,7 @@ pub(super) fn pair(budget: Arc<ByteBudget>) -> (StoreEnd, PackingEnd) {
         handed: handed_receiver,
         answers: answer_sender,
         budget,
+        share,
         last: None,
         wake: Box::new(|| {}),
         #[cfg(all(test, feature = "read-benchmark"))]
@@ -258,7 +262,7 @@ impl PackingEnd {
                 let started = std::time::Instant::now();
                 let before = self.start_loop_turn_before(before);
                 let table = before.as_deref().and_then(Block::table);
-                let replacement = Arc::new(block.packing(table, &self.budget));
+                let replacement = Arc::new(block.packing(table, &self.budget, self.share));
                 #[cfg(all(test, feature = "read-benchmark"))]
                 self.tally.block(started.elapsed());
                 self.last = Some(Last {

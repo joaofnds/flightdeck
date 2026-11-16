@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{HeldRow, add_merged};
+use super::{HeldRow, Named, add_merged};
 use crate::apps::AppKey;
 use crate::live_app_response::{KeyKind, Measure, Metric, Rankable, RankedApp};
 use crate::store::attribution::PointRow;
@@ -41,11 +41,13 @@ struct Row {
     used: u64,
 }
 
-impl HeldRow<Point> for Row {
+impl Named for Row {
     fn name(&self) -> &RankedApp {
         &self.name
     }
+}
 
+impl HeldRow<Point> for Row {
     fn starting(point: &Point) -> Self {
         Self {
             name: point.ranked(),

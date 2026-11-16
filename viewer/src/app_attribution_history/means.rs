@@ -68,20 +68,7 @@ impl Means {
     }
 
     pub(super) fn observe(&mut self, app: &super::Reading<'_>, elapsed: Option<u64>) -> Result<()> {
-        let index = self.slot(&app.key)?;
-        let Some(elapsed) = elapsed.filter(|elapsed| *elapsed > 0) else {
-            return Ok(());
-        };
-
-        let Some(amount) = app.measure.measured() else {
-            return Ok(());
-        };
-
-        let mean = &mut self.entries[index].mean;
-        mean.amount += u128::from(amount);
-        mean.elapsed_ns += u128::from(elapsed);
-
-        Ok(())
+        self.merge(&app.key, Total::of_reading(&app.measure, elapsed))
     }
 
     /// Adds a total that already sums many seconds of one App.

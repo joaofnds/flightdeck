@@ -6,8 +6,8 @@ use serde_json::Value;
 use super::{QueryContext, QuerySecond, Response};
 use crate::Cancellation;
 use crate::live_app_response::json;
-use crate::live_app_response::{Detail, KeyKind, Observation, Page};
-use crate::store::{AppRow, AppsCursor, ProcessAt, Processes};
+use crate::live_app_response::{Detail, KeyKind, Observation, Page, RankedApp};
+use crate::store::{ProcessAt, Processes};
 
 const HEADER_BYTES: usize = 256 * size_of::<Value>();
 const ROW_BYTES: usize = 768 * size_of::<Value>();
@@ -65,14 +65,15 @@ impl QueryContext {
 
     fn response_apps_page(&self, second: &QuerySecond, page: Page) -> Result<Response<Value>> {
         second.apps().presentation()?;
-        let mut cursor = AppsCursor::default();
-        let apps = cursor.apps(second.apps());
         let range = json::page_range(
             page,
-            apps.len(),
+            second.apps().app_count(),
             crate::live_app_response::APPS_PAGE_ROWS_MAX,
         )?;
-        let bytes = HEADER_BYTES + apps[range].iter().map(response_app_bytes).sum::<usize>();
+        let mut bytes = HEADER_BYTES;
+        second
+            .apps()
+            .app_names_in(range, |name| bytes += response_app_name_bytes(name));
         let reservation = self.reserve_response(bytes)?;
 
         Response::json(reservation, second.apps().apps_page(page)?)
@@ -94,7 +95,7 @@ impl QueryContext {
         };
         let app_index = u32::try_from(app.index()).map_err(|_| Error::Bound("live App index"))?;
         let bytes = response_members_bytes(processes, Some(app_index), page)?
-            + response_app_bytes(app.row());
+            + response_app_name_bytes(app.name());
         let reservation = self.reserve_response(bytes)?;
 
         Response::json(
@@ -119,8 +120,8 @@ impl QueryContext {
     }
 }
 
-fn response_app_bytes(app: &AppRow) -> usize {
-    ROW_BYTES + 12 * app.name.bytes.len() + 2 * app.name.display_name.len()
+fn response_app_name_bytes(name: &RankedApp) -> usize {
+    ROW_BYTES + 12 * name.bytes.len() + 2 * name.display_name.len()
 }
 
 fn response_members_bytes(

@@ -8,14 +8,12 @@ use std::time::{Duration, Instant};
 
 use persistence::resources::{Footprint, Watchdog};
 use serde_json::json;
-use viewer::apps::Amount;
-use viewer::store::{
-    AppDetails, AppRow, AppsSecond, ByteBudget, KeptPlain, MachineSecond, Missing, Payload,
-    ProcessAt, ProcessRow, Processes, SampledSecond, Store, View,
-};
+use viewer::store::{ByteBudget, Store, View};
 
 #[path = "store_payload/name_census.rs"]
 mod name_census;
+#[path = "store_payload/report.rs"]
+mod report;
 
 fn main() -> ExitCode {
     match run() {
@@ -38,23 +36,6 @@ struct Arguments {
     recording: PathBuf,
     bytes: usize,
     seconds: u64,
-}
-
-#[derive(Default)]
-struct PayloadCounts {
-    complete: usize,
-    unread: usize,
-    budget: usize,
-    refused: usize,
-    too_many: usize,
-    processes: usize,
-    /// The process rows the View's seconds hold, each counted once: a plain second's own rows
-    /// and the first row of each process of a packed block, which is all a packed block holds
-    /// as rows.
-    processes_rows_held: usize,
-    processes_max: usize,
-    app_details: usize,
-    app_details_distinct: usize,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -151,65 +132,10 @@ impl Arguments {
 }
 
 fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
-    let footprint = Footprint::read()?;
-    let walk = RowsWalk::of(view);
-    let walk_ns = u64::try_from(walk.elapsed.as_nanos()).map_err(io::Error::other)?;
-    let details_walk = RowsWalk::of_app_details(view);
-    let details_walk_ns =
-        u64::try_from(details_walk.elapsed.as_nanos()).map_err(io::Error::other)?;
-    let counts = PayloadCounts::of(view);
-    let blocks = json!({
-        "held": view.apps.block_count(),
-        "packed": view.apps.packed_count(),
-        "kept_plain_bound": view.apps.kept_plain_count(KeptPlain::Bound),
-        "kept_plain_budget": view.apps.kept_plain_count(KeptPlain::Budget),
-    });
-    let mut held = json!({
-        "component_only": true,
-        "phase": "held_view",
-        "version": view.version,
-        "recent": view.seconds.len(),
-        "earlier": view.earlier.len(),
-        "sampled": view.sampled.len(),
-        "sampled_complete": view.sampled.iter().filter(|sample| sample.ranks().is_ok()).count(),
-        "payload_complete": counts.complete,
-        "payload_unread": counts.unread,
-        "payload_budget": counts.budget,
-        "payload_refused": counts.refused,
-        "payload_too_many": counts.too_many,
-        "process_rows": counts.processes,
-        "process_rows_held": counts.processes_rows_held,
-        "process_rows_max": counts.processes_max,
-        "process_row_reserved_bytes": Payload::ROW_BYTES,
-        "process_rows_walk_ns": walk_ns,
-        "process_rows_walk_sum": walk.sum,
-        "app_details_walk_ns": details_walk_ns,
-        "app_details_walk_sum": details_walk.sum,
-        "app_details_rows": counts.app_details,
-        "app_details_rows_distinct": counts.app_details_distinct,
-        "app_details_row_reserved_bytes": Payload::APP_DETAILS_BYTES,
-        "app_row_capacity_bytes_by_reference": view.apps.seconds()
-            .map(|apps| apps.app_row_capacity() * size_of::<AppRow>()).sum::<usize>(),
-        "app_row_initialized_bytes_by_reference": view.apps.seconds()
-            .map(|apps| apps.app_count() * size_of::<AppRow>()).sum::<usize>(),
-        "reserved_bytes": budget.used(),
-        "reserved_bytes_max": budget.maximum(),
-        "reserved_bytes_peak": budget.used_peak(),
-        "footprint_bytes": footprint.current_bytes,
-        "footprint_peak_bytes": footprint.lifetime_bytes_max,
-        "resident_bytes": footprint.resident_bytes,
-        "failure": format!("{:?}", view.failure),
-        "left_out": format!("{:?}", view.left_out),
-        "type_bytes": {
-            "process": size_of::<ProcessRow>(), "app": size_of::<AppRow>(),
-            "app_details": size_of::<AppDetails>(), "apps_second": size_of::<AppsSecond>(),
-            "machine_second": size_of::<MachineSecond>(),
-            "sampled_second": size_of::<SampledSecond>(),
-        },
-    });
-    // Set apart from the rest, which reaches the macro's recursion limit.
-    held["blocks"] = blocks;
-    println!("{held}");
+    println!(
+        "{}",
+        report::held_report(view, budget, &Footprint::read()?)?
+    );
     Ok(())
 }
 
@@ -228,132 +154,6 @@ fn report_footprint(phase: &str, budget: &ByteBudget) -> io::Result<()> {
         })
     );
     Ok(())
-}
-
-impl PayloadCounts {
-    fn of(view: &View) -> Self {
-        let mut counts = Self::default();
-        for apps in view.apps.seconds() {
-            match apps.processes() {
-                Ok(processes) => {
-                    counts.complete += 1;
-                    counts.processes += processes.len();
-                    counts.processes_max = counts.processes_max.max(processes.len());
-                    counts.app_details += processes.app_details_count();
-                }
-                Err(Missing::Unread) => counts.unread += 1,
-                Err(Missing::Budget) => counts.budget += 1,
-                Err(Missing::Refused(_)) => counts.refused += 1,
-                Err(Missing::TooMany) => counts.too_many += 1,
-            }
-        }
-        counts.processes_rows_held = Self::of_distinct(view, counts.processes, |processes| {
-            processes.iter().map(|process| process.row_address())
-        });
-        counts.app_details_distinct = Self::of_distinct(view, counts.app_details, |processes| {
-            processes
-                .details()
-                .map(|details| std::ptr::from_ref(details).addr())
-        });
-
-        counts
-    }
-
-    /// How many distinct rows `rows` gives across the seconds of `view` that hold their
-    /// processes, `count` of them in all, telling rows apart by where they lie in memory. A
-    /// process of a packed block counts its first row in the block.
-    fn of_distinct<'view, Addresses: Iterator<Item = usize>>(
-        view: &'view View,
-        count: usize,
-        rows: impl Fn(Processes<'view>) -> Addresses,
-    ) -> usize {
-        let mut addresses = Vec::with_capacity(count);
-        for processes in payloads(view) {
-            addresses.extend(rows(processes));
-        }
-        assert_eq!(addresses.len(), count);
-
-        Self::of_distinct_addresses(&mut addresses)
-    }
-
-    /// How many distinct addresses `addresses` holds, sorting it.
-    fn of_distinct_addresses(addresses: &mut [usize]) -> usize {
-        addresses.sort_unstable();
-
-        addresses.chunk_by(|left, right| left == right).count()
-    }
-}
-
-/// The seconds of `view` that hold their process rows.
-fn payloads(view: &View) -> impl Iterator<Item = Processes<'_>> {
-    view.apps.seconds().filter_map(|apps| apps.processes().ok())
-}
-
-/// One reader's pass over every reading of every held row of one kind, taken before anything
-/// else reads those rows, with a sum that shows what it read.
-struct RowsWalk {
-    elapsed: Duration,
-    sum: u64,
-}
-
-impl RowsWalk {
-    fn of(view: &View) -> Self {
-        let started = Instant::now();
-        let mut sum = 0_u64;
-        for processes in payloads(view) {
-            for process in processes.iter() {
-                sum = sum.wrapping_add(Self::of_process(&process));
-            }
-        }
-
-        Self {
-            elapsed: started.elapsed(),
-            sum,
-        }
-    }
-
-    fn of_app_details(view: &View) -> Self {
-        let started = Instant::now();
-        let mut sum = 0_u64;
-        for processes in payloads(view) {
-            for details in processes.details() {
-                sum = sum
-                    .wrapping_add(u64::from(details.live_members))
-                    .wrapping_add(details.disk_read_bytes.known)
-                    .wrapping_add(details.disk_written_bytes.known)
-                    .wrapping_add(details.footprint_bytes.known);
-            }
-        }
-
-        Self {
-            elapsed: started.elapsed(),
-            sum,
-        }
-    }
-
-    fn of_process(process: &ProcessAt<'_>) -> u64 {
-        let amounts = [
-            process.cpu_ns(),
-            process.energy_nj(),
-            process.gpu_ns(),
-            process.disk_read_bytes(),
-            process.disk_written_bytes(),
-            process.disk_io_bytes(),
-            process.resident_bytes(),
-            process.footprint_bytes(),
-            process.idle_wakeups(),
-            process.pageins(),
-            process.threads(),
-        ];
-        let mut sum = u64::from(process.pid().unsigned_abs());
-        for amount in amounts {
-            if let Amount::Known(known) = amount {
-                sum = sum.wrapping_add(known);
-            }
-        }
-
-        sum
-    }
 }
 
 fn check_footprint(footprint: &Footprint) -> io::Result<()> {
@@ -425,7 +225,10 @@ mod footprint_tests {
             Arc::as_ptr(&alias).addr(),
         ];
 
-        assert_eq!(PayloadCounts::of_distinct_addresses(&mut addresses), 2);
+        assert_eq!(
+            report::PayloadCounts::of_distinct_addresses(&mut addresses),
+            2
+        );
     }
 
     #[test]

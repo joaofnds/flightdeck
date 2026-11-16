@@ -13,8 +13,8 @@ use super::stretch::Folded;
 use crate::apps::{AppKey, Stamp};
 use crate::live_app_history::CompactMeasure;
 use crate::live_app_response::{
-    App, KeyKind, Measure, Metric, Observation, Rankable, Ranked, RankedApp, Ranks, Sample,
-    rank_apps,
+    App, KeyKind, Measure, Metric, Observation, RankApps, Rankable, Ranked, RankedApp, Ranks,
+    Sample, rank_apps,
 };
 use crate::recording::{self, AppMinute, SampleRow};
 
@@ -131,7 +131,144 @@ const _: () = {
     assert!(size_of::<AppRow>() <= 80);
 };
 
+/// The measures of an App row, each two words of a packed block.
+const APP_MEASURE_COUNT: usize = 5;
+
+/// The words of an App row a packed block holds: its members, whether its membership is
+/// complete, and each measure's two words. Its name is the block's App and takes no word.
+pub(in crate::store) const APP_ROW_WORDS: usize = 2 + 2 * APP_MEASURE_COUNT;
+
+/// The word of an App row that holds its members, the first that `words` writes.
+pub(in crate::store) const APP_ROW_WORD_MEMBERS: usize = 0;
+
+impl AppRow {
+    /// The row's fields as words, in the order `set_word` reads them. Every field
+    /// is named, so a field added to the row is one a packed block has to hold.
+    pub(in crate::store) fn words(&self) -> [u64; APP_ROW_WORDS] {
+        let Self {
+            name: _,
+            members,
+            membership_complete,
+            cpu_ns,
+            energy_nj,
+            gpu_ns,
+            disk_io_bytes,
+            resident_bytes,
+        } = self;
+        let measures: [CompactMeasure; APP_MEASURE_COUNT] = [
+            *cpu_ns,
+            *energy_nj,
+            *gpu_ns,
+            *disk_io_bytes,
+            *resident_bytes,
+        ];
+        let mut words = [0; APP_ROW_WORDS];
+        words[0] = u64::from(*members);
+        words[1] = u64::from(*membership_complete);
+        for (index, measure) in measures.into_iter().enumerate() {
+            let [known, coverage] = measure.words();
+            words[2 + 2 * index] = known;
+            words[3 + 2 * index] = coverage;
+        }
+
+        words
+    }
+
+    /// Sets every field of the row but its name to the field of `other`, so a row that keeps its
+    /// name touches no reference count. Every field is named, so a field added to the row is
+    /// one this copies.
+    pub(in crate::store) fn copy_readings(&mut self, other: &Self) {
+        let Self {
+            name: _,
+            members,
+            membership_complete,
+            cpu_ns,
+            energy_nj,
+            gpu_ns,
+            disk_io_bytes,
+            resident_bytes,
+        } = other;
+        self.members = *members;
+        self.membership_complete = *membership_complete;
+        self.cpu_ns = *cpu_ns;
+        self.energy_nj = *energy_nj;
+        self.gpu_ns = *gpu_ns;
+        self.disk_io_bytes = *disk_io_bytes;
+        self.resident_bytes = *resident_bytes;
+    }
+
+    /// Sets the field that word `index` of `words` holds to `word`.
+    pub(in crate::store) fn set_word(&mut self, index: usize, word: u64) {
+        assert!(index < APP_ROW_WORDS);
+        match index {
+            APP_ROW_WORD_MEMBERS => self.members = app_row_word_members(word),
+            1 => self.membership_complete = word != 0,
+            _ => {
+                // Each measure takes two words, so the division floors to the measure the word
+                // belongs to, and the remainder is the word's place within it.
+                let measure = self.set_word_measure((index - 2) / 2);
+                let mut words = measure.words();
+                words[(index - 2) % 2] = word;
+                *measure = CompactMeasure::of_words(words);
+            }
+        }
+    }
+
+    fn set_word_measure(&mut self, measure_index: usize) -> &mut CompactMeasure {
+        match measure_index {
+            0 => &mut self.cpu_ns,
+            1 => &mut self.energy_nj,
+            2 => &mut self.gpu_ns,
+            3 => &mut self.disk_io_bytes,
+            4 => &mut self.resident_bytes,
+            _ => unreachable!("an App row holds {APP_MEASURE_COUNT} measures"),
+        }
+    }
+}
+
+/// The members count a word of an App row holds, which `words` wrote from a `u32`.
+pub(in crate::store) fn app_row_word_members(word: u64) -> u32 {
+    let Ok(members) = u32::try_from(word) else {
+        unreachable!("an App row's members word holds a count of members");
+    };
+
+    members
+}
+
 impl AppsSecond {
+    /// Whether the second equals `other` in everything but its own App rows, which a packed
+    /// second leaves to its block.
+    pub(super) fn header_eq(&self, other: &Self) -> bool {
+        let Self {
+            metadata,
+            processes,
+            missing,
+            observation,
+            consecutive,
+            elapsed_ns,
+            membership_complete,
+            ungrouped_members,
+            live_ungrouped_members,
+            usage_refused,
+            usage_gone,
+            apps: _,
+            totals,
+        } = self;
+
+        *metadata == other.metadata
+            && *processes == other.processes
+            && *missing == other.missing
+            && *observation == other.observation
+            && *consecutive == other.consecutive
+            && *elapsed_ns == other.elapsed_ns
+            && *membership_complete == other.membership_complete
+            && *ungrouped_members == other.ungrouped_members
+            && *live_ungrouped_members == other.live_ungrouped_members
+            && *usage_refused == other.usage_refused
+            && *usage_gone == other.usage_gone
+            && *totals == other.totals
+    }
+
     /// A second with room for `APPS_PER_SECOND_MAX` Apps, holding none.
     pub(super) fn with_room() -> Self {
         Self {
@@ -285,7 +422,35 @@ impl AppsSecond {
 
     /// The Apps that used the most of each resource at this second, ranked by the rule that
     /// ranks a sample's Apps, or why the second holds no Apps to rank.
-    pub fn ranks(&self) -> Result<Ranks, Missing> {
+    pub(in crate::store) fn ranks(&self) -> Result<Ranks, Missing> {
+        self.ranks_of(&self.apps)
+    }
+
+    /// The Apps of `apps`, the rows of this second's Apps, ranked as `ranks` ranks them.
+    pub(in crate::store) fn ranks_of(&self, apps: &[AppRow]) -> Result<Ranks, Missing> {
+        let ranked = self.ranks_ranked()?;
+
+        rank_apps(&ranked, apps).map_err(|error| Missing::Refused(error.to_string()))
+    }
+
+    /// The `app_count` Apps that `add` hands to the ranking it is given, the Apps of this
+    /// second in key order, ranked as `ranks` ranks them.
+    pub(in crate::store) fn ranks_by(
+        &self,
+        app_count: usize,
+        add: impl FnOnce(&mut RankApps),
+    ) -> Result<Ranks, Missing> {
+        let ranked = self.ranks_ranked()?;
+        let mut ranking = RankApps::new(&ranked, app_count)
+            .map_err(|error| Missing::Refused(error.to_string()))?;
+        add(&mut ranking);
+
+        Ok(ranking.ranks())
+    }
+
+    /// What the ranks of this second carry beside its Apps, or why the second holds no Apps to
+    /// rank.
+    fn ranks_ranked(&self) -> Result<Ranked, Missing> {
         if let Some(missing) = &self.missing {
             return Err(missing.clone());
         }
@@ -293,13 +458,12 @@ impl AppsSecond {
             unreachable!("a second that holds its Apps holds their tick");
         };
 
-        let ranked = Ranked {
+        Ok(Ranked {
             selected: observation,
             elapsed_ns: self.elapsed_ns,
             membership_complete: self.membership_complete,
             ungrouped_members: self.ungrouped_members,
-        };
-        rank_apps(&ranked, &self.apps).map_err(|error| Missing::Refused(error.to_string()))
+        })
     }
 }
 
