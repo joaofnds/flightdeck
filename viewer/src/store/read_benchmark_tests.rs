@@ -1,9 +1,9 @@
 //! Opt-in measurement of what the live store costs on a recording: each read of its span,
-//! taking a second, loading the hour, decoding the Apps a launch owes its stretches and the
-//! bytes its rows take. A change to how the store holds its seconds runs it before and after,
-//! and every digest must come out the same. It builds only with the `read-benchmark` feature,
-//! and `just read-benchmark <a recording>` runs each test in a process of its own, since three
-//! of them read the process's footprint.
+//! taking a second, loading the hour, a launch's load by stage, decoding the Apps a launch
+//! owes its stretches and the bytes its rows take. A change to how the store holds its seconds
+//! runs it before and after, and every digest must come out the same. It builds only with the
+//! `read-benchmark` feature, and `just read-benchmark <a recording>` runs each test in a
+//! process of its own, since three of them read the process's footprint.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -17,6 +17,7 @@ use persistence::resources::Footprint;
 use serde_json::Value;
 
 use super::query::{CheckedCoverage, Queries};
+use super::recording::staged::{Advance, Input, Startup};
 use super::recording::{self, Continuity};
 use super::{
     AppDetails, AppRow, AppsCursor, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
@@ -53,6 +54,8 @@ const PAGE_ROWS: u32 = 100;
 /// recording holds three times as many.
 const CONTINUED_SECONDS: u64 = 360;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+/// The steps a launch takes at most: a few for each sealed minute it may read.
+const LAUNCH_STEPS_MAX: usize = recording::MINUTES_MAX * 4;
 
 #[test]
 fn reads_of_the_live_span_cost() {
@@ -146,6 +149,74 @@ fn loading_the_hour_costs() {
     println!("load of the hour: {} ns", elapsed.as_nanos());
     report_memory("once the hour is loaded", &memory);
     report_span("the loaded span", &publish(&mut loaded.held));
+}
+
+#[test]
+fn launching_costs() {
+    // Goal: say what a launch costs in time before the store has its first View to hand over,
+    // and from there until it holds the Apps of every second it holds whole.
+    // Method: step the launch's staged load over the hour's sealed minutes as the store's thread
+    // steps it, with the packing thread beside it and a ring that follows no collector, and time
+    // the steps up to the first View and the steps after it. The Apps the launch then owes its
+    // stretches are what `decoding_the_owed_apps_costs` times.
+    let root = prepared_root();
+    let budget = Arc::new(ByteBudget::new(super::BYTES_MAX));
+    let (store_end, packing_end) = super::packing::pair(
+        Arc::clone(&budget),
+        super::payload::packed::APP_ROWS_PACKED_SHARE,
+    );
+    drop(packing_end.start(std::thread::current()).unwrap());
+    let mut held = Held::new(root.clone(), Arc::clone(&budget), store_end);
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::Ring::new(root.clone());
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let input = Input {
+        root: &root,
+        budget: &budget,
+        operation: &operation,
+    };
+    let mut startup = Startup::new();
+
+    let started = Instant::now();
+    let first_steps = launch_steps(&mut startup, &input, &mut held, &mut ring);
+    startup.primary(&mut held).unwrap();
+    let first_view = publish(&mut held);
+    let first_elapsed = started.elapsed();
+    report_span("the span of the first View", &first_view);
+    drop(first_view);
+    let resumed = Instant::now();
+    let later_steps = launch_steps(&mut startup, &input, &mut held, &mut ring);
+    let later_elapsed = resumed.elapsed();
+
+    println!(
+        "launch to the first View: {} ns in {} steps",
+        first_elapsed.as_nanos(),
+        first_steps.len(),
+    );
+    println!(
+        "launch from the first View until the Apps of the seconds held whole are loaded: {} ns \
+         in {} steps",
+        later_elapsed.as_nanos(),
+        later_steps.len(),
+    );
+    println!("steps to the first View, in nanoseconds: {first_steps:?}");
+    println!("steps after the first View, in nanoseconds: {later_steps:?}");
+    report_span("the span once the launch is loaded", &publish(&mut held));
+    let owed = held.owed.take().unwrap();
+    let resumed = Instant::now();
+    super::run_owed_add(&root, &mut held, &owed);
+    println!(
+        "adding the Apps the launch owes its stretches: {} ns",
+        resumed.elapsed().as_nanos(),
+    );
+    let view = publish(&mut held);
+    report_span("the span once the owed Apps are added", &view);
+    println!(
+        "stretches once the owed Apps are added: {}",
+        view.stretches.len()
+    );
+    time_leaders(&view);
+    time_charts(&view, &leading_apps(&view));
 }
 
 #[test]
@@ -293,6 +364,30 @@ fn load_hour(
     held.ring_complete = true;
 
     Loaded { held, budget }
+}
+
+/// Steps `startup` as the store's thread steps a launch, until a step says the first View is due
+/// or the launch is loaded, and returns what each step took, in nanoseconds.
+fn launch_steps(
+    startup: &mut Startup,
+    input: &Input<'_>,
+    held: &mut Held,
+    ring: &mut super::Ring,
+) -> Vec<u128> {
+    let mut steps = Vec::with_capacity(LAUNCH_STEPS_MAX);
+    for _ in 0..LAUNCH_STEPS_MAX {
+        let started = Instant::now();
+        let advance = startup.advance(input, held, ring).unwrap();
+        held.apps.exchange();
+        steps.push(started.elapsed().as_nanos());
+        match advance {
+            Advance::Progress => {}
+            // The packing thread wakes this one, as it wakes the store's.
+            Advance::Blocked => std::thread::park_timeout(super::WAIT),
+            Advance::Primary | Advance::Complete => return steps,
+        }
+    }
+    panic!("the launch took more steps than its minutes allow");
 }
 
 /// Loads the newest hour of `root` taking every second, once the packing thread has packed
