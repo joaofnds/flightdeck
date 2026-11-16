@@ -5,6 +5,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use gpui::{
@@ -20,6 +21,10 @@ use crate::time_range::Range;
 #[path = "live_preferences_tests.rs"]
 mod tests;
 
+/// The mode of a directory made for the file. Where HOME is the user's home in the user
+/// database, the collector keeps its lock files in the same directory and refuses one that the
+/// group or others may write, which a directory left to the process's umask may be.
+const DIRECTORY_MODE: u32 = 0o700;
 /// The most series kept hidden.
 const HIDDEN_SERIES_MAX: usize = 256;
 /// The longest key of a hidden series kept, in bytes.
@@ -473,7 +478,11 @@ fn write(path: &Path, preferences: &Preferences) -> Result<(), String> {
     let describe = |error: std::io::Error| format!("{}: {error}", path.display());
     let text = serde_json::to_vec_pretty(preferences).map_err(|error| error.to_string())?;
     if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory).map_err(describe)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(DIRECTORY_MODE)
+            .create(directory)
+            .map_err(describe)?;
     }
 
     let partial = sibling(path, &format!(".partial-{}", std::process::id()));

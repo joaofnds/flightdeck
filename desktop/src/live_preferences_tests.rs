@@ -34,6 +34,20 @@ fn reads_back_what_it_saved() {
 }
 
 #[test]
+fn makes_a_missing_directory_for_its_user_alone() {
+    // Goal: the directory a first launch makes for the file is one the collector takes for
+    // its lock files, which no other user may enter.
+    // Method: save into a directory that does not exist, and read its mode.
+    let directory = Directory::new("missing-directory");
+    let missing = directory.path("missing");
+
+    write(&missing.join("preferences.json"), &Preferences::default()).unwrap();
+
+    let mode = std::fs::metadata(&missing).unwrap().permissions().mode() & 0o777;
+    assert_eq!(0o700, mode);
+}
+
+#[test]
 fn existing_preferences_leave_fan_animation_off() {
     // Goal: existing users opt in to motion. Method: read a file without the new setting.
     let directory = Directory::new("animation-migration");
