@@ -1,12 +1,12 @@
 //! The shared-memory object that holds a ring, and the lock file that names it.
 
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions, Permissions};
 use std::io;
 use std::mem::offset_of;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -74,6 +74,12 @@ pub(super) const NUMBER_MAX: u64 = u64::MAX / 4;
 
 /// The mode of the directory of a user's lock files, which no other user may enter.
 const DIRECTORY_MODE: u32 = 0o700;
+
+/// The bit of a mode that lets the group write, as `sys/stat.h` names it.
+const S_IWGRP: u32 = 0o020;
+
+/// The bit of a mode that lets others write, as `sys/stat.h` names it.
+const S_IWOTH: u32 = 0o002;
 
 const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
@@ -954,9 +960,11 @@ fn place_for_user_home() -> io::Result<PathBuf> {
     Ok(home)
 }
 
-/// Makes `directory` for this user alone where it is missing, or an error where it is no
-/// directory, another user's, or one another user may enter, since its lock files name the
-/// rings.
+/// Makes `directory` for this user alone where it is missing, and sets to that mode one of
+/// this user's that neither the group nor others may write, as an earlier version of the app
+/// left it by saving its preferences before any collector ran. An error where it is no
+/// directory, another user's, or one the group or others may write, since its lock files name
+/// the rings.
 fn place_for_user_directory(directory: &Path) -> io::Result<()> {
     let made = DirBuilder::new()
         .recursive(false)
@@ -991,24 +999,32 @@ fn place_for_user_directory(directory: &Path) -> io::Result<()> {
         ));
     }
 
-    if metadata.mode() & 0o777 != DIRECTORY_MODE {
+    let permissions = metadata.mode() & 0o777;
+    if permissions == DIRECTORY_MODE {
+        return Ok(());
+    }
+
+    if permissions & (S_IWGRP | S_IWOTH) != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "{} has mode {:o}, where the rings need {DIRECTORY_MODE:o}",
-                directory.display(),
-                metadata.mode() & 0o777
+                "{} has mode {permissions:o}, which lets another user write it, where the \
+                 rings need {DIRECTORY_MODE:o}",
+                directory.display()
             ),
         ));
     }
 
-    Ok(())
+    std::fs::set_permissions(directory, Permissions::from_mode(DIRECTORY_MODE)).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("closing {} to other users: {error}", directory.display()),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     #[test]
@@ -1089,21 +1105,58 @@ mod tests {
         assert_eq!(0o700, mode);
     }
 
-    #[test]
-    fn refuses_a_place_directory_another_user_may_enter() {
-        // Goal: lock files never go where another user could read the ring names they hold.
-        // Method: make a directory of this test's own that every user may enter, and ask for
-        // it.
+    /// Makes a directory of this test's own named for `label` with `mode`, asks for it as the
+    /// directory of a user's lock files, removes it, and returns the answer with the mode the
+    /// directory was left at.
+    fn place_directory_of_mode(label: &str, mode: u32) -> (io::Result<()>, u32) {
         let directory =
-            std::env::temp_dir().join(format!("flightdeck-open-{}", std::process::id()));
+            std::env::temp_dir().join(format!("flightdeck-{label}-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         // Set apart from the create, which the process's umask would narrow.
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&directory, Permissions::from_mode(mode)).unwrap();
 
         let placed = place_for_user_directory(&directory);
 
+        let left = std::fs::metadata(&directory).unwrap().mode() & 0o777;
         std::fs::remove_dir(&directory).unwrap();
+        (placed, left)
+    }
+
+    #[test]
+    fn tightens_a_place_directory_of_its_user_that_others_may_enter() {
+        // Goal: a directory an earlier version of the app made before any collector ran, which
+        // others may enter and none of them may write, is closed to them and used, so a new
+        // install records.
+        // Method: make a directory of this test's own that every user may enter, ask for it,
+        // and read its mode.
+        let (placed, mode) = place_directory_of_mode("entered", 0o755);
+
+        placed.unwrap();
+        assert_eq!(0o700, mode);
+    }
+
+    #[test]
+    fn refuses_a_place_directory_its_group_may_write() {
+        // Goal: lock files never go where a member of the group could have put one that names
+        // a ring of theirs, and such a directory is left as it was found.
+        // Method: make a directory of this test's own that the group may write and others may
+        // not, ask for it, and read its mode.
+        let (placed, mode) = place_directory_of_mode("group-written", 0o775);
+
         assert_eq!(io::ErrorKind::PermissionDenied, placed.unwrap_err().kind());
+        assert_eq!(0o775, mode);
+    }
+
+    #[test]
+    fn refuses_a_place_directory_others_may_write() {
+        // Goal: lock files never go where any other user could have put one that names a ring
+        // of theirs, and such a directory is left as it was found.
+        // Method: make a directory of this test's own that others may write and the group may
+        // not, ask for it, and read its mode.
+        let (placed, mode) = place_directory_of_mode("others-written", 0o757);
+
+        assert_eq!(io::ErrorKind::PermissionDenied, placed.unwrap_err().kind());
+        assert_eq!(0o757, mode);
     }
 }
 

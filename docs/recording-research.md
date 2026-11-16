@@ -769,8 +769,12 @@ Every user shares the names of shared-memory objects, so each ring's name carrie
 random bits that the collector writes nowhere but its lock file. The lock file is
 `NAME.lock`, where NAME is the ring name `--ring` gives, in
 `Library/Application Support/Flightdeck` under the home the user database gives for the
-user's uid, whatever HOME says. The collector refuses that directory unless its mode lets
-only the user enter it, and it reads the mode alone, not an access control list. Another
+user's uid, whatever HOME says. The collector keeps its lock files in that directory only
+once its mode lets the user alone enter it. It refuses a directory the group or others may
+write, where another user could have put a lock file. It sets to that mode one of the user's
+that neither the group nor others may write, as the app up to version 0.3.13 left it by saving
+its preferences before any collector ran. It reads the mode alone, not an access control list.
+Another
 user therefore cannot know the names a writer will make, and cannot take them first to keep
 the collector from starting. That follows from the code, and no run has tried it as
 another user yet, since the CI test that does has not run. The writer draws the bits once

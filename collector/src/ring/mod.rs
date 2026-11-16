@@ -123,7 +123,8 @@ pub struct Place {
 impl Place {
     /// The place of the ring `name` of this user, whose lock file is in a directory of this
     /// user's Application Support that only this user may enter. Returns an error where `name`
-    /// is no file name, or where that directory lets another user in.
+    /// is no file name, or where that directory is another user's or one the group or others
+    /// may write.
     pub fn for_user(name: &str) -> io::Result<Self> {
         place_for_user(name)
     }
