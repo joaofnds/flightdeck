@@ -1,9 +1,9 @@
-//! Opt-in measurement of what the live store costs on a recording: each read of its span,
-//! taking a second, loading the hour, a launch's load by stage, decoding the Apps a launch
-//! owes its stretches and the bytes its rows take. A change to how the store holds its seconds
-//! runs it before and after, and every digest must come out the same. It builds only with the
-//! `read-benchmark` feature, and `just read-benchmark <a recording>` runs each test in a
-//! process of its own, since three of them read the process's footprint.
+//! Opt-in measurement of what the live store costs on a recording: each read of its span, taking a
+//! second, loading the hour, a launch's load by stage, the load of a return after a gap, decoding
+//! the Apps a launch owes its stretches and the bytes its rows take. A change to how the store
+//! holds its seconds runs it before and after, and every digest must come out the same. It builds
+//! only with the `read-benchmark` feature, and `just read-benchmark <a recording>` runs each test
+//! in a process of its own, since three of them read the process's footprint.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -54,6 +54,10 @@ const PAGE_ROWS: u32 = 100;
 /// recording holds three times as many.
 const CONTINUED_SECONDS: u64 = 360;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+const SECONDS_PER_MINUTE: u64 = 60;
+/// The minutes a window stays hidden before a return, up to the hour a store follows, each the
+/// gap between the newest second the store holds and the recording's newest one.
+const RETURN_GAP_MINUTES: [u64; 3] = [20, 40, 59];
 /// The steps a launch takes at most: a few for each sealed minute it may read.
 const LAUNCH_STEPS_MAX: usize = recording::MINUTES_MAX * 4;
 
@@ -251,6 +255,54 @@ fn continuing_a_load_costs() {
 }
 
 #[test]
+fn returning_after_a_gap_costs() {
+    // Goal: say what the load a store runs when its window comes back costs in time, after the
+    // window was hidden for 20, 40 or 59 minutes, or for as long as the recording allows, and
+    // what the store holds once that load is done, so a change to the return can be compared
+    // with it figure for figure.
+    // Method: for each gap, load the hour but for its seconds, then load from the newest second
+    // held as the store's refresh does, with no ring, and report the time, the seconds handed
+    // over and the digests of the span the store then holds.
+    let root = prepared_root();
+    let (oldest_ns, newest_ns) = recorded_wall_ns(&root);
+    // The seconds floor, which a gap of a second less does not show.
+    let recorded_seconds = (newest_ns - oldest_ns) / NANOSECONDS_PER_SECOND;
+    assert!(
+        recorded_seconds > SECONDS_PER_MINUTE,
+        "the recording holds no minute before a gap"
+    );
+
+    for gap_minutes in RETURN_GAP_MINUTES {
+        // The load before the gap keeps a minute, so the store holds a second to continue from.
+        let gap_seconds =
+            (gap_minutes * SECONDS_PER_MINUTE).min(recorded_seconds - SECONDS_PER_MINUTE);
+        let cutoff_ns = newest_ns - gap_seconds * NANOSECONDS_PER_SECOND;
+        let mut loaded = load_hour(&root, |held, run, second, apps| {
+            take_through(cutoff_ns, held, run, second, apps);
+        });
+        loaded.held.apps.settle();
+
+        let started = Instant::now();
+        let since = load_since(&root, &mut loaded);
+        let elapsed = started.elapsed();
+        loaded.held.apps.settle();
+
+        let label = format!("after a gap of {gap_seconds} seconds");
+        println!(
+            "return {label}: {} ns, {} seconds handed over, replaced the seconds held: {}, left \
+             out: {:?}",
+            elapsed.as_nanos(),
+            since.taken,
+            since.replaced,
+            loaded.held.left_out,
+        );
+        let view = publish(&mut loaded.held);
+        report_span(&format!("the span {label}"), &view);
+        println!("stretches {label}: {}", view.stretches.len());
+    }
+}
+
+#[test]
 fn decoding_the_owed_apps_costs() {
     // Goal: say what the loaders cost in time and in memory in the pass the store runs once the
     // window has its first View, which adds up the Apps a launch owes the store's stretches.
@@ -426,11 +478,7 @@ fn take_through(
 /// load `CONTINUED_SECONDS` of the hour of `root`, or a third of an hour shorter than three
 /// times that.
 fn continued_cutoff_ns(root: &Path) -> u64 {
-    let (mut oldest_ns, mut newest_ns) = (u64::MAX, 0);
-    drop(load_hour(root, |_, _, second, _| {
-        oldest_ns = oldest_ns.min(second.wall_ns);
-        newest_ns = newest_ns.max(second.wall_ns);
-    }));
+    let (oldest_ns, newest_ns) = recorded_wall_ns(root);
     // The seconds and the third of them floor, which a continued load of a second less does
     // not show.
     let recorded_seconds = (newest_ns - oldest_ns) / NANOSECONDS_PER_SECOND;
@@ -439,31 +487,64 @@ fn continued_cutoff_ns(root: &Path) -> u64 {
     newest_ns - continued_seconds * NANOSECONDS_PER_SECOND
 }
 
+/// The wall times of the oldest and the newest second of the hour of `root`.
+fn recorded_wall_ns(root: &Path) -> (u64, u64) {
+    let (mut oldest_ns, mut newest_ns) = (u64::MAX, 0);
+    drop(load_hour(root, |_, _, second, _| {
+        oldest_ns = oldest_ns.min(second.wall_ns);
+        newest_ns = newest_ns.max(second.wall_ns);
+    }));
+    assert!(oldest_ns <= newest_ns);
+
+    (oldest_ns, newest_ns)
+}
+
 /// Loads what `root` holds past the newest second of `loaded`, as the store's refresh does,
 /// and says how many seconds the load handed over.
 fn continue_load(root: &Path, loaded: &mut Loaded) -> usize {
+    let since = load_since(root, loaded);
+    assert!(
+        !since.replaced,
+        "the load replaced the seconds held, which times no continued load"
+    );
+
+    since.taken
+}
+
+/// What a load from the store's newest second handed over.
+struct Since {
+    taken: usize,
+    /// Whether the recording no longer held the newest second, so the seconds the load handed
+    /// over replaced those the store held.
+    replaced: bool,
+}
+
+/// Loads what `root` holds past the newest second of `loaded` as the store's refresh does where
+/// it holds every minute of the hour, which resets the store where the load replaces its seconds.
+fn load_since(root: &Path, loaded: &mut Loaded) -> Since {
     let since = loaded.held.newest;
     let held = &mut loaded.held;
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut taken = 0_usize;
+    let (mut taken, mut replaced) = (0_usize, false);
     let outcome = recording::load_payload_since(
         root,
         &loaded.budget,
         &operation,
         since.as_ref(),
         |continuity, run, second, apps| {
-            assert!(
-                continuity == Continuity::Extend,
-                "the load replaced the seconds held, which times no continued load"
-            );
+            if taken == 0 && continuity == Continuity::Replace {
+                held.reset();
+                replaced = true;
+            }
             assert!(held.take(run, second, apps));
             taken += 1;
         },
     )
     .unwrap();
+    held.left_out = outcome.left_out;
     coverage::accept_catalog(held, outcome.checked_catalog.or(outcome.continued_catalog)).unwrap();
 
-    taken
+    Since { taken, replaced }
 }
 
 fn publish(held: &mut Held) -> Arc<View> {

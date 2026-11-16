@@ -128,7 +128,7 @@ read-benchmark recording:
         reads_of_a_context_that_follows_the_newest_second_cost \
         reads_of_a_context_fixed_on_an_earlier_second_cost taking_a_second_costs \
         loading_the_hour_costs launching_costs continuing_a_load_costs \
-        decoding_the_owed_apps_costs rows_of_the_live_span_repeat; do \
+        returning_after_a_gap_costs decoding_the_owed_apps_costs rows_of_the_live_span_repeat; do \
         FLIGHTDECK_REFERENCE_RECORDING="{{recording}}" cargo test --release --locked -p viewer \
             --lib --features read-benchmark -- "store::read_benchmark_tests::$test" --exact \
             --no-capture || exit 1; \
