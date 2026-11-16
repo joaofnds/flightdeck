@@ -214,17 +214,5 @@ impl<K: SumKey> Sums<K> {
 }
 
 fn totals(elapsed: Option<u64>, measures: [Measure; 4]) -> [Total; 4] {
-    let mut totals = [Total::default(); 4];
-    // A mean counts only seconds with a measured amount and a clock that moved.
-    let Some(elapsed) = elapsed.filter(|elapsed| *elapsed > 0) else {
-        return totals;
-    };
-    for (total, measure) in totals.iter_mut().zip(measures) {
-        if let Some(amount) = measure.measured() {
-            total.amount = u128::from(amount);
-            total.elapsed_ns = u128::from(elapsed);
-        }
-    }
-
-    totals
+    measures.map(|measure| Total::of_reading(&measure, elapsed))
 }
