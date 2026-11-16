@@ -1453,9 +1453,12 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     cx: &mut gpui::TestAppContext,
 ) {
     // Goal: the real store's pending handoff reaches Overview's fast-poll decision.
-    // Method: hold ingestion paused, tick a rested page, then resume and accept the new View.
+    // Method: pause a store behind a second publication and tick a rested page that waits for
+    // the store's wake. The tick resumes the store and takes no View, so the handoff stays
+    // pending however quick the store is. Then wake the page for the View.
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
     recording.publish();
     let store = recording.start_store();
     store.set_active(false);
@@ -1466,12 +1469,16 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
         ..reading_at(1000, 0)
     };
     let page = cx.update(|cx| {
-        cx.new(|_| {
+        cx.new(|cx| {
             let mut page = opening();
             let mut snapshot = readings(std::slice::from_ref(&stale));
             snapshot.generation = page.generation;
             assert!(page.receive(Update::Ready(snapshot)));
+            // The test wakes the page itself, after the tick it asserts on.
+            page.wake_with(Box::new(|| {}), cx);
             assert!(page.take_view(Arc::new(view(1, &[], &[stale]))));
+            // As the tick that took that View leaves the page, waiting for the store's wake.
+            page.mailbox_watch = page.mailbox_watch.after_view();
             page.tick_rest();
             assert!(page.reader_rested());
             page
@@ -1479,41 +1486,10 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     });
 
     page.update(cx, LiveDashboard::tick);
+
     assert!(cx.update(|cx| page.read(cx).awaiting_reply()));
-    recording.publish();
-    cx.update(|cx| super::set_store_active(true, cx));
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    for _ in 0..2_000 {
-        page.update(cx, LiveDashboard::tick);
-        let delivered = cx.update(|cx| {
-            page.read(cx).store_view.as_ref().is_some_and(|view| {
-                view.seconds
-                    .last()
-                    .is_some_and(|second| second.publication == 2)
-            })
-        });
-        if delivered {
-            if !cx.update(|cx| page.read(cx).awaiting_reply()) {
-                break;
-            }
-        }
-
-        assert!(
-            std::time::Instant::now() < deadline,
-            "View handoff never finished"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-
-    let delivered = cx.update(|cx| {
-        page.read(cx)
-            .store_view
-            .as_ref()
-            .and_then(|view| view.seconds.last())
-            .map(|second| second.publication)
-    });
-    assert_eq!(delivered, Some(2));
-    assert!(!cx.update(|cx| page.read(cx).awaiting_reply()));
+    page.update(cx, |page, _| page.mark_woken());
+    tick_until_settled(cx, &page, 2);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
