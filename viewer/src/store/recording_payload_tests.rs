@@ -2531,6 +2531,164 @@ fn publications_loaded_after(
     handed
 }
 
+#[test]
+fn a_return_whose_hour_lets_go_of_the_stores_seconds_reads_its_minutes_beside_its_thread() {
+    // Goal: a return whose loaded hour no longer holds the store's newest second, which replaces
+    // the store's seconds, reads its neighbouring minutes at once, each on a reader thread of its
+    // own, as a load that continues the store's seconds does.
+    // Method: seal three minutes, place the retention cutoff after the middle one, load after
+    // publication 1 and name the thread that reads each file.
+    let fixture = retention_cut_fixture();
+    let newest = crate::store::Newest {
+        run: fixture.writer.identity().unwrap(),
+        publication: 1,
+        segment: 0,
+    };
+
+    let threads = threads_reading(&fixture, &super::super::LoadWindow::all(Some(&newest)));
+
+    assert!(!threads.is_empty());
+    assert!(threads.iter().all(|thread| thread == "flightdeck-reader"));
+}
+
+#[test]
+fn a_load_after_a_launch_that_fell_back_reads_its_minutes_beside_its_thread() {
+    // Goal: a load from no second the store holds, which a launch that fell back leaves to the
+    // store's next catch-up, reads its neighbouring minutes at once, each on a reader thread of
+    // its own.
+    // Method: seal three minutes, load them from no second and name the thread that reads each
+    // file.
+    let fixture = catch_up_fixture();
+
+    let threads = threads_reading(&fixture, &super::super::LoadWindow::all(None));
+
+    assert!(!threads.is_empty());
+    assert!(threads.iter().all(|thread| thread == "flightdeck-reader"));
+}
+
+#[test]
+fn a_load_of_the_whole_hour_again_reads_one_minute_at_a_time_on_its_thread() {
+    // Goal: the load that reads the whole hour again, the retry after a minute was left out or
+    // the ring overran, reads every minute on the thread that loads, so it needs the memory of
+    // one minute.
+    // Method: seal three minutes, load the hour again and name the thread that reads each file.
+    let fixture = catch_up_fixture();
+    let loading = std::thread::current().name().unwrap().to_owned();
+
+    let threads = threads_reading(&fixture, &super::super::LoadWindow::hour(None));
+
+    assert!(!threads.is_empty());
+    assert!(threads.iter().all(|thread| *thread == loading));
+}
+
+#[test]
+fn a_load_from_no_second_hands_over_what_a_load_of_the_whole_hour_again_does() {
+    // Goal: a load from no second the store holds hands over the seconds a load of the whole hour
+    // again hands over, in the same order and with the same readings and Apps, checks the same
+    // catalog and counts the same minutes decoded, so reading its minutes at once changes nothing
+    // the store holds.
+    // Method: seal one minute more than a group holds, so the load in groups carries its decoder
+    // from one group into the next. Load the minutes from no second and again as the whole hour,
+    // and compare what each load handed over and the catalog it checked.
+    let mut fixture = Fixture::new();
+    for minute in 0..=super::GROUP_MINUTES_MAX {
+        let minute = u64::try_from(minute).unwrap();
+        fixture.publish_with_system_rows(100 + minute * 60);
+        fixture.seal_minute(minute);
+        fixture.skip_run_ticks(59);
+    }
+
+    let from_none = seconds_loaded(&fixture, &super::super::LoadWindow::all(None));
+    let hour = seconds_loaded(&fixture, &super::super::LoadWindow::hour(None));
+
+    assert_eq!(from_none.seconds.len(), super::GROUP_MINUTES_MAX + 1);
+    assert!(from_none.checked_catalog.is_some());
+    assert_eq!(from_none, hour);
+}
+
+#[test]
+fn the_first_second_of_a_load_from_no_second_has_no_rates() {
+    // Goal: a load from no second the store holds, which reads its minutes at once, rates its
+    // first second from nothing, since no minute comes before it.
+    // Method: seal three minutes, load them from no second and look at the first second.
+    let fixture = catch_up_fixture();
+
+    let seconds = seconds_loaded(&fixture, &super::super::LoadWindow::all(None)).seconds;
+
+    assert!(!seconds[0].0.follows());
+    assert_eq!(seconds[0].1.elapsed_ns, None);
+}
+
+/// The names of the threads that read each file of `fixture` in a load of `window`, in the
+/// order the reads began. The load must replace the store's seconds.
+fn threads_reading(fixture: &Fixture, window: &super::super::LoadWindow<'_>) -> Vec<String> {
+    let threads = Mutex::new(Vec::new());
+    let capture = |file, budget: &Arc<ByteBudget>| {
+        let thread = std::thread::current().name().unwrap_or_default().to_owned();
+        threads.lock().unwrap().push(thread);
+        AdmittedTable::from_file_budgeted(file, budget)
+    };
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::super::load_payload_window_using(
+        &fixture.root,
+        &budget,
+        &operation,
+        &capture,
+        window,
+        |continuity, _, _, _| assert_eq!(continuity, super::super::Continuity::Replace),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    threads.into_inner().unwrap()
+}
+
+/// What a load handed over and counted.
+#[derive(Debug, PartialEq)]
+struct SecondsLoaded {
+    /// The seconds in the order the load handed them over, each with its Apps.
+    seconds: Vec<(crate::store::MachineSecond, AppsSecond)>,
+    checked_catalog: Option<super::super::CheckedCatalog>,
+    /// How many minutes the load counted as decoded.
+    decoded_window_count: u32,
+}
+
+/// What a load of `window` hands over from `fixture` and counts.
+fn seconds_loaded(fixture: &Fixture, window: &super::super::LoadWindow<'_>) -> SecondsLoaded {
+    // Readers at once reserve their scratch memory together, so a full group needs the store's
+    // own budget.
+    let budget = Arc::new(ByteBudget::new(crate::store::BYTES_MAX));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut seconds = Vec::new();
+
+    let outcome = super::super::load_payload_window_using(
+        &fixture.root,
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+        window,
+        |_, _, second, apps| {
+            let crate::store::apps::TickApps::Loaded(apps) = apps else {
+                panic!("the fixture supplies complete process payloads");
+            };
+            seconds.push((
+                second.clone(),
+                std::mem::replace(apps, AppsSecond::with_room()),
+            ));
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    SecondsLoaded {
+        seconds,
+        checked_catalog: outcome.checked_catalog,
+        decoded_window_count: outcome.decoded_catalog.windows,
+    }
+}
+
 impl Decoder {
     /// Reads `found` and decodes it, as a load of one minute at a time does.
     fn decode(

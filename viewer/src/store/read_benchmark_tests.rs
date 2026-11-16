@@ -21,10 +21,10 @@ use super::recording::staged::{Advance, Input, Startup};
 use super::recording::{self, Continuity};
 use super::{
     AppDetails, AppRow, AppsCursor, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
-    CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox, Payload,
-    ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Readings,
-    Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond, SourceGeneration,
-    TickApps, View, WallSeconds, coverage,
+    CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox, Newest,
+    Payload, ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest, QuerySelection,
+    Readings, Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond,
+    SourceGeneration, TickApps, View, WallSeconds, coverage,
 };
 use crate::app_process_groups_history::{
     AppProcessGroupsHistory, ProcessGroup, ProcessGroupsPoint,
@@ -287,19 +287,61 @@ fn returning_after_a_gap_costs() {
         let elapsed = started.elapsed();
         loaded.held.apps.settle();
 
-        let label = format!("after a gap of {gap_seconds} seconds");
-        println!(
-            "return {label}: {} ns, {} seconds handed over, replaced the seconds held: {}, left \
-             out: {:?}",
-            elapsed.as_nanos(),
-            since.taken,
-            since.replaced,
-            loaded.held.left_out,
+        report_return(
+            &format!("after a gap of {gap_seconds} seconds"),
+            elapsed,
+            &since,
+            loaded,
         );
-        let view = publish(&mut loaded.held);
-        report_span(&format!("the span {label}"), &view);
-        println!("stretches {label}: {}", view.stretches.len());
     }
+}
+
+#[test]
+fn returning_after_an_hour_costs() {
+    // Goal: say what the load a store runs costs in time and in memory when its window comes back
+    // after an hour or more, so that the loaded hour no longer holds the store's newest second
+    // and the load replaces what the store holds, and what the store holds once it is done.
+    // Method: load the hour, which stands for the hour the store held when its window hid, and
+    // name as its newest second one from before the run's first sealed minute. Then load from
+    // that second as the store's refresh does, with no ring, once in this process, and report
+    // the time, the memory, the seconds handed over and the digests of the span the store holds.
+    let root = prepared_root();
+    let mut loaded = load_hour_settled(&root);
+    let run = loaded.held.newest.unwrap().run;
+    loaded.held.newest = Some(Newest {
+        run,
+        publication: 0,
+        segment: 0,
+    });
+
+    let started = Instant::now();
+    let since = load_since(&root, &mut loaded);
+    let elapsed = started.elapsed();
+    loaded.held.apps.settle();
+    let memory = Memory::read(&loaded.budget);
+
+    assert!(
+        since.replaced,
+        "the load continued the seconds held, which times no return after an hour"
+    );
+    report_memory("once the return after an hour is loaded", &memory);
+    report_return("after an hour", elapsed, &since, loaded);
+}
+
+/// Says what a return's load, which took `elapsed` and handed over `since`, cost, and the digests
+/// of the span `loaded` then holds, naming the return `label`.
+fn report_return(label: &str, elapsed: std::time::Duration, since: &Since, mut loaded: Loaded) {
+    println!(
+        "return {label}: {} ns, {} seconds handed over, replaced the seconds held: {}, left out: \
+         {:?}",
+        elapsed.as_nanos(),
+        since.taken,
+        since.replaced,
+        loaded.held.left_out,
+    );
+    let view = publish(&mut loaded.held);
+    report_span(&format!("the span {label}"), &view);
+    println!("stretches {label}: {}", view.stretches.len());
 }
 
 #[test]

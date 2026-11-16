@@ -21,24 +21,43 @@ use persistence::engine::AdmissionRefusal;
 #[path = "recording_payload_tests.rs"]
 mod tests;
 
-/// The neighbouring minutes a load that continues the store's seconds decodes at once, a thread
-/// each, beside a thread that seeds the first from the predecessor. A load of the whole hour
-/// decodes one minute at a time.
+/// The neighbouring minutes a grouped load decodes at once, a thread each, beside a thread that
+/// seeds the first from the predecessor where there is one.
 const GROUP_MINUTES_MAX: usize = 6;
+
+/// How many neighbouring minutes a load decodes at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Grouping {
+    /// Up to `GROUP_MINUTES_MAX`, as the load a returning window waits on decodes them, whether
+    /// it continues the store's seconds, replaces them or starts from none.
+    Grouped,
+    /// One, as the retry of an hour that left a minute out decodes them, so it needs the memory
+    /// of one minute however many it reads, which lets it read a minute that a grouped load left
+    /// out for want of memory.
+    OneMinuteAtATime,
+}
+
+impl Grouping {
+    fn minutes_max(self) -> usize {
+        match self {
+            Self::Grouped => GROUP_MINUTES_MAX,
+            Self::OneMinuteAtATime => 1,
+        }
+    }
+}
 
 /// Hands `take` the seconds of `minutes`, oldest first, after seeding their rates from
 /// `predecessor`, the minute before them whose seconds the store holds, where the load
-/// continues the store's seconds. A load that continues them, which a returning window waits on,
-/// decodes up to `GROUP_MINUTES_MAX` neighbouring minutes at once, each seeding its rates from the
-/// minute before it. A load of the whole hour decodes one minute at a time, so it needs the memory
-/// of one minute however many it reads.
+/// continues the store's seconds. It decodes the minutes as `grouping` says, each seeding its
+/// rates from the minute before it.
 pub(super) fn load(
     input: &LoadInput<'_>,
+    grouping: Grouping,
     predecessor: Option<&Found>,
     minutes: &[Found],
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<super::Outcome> {
-    start(input, predecessor, minutes)?.finish(input, take)
+    start(input, grouping, predecessor, minutes)?.finish(input, take)
 }
 
 /// A load whose first minutes are decoded and wait to be handed over.
@@ -51,15 +70,12 @@ pub(super) struct Started<'minutes> {
 /// Starts the load `load` makes of `minutes`, decoding the first of them and handing none over.
 pub(super) fn start<'minutes>(
     input: &LoadInput<'_>,
+    grouping: Grouping,
     predecessor: Option<&Found>,
     minutes: &'minutes [Found],
 ) -> persistence::Result<Started<'minutes>> {
     let mut cursor = Cursor::new(minutes.len());
-    let group_minutes = match predecessor {
-        Some(_) => GROUP_MINUTES_MAX,
-        None => 1,
-    };
-    let mut rest = minutes.chunks(group_minutes);
+    let mut rest = minutes.chunks(grouping.minutes_max());
     let first = match rest.next() {
         Some(group) => cursor.decode_group(input, predecessor, group)?,
         None => Vec::new(),

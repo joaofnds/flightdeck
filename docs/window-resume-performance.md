@@ -9,12 +9,15 @@ newest 3,600 s of readings, whatever range is selected. When the registered ring
 covers every unread publication, the Store retains its machine and App predecessors and
 consumes that bounded delta. After a gap beyond ring retention or a collector restart, it
 reads the newest sealed minute it holds whole, to seed rates, and every minute the
-recording sealed after it, before publishing a complete View. It reads the whole hour again
-where it holds no whole sealed minute of that run, or where the held hour left a minute
-out for any reason. A newest held second from another recording, or from a run the
-registry no longer lists, is refused, and nothing is read. If the writer overwrites an
-admitted checkpoint during consumption, the Store withholds that View and switches once to
-reading the sealed minutes. A completed pinned window keeps its selection and leaves live
+recording sealed after it, before publishing a complete View. Where it holds no whole sealed
+minute of that run, as after an hour hidden, it loads the hour in place of the seconds it
+holds. Both loads decode up to six neighbouring minutes at once. One that runs short of
+memory that way is retried at once, one minute at a time, which needs the memory of one
+minute. Where the held hour left a minute out for any reason, or its ring overran, the next
+return retries the hour the same way, so a minute that became readable is read. A newest
+held second from another recording, or from a run the registry no longer lists, is refused,
+and nothing is read. If the writer overwrites an admitted checkpoint during consumption, the
+Store withholds that View and switches once to reading the sealed minutes. A completed pinned window keeps its selection and leaves live
 ingestion parked.
 
 Overview waits for the Store instead of asking the legacy page reader to load the
@@ -170,6 +173,25 @@ are within what reruns showed:
 | 150 | 89.4 / 180.9 | 137.6 / 489.9 | 209.2 / 789.5 |
 | 1,800 | 207.1 / 665.5 | 138.9 / 504.9 | 206.0 / 777.6 |
 | 3,500 | 236.1 / 782.7 | 135.4 / 481.7 | 202.7 / 760.7 |
+
+The read benchmark's test build measured a return again on 2026-11-16, on an Apple M5 Pro
+with the bench recording. A return that continues the store's seconds after a gap of 20, 40
+and 59 minutes took 0.50 to 0.59 s, 0.75 to 0.81 s and 1.19 to 1.24 s in three runs, about
+0.33 ms for each further second it handed over. A return after an hour or more, whose hour
+no longer holds the store's newest second, loads the hour in place of the seconds the store
+holds. Decoding one minute at a time, as it did until that day, that took 3.82 to 3.89 s.
+Decoding six neighbouring minutes at once, over a store that held the hour, it took 1.09 to
+1.23 s in four runs, and 1.84 and 2.05 s in two runs made while another program used seven
+cores. The store then held the same machine seconds, Apps, earlier seconds, sampled seconds
+and rankings as after a load one minute at a time, and the same 338 stretches.
+
+Six minutes at once cost memory. The footprint peak of the benchmark's process was 351 to
+412 MB, against 154 to 167 MB one minute at a time, and the store's budget peak was 400 to
+546 MB, against 118 MB. Under a byte limit of 300, 200 and 150 MB the load six at once left
+minutes out and handed over 2,354, 1,200 and 780 of the hour's 3,374 seconds. The Store
+retries such a load at once, one minute at a time, which took 3.68 to 3.95 s in three runs.
+In a trial that was not kept, three minutes at once took 1.71 to 1.94 s and two took 2.47 to
+2.58 s.
 
 ### Charting Apps over the loaded hour
 

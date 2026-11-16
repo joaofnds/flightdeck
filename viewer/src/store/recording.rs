@@ -144,7 +144,8 @@ impl Terminal {
     }
 }
 
-/// Decodes and consumes the payload prefix one minute at a time under caller cancellation.
+/// Decodes and consumes the payload prefix, from no second the store holds and in groups, under
+/// caller cancellation.
 #[cfg(test)]
 pub(super) fn load_payload(
     root: &Path,
@@ -182,7 +183,8 @@ pub(super) fn load_payload_using(
 /// Decodes the minutes sealed after `since`, after the newest minute that holds `since`'s run no
 /// further than `since`, which seeds the rates of the minute after it. Where the loaded hour
 /// holds no such minute, it decodes the whole hour, and `take` hears that its seconds replace
-/// the store's.
+/// the store's. Either way it decodes neighbouring minutes in groups, since a returning window
+/// waits on it.
 pub(super) fn load_payload_since(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
@@ -200,11 +202,31 @@ pub(super) fn load_payload_since(
     )
 }
 
-/// Decodes the loaded hour's sealed minutes again, checking that `since` is of this recording.
+/// Retries the loaded hour: decodes its sealed minutes again, one minute at a time, so it needs
+/// the memory of one minute, checking that `since` is of this recording.
 pub(super) fn load_payload_hour(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
+    since: Option<&super::Newest>,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    load_payload_hour_using(
+        root,
+        budget,
+        operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+        since,
+        take,
+    )
+}
+
+/// As `load_payload_hour`, reading each file through `capture`.
+pub(super) fn load_payload_hour_using(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    capture: &crate::recording::InputCapture<'_>,
     since: Option<&super::Newest>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
@@ -212,12 +234,8 @@ pub(super) fn load_payload_hour(
         root,
         budget,
         operation,
-        &persistence::engine::AdmittedTable::from_file_budgeted,
-        &LoadWindow {
-            since,
-            seconds: LOADED_SECONDS,
-            unread: false,
-        },
+        capture,
+        &LoadWindow::hour(since),
         |_, run, second, apps| take(run, second, apps),
     )
 }
@@ -286,7 +304,7 @@ fn load_payload_walked(
     walked.reverse();
     let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
     let (predecessor, minutes) = load_payload_minutes(Continuity::Extend, &walked);
-    let started = payload::start(input, predecessor, minutes)?;
+    let started = payload::start(input, window.grouping, predecessor, minutes)?;
     drop(tentative_scope);
     let listing = join_or_resume(finder);
     if !load_payload_agrees(window, &listing, &walked) {
@@ -353,12 +371,18 @@ fn load_payload_found(
     found.reverse();
     let (predecessor, minutes) = load_payload_minutes(continuity, &found);
     let mut admitted = true;
-    let outcome = payload::load(input, predecessor, minutes, |run, second, apps| {
-        if !load_payload_admitted(&apps) {
-            admitted = false;
-        }
-        take(continuity, run, second, apps);
-    })?;
+    let outcome = payload::load(
+        input,
+        window.grouping,
+        predecessor,
+        minutes,
+        |run, second, apps| {
+            if !load_payload_admitted(&apps) {
+                admitted = false;
+            }
+            take(continuity, run, second, apps);
+        },
+    )?;
 
     load_payload_certified(input, checked, continuity, admitted, outcome)
 }
@@ -459,14 +483,29 @@ struct LoadWindow<'a> {
     since: Option<&'a super::Newest>,
     seconds: u64,
     unread: bool,
+    grouping: payload::Grouping,
 }
 
 impl<'a> LoadWindow<'a> {
+    /// The window of a load of every minute sealed after `since`, or of the whole hour where the
+    /// hour holds no minute to continue from, which decodes its minutes in groups.
     fn all(since: Option<&'a super::Newest>) -> Self {
         Self {
             since,
             seconds: LOADED_SECONDS,
             unread: true,
+            grouping: payload::Grouping::Grouped,
+        }
+    }
+
+    /// The window of the retry, which reads the whole hour again one minute at a time, checking
+    /// that `since` is of this recording.
+    fn hour(since: Option<&'a super::Newest>) -> Self {
+        Self {
+            since,
+            seconds: LOADED_SECONDS,
+            unread: false,
+            grouping: payload::Grouping::OneMinuteAtATime,
         }
     }
 }

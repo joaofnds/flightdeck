@@ -1001,8 +1001,9 @@ pub(super) fn usage(offset: u64) -> collector::processes::Usage {
 
 #[test]
 fn sealed_minutes_release_each_completion_before_decoding_the_next() {
-    // Goal: consumed minute payloads cannot starve subsequent sealed observations.
-    // Method: load three real minutes under one observed payload's byte budget.
+    // Goal: in the load that reads the whole hour again one minute at a time, the retry after a
+    // minute was left out, consumed minute payloads cannot starve subsequent sealed observations.
+    // Method: load three real minutes again under one observed payload's byte budget.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.skip_run_ticks(59);
@@ -1038,11 +1039,12 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
-    let outcome = super::recording::load_payload_using(
+    let outcome = super::recording::load_payload_hour_using(
         &fixture.root,
         &budget,
         &operation,
         &capture,
+        None,
         |_, second, apps| {
             let super::apps::TickApps::Loaded(loaded) = apps else {
                 panic!("valid fixture machine and App rows must decode");
@@ -1066,22 +1068,28 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
 }
 
 fn fixture_load_peak(fixture: &Fixture) -> usize {
-    // Observe the real loader's peak, including event pins, profiles and normalization work.
-    // The later test adds only its explicitly retained payloads and checks every capture entry.
+    // Observe the peak of the load that reads the whole hour again, including event pins,
+    // profiles and normalization work. The later test adds only its explicitly retained payloads
+    // and checks every capture entry.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
     let mut observations = 0;
-    let outcome =
-        super::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
+    let outcome = super::recording::load_payload_hour(
+        &fixture.root,
+        &budget,
+        &operation,
+        None,
+        |_, _, apps| {
             let super::apps::TickApps::Loaded(apps) = apps else {
                 panic!("valid fixture must load within its allowance");
             };
             assert_eq!(apps.processes.as_ref().unwrap().len(), 2);
             observations += 1;
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(outcome.left_out, None);
     drop(outcome);
     assert!(observations > 0);
@@ -1095,15 +1103,20 @@ fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
         .operation(0)
         .unwrap();
     let mut charges = Vec::with_capacity(3);
-    let outcome =
-        super::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
+    let outcome = super::recording::load_payload_hour(
+        &fixture.root,
+        &budget,
+        &operation,
+        None,
+        |_, _, apps| {
             let super::apps::TickApps::Loaded(apps) = apps else {
                 panic!("valid fixture must load complete saved App rows");
             };
             assert_eq!(apps.processes.as_ref().unwrap().len(), 2);
             charges.push(retained_app_charge(apps));
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(outcome.left_out, None);
     drop(outcome);
     assert!(!charges.is_empty());
@@ -1154,8 +1167,10 @@ pub(super) fn retained_app_charge(apps: &AppsSecond) -> usize {
 
 #[test]
 fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
-    // Goal: recycling releases displaced payloads without releasing a retained reader's lease.
-    // Method: transfer four real minutes through two buffers, retaining the first reading.
+    // Goal: in the load that reads the whole hour again one minute at a time, recycling releases
+    // displaced payloads without releasing a retained reader's lease.
+    // Method: transfer four real minutes read again through two buffers, retaining the first
+    // reading.
     let mut fixture = Fixture::new();
     for minute in 0..4 {
         fixture.publish_with_system_rows(100 + minute * 60);
@@ -1194,11 +1209,12 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
-    let outcome = super::recording::load_payload_using(
+    let outcome = super::recording::load_payload_hour_using(
         &fixture.root,
         &budget,
         &operation,
         &capture,
+        None,
         |_, second, apps| {
             span.push(|buffer| buffer.take(apps, None));
             let newest = span.newest_held().unwrap();

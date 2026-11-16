@@ -417,6 +417,7 @@ fn exactly_full_discovery_succeeds_when_the_next_window_is_outside_the_period() 
             since: None,
             seconds: 67,
             unread: false,
+            grouping: super::payload::Grouping::OneMinuteAtATime,
         },
     );
 

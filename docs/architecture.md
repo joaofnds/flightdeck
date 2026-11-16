@@ -209,12 +209,14 @@ hour, the newest 3,600 s of readings, held, apart from the seconds of a minute t
 to load, which a reused checkpoint does not read again. The Store holds that hour whatever range is
 selected, so a range switch leaves its readings as they are. An expired checkpoint reads
 the newest sealed minute the Store holds whole, to seed rates, and every minute the
-recording sealed after it. Where the Store holds no whole sealed minute of that run, it
-loads the whole hour again. During restoration the Store withholds partial Views until
-it reaches the current endpoint, or reports a failure. Missing or refused readings
-remain explicit gaps in the replacement. While the held hour leaves a minute out, each
-restoration the checkpoint does not cover reads the whole hour again, so a minute that
-becomes readable fills it then.
+recording sealed after it. Where the Store holds no whole sealed minute of that run, as
+after an hour hidden, it loads the hour in place of the seconds it holds. Both loads decode
+up to six neighbouring minutes at once. One that runs short of memory that way is retried
+at once, one minute at a time, which needs the memory of one minute. During restoration the
+Store withholds partial Views until it reaches the current endpoint, or reports a failure.
+Missing or refused readings remain explicit gaps in the replacement. While the held hour
+leaves a minute out, each restoration the checkpoint does not cover retries the hour one
+minute at a time, so a minute that becomes readable fills it then.
 
 Coverage is checked again through consumption. If the writer overwrites an unread
 publication after checkpoint admission, the Store withholds the incomplete View,
@@ -230,8 +232,8 @@ arrives.
 
 A covered resume keeps already interpreted history and the raw predecessors used
 to calculate rates. It reads only the unread ring delta. A gap beyond ring retention
-reads the minutes sealed during it rather than every intermediate publication. Past
-about half an hour that costs about what reloading the whole hour does, as the
+reads the minutes sealed during it rather than every intermediate publication. Its cost
+grows with the gap, up to what loading the hour in place of the held seconds costs, as the
 [measurements](window-resume-performance.md) show.
 The independent page worker stays idle when the Store supplies Overview.
 

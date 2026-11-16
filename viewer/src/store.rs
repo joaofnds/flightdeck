@@ -149,7 +149,9 @@ const _: () = {
 /// What the app's Store may hold of readings and of the responses the window shows. The hour of a
 /// Mac with 918 processes reached 283 MB as it loaded, a held View keeps a span apart from the one
 /// the Store goes on filling, and the window's two contexts come on top, so this leaves room for
-/// more than three times those processes. The older tail a page's selection carries is charged to
+/// more than three times those processes. A return that loads the hour six minutes at once over
+/// the hour it holds reached 546 MB with about 860 processes, and one that runs short of this
+/// reads the hour one minute at a time. The older tail a page's selection carries is charged to
 /// no budget, since it comes from the saved minutes through the page's own session.
 pub const BYTES_MAX: usize = 1024 * 1024 * 1024;
 
@@ -1539,14 +1541,23 @@ fn refresh(
         }
     }
 
-    refresh_load(root, held, ring, shared, operation)
+    let retries = held.left_out.is_none();
+    let accepted = refresh_load(root, held, ring, shared, operation)?;
+    // A load in groups that ran short of memory left a minute out, which the load one minute at a
+    // time reads now, before the window is shown the hole.
+    if accepted && retries && held.left_out == Some(Failure::Budget) {
+        return refresh_load(root, held, ring, shared, operation);
+    }
+
+    Ok(accepted)
 }
 
 /// Takes in what the recording sealed after the newest second the store holds, and follows a new
-/// ring from the newest sealed minute. An hour that left a sealed minute out reads every minute
-/// again, so the refused one is retried, as does a store whose ring overran while it followed it,
-/// which holds seconds past readings it never took, and a store whose newest second the loaded
-/// hour no longer holds.
+/// ring from the newest sealed minute. It decodes those minutes in groups, as it does the whole
+/// hour where the loaded hour no longer holds the store's newest second, which replaces the
+/// store's seconds. A store whose hour left a sealed minute out retries it: it reads every minute
+/// of the hour one at a time, which needs the memory of one minute. So does a store whose ring
+/// overran while it followed it, which holds seconds past readings it never took.
 fn refresh_load(
     root: &Path,
     held: &mut Held,

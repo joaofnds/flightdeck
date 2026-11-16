@@ -45,6 +45,57 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     assert_eq!(resumed.left_out, None);
 }
 
+#[test]
+fn a_return_that_ran_short_of_memory_reads_the_hour_one_minute_at_a_time_at_once() {
+    // Goal: a return whose load in groups left a minute out for want of memory reads the hour
+    // again one minute at a time before it answers, so the window is never shown the hole.
+    // Method: seal four minutes and find the most memory a store uses to read them one minute at
+    // a time. Check that a load in groups leaves a minute out under that much, then refresh a
+    // store under that much and look for the hole.
+    let mut fixture = Fixture::new();
+    for minute in 0..4 {
+        fixture.publish_with_system_rows(100 + minute * 60);
+        fixture.skip_run_ticks(59);
+        fixture.seal_minute(minute);
+    }
+    let shared = reconciliation_shared();
+    let operation = std::sync::Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let (mut roomy, mut ring) = short_of_memory_held(&fixture, super::BYTES_MAX);
+    // The second read is the one a retry makes, over a store that still holds seconds.
+    for _ in 0..2 {
+        roomy.left_out = Some(super::Failure::Budget);
+        assert!(
+            super::refresh_load(&fixture.root, &mut roomy, &mut ring, &shared, &operation).unwrap()
+        );
+        assert_eq!(roomy.left_out, None);
+    }
+    let bytes = roomy.payload_budget.used_peak();
+    let (mut grouped, mut ring) = short_of_memory_held(&fixture, bytes);
+    assert!(
+        super::refresh_load(&fixture.root, &mut grouped, &mut ring, &shared, &operation).unwrap()
+    );
+    assert_eq!(grouped.left_out, Some(super::Failure::Budget));
+    let (mut held, mut ring) = short_of_memory_held(&fixture, bytes);
+
+    let loaded = super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation).unwrap();
+
+    assert!(loaded);
+    assert_eq!(held.left_out, None);
+    assert_eq!(held.span.held().count(), roomy.span.held().count());
+}
+
+/// A store that holds no second, with `bytes` for what it holds and loads, and its ring over
+/// `fixture`.
+fn short_of_memory_held(fixture: &Fixture, bytes: usize) -> (super::Held, super::Ring) {
+    let budget = std::sync::Arc::new(super::ByteBudget::new(bytes));
+    let held = super::Held::without_recording_with_payload(budget);
+    let ring = super::make_ring(&fixture.root, &held.payload_budget);
+
+    (held, ring)
+}
+
 /// The store thread's held hour over `fixture` before its first step, following the ring past
 /// the newest sealed minute.
 fn reconciliation_held(fixture: &Fixture) -> (super::Held, super::Ring) {
