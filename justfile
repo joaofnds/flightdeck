@@ -119,7 +119,7 @@ test-event-capacity:
     cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --release --locked -p persister --features event-capacity --test event_stream -- --include-ignored --no-capture --test-threads=1
 
-# Each test runs in a process of its own, since two of them read the lifetime peak of their
+# Each test runs in a process of its own, since three of them read the lifetime peak of their
 # process's footprint. A change to how the live store holds its seconds runs the recipe before
 # and after, on the same recording, and compares the times, the bytes and the digests printed.
 # Opt-in cost of each read of the live store on a recording: just read-benchmark <a recording>
@@ -127,7 +127,8 @@ read-benchmark recording:
     for test in reads_of_the_live_span_cost \
         reads_of_a_context_that_follows_the_newest_second_cost \
         reads_of_a_context_fixed_on_an_earlier_second_cost taking_a_second_costs \
-        loading_the_hour_costs continuing_a_load_costs rows_of_the_live_span_repeat; do \
+        loading_the_hour_costs continuing_a_load_costs decoding_the_owed_apps_costs \
+        rows_of_the_live_span_repeat; do \
         FLIGHTDECK_REFERENCE_RECORDING="{{recording}}" cargo test --release --locked -p viewer \
             --lib --features read-benchmark -- "store::read_benchmark_tests::$test" --exact \
             --no-capture || exit 1; \

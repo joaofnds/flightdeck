@@ -37,8 +37,9 @@ struct Captured {
 
 /// What adding up the Apps every sealed minute of `fixture` owes hands over, oldest first.
 fn capture(fixture: &Fixture) -> Vec<Captured> {
+    let owed = Owed::of_hour(&fixture.root);
     let mut captured = Vec::new();
-    let failure = load_owed(&fixture.root, &owed_of(fixture), |_, _, apps| {
+    let failure = load_owed(&fixture.root, &owed, |_, _, apps| {
         let TickApps::Folded(folded) = apps else {
             return;
         };
@@ -49,13 +50,4 @@ fn capture(fixture: &Fixture) -> Vec<Captured> {
     });
     assert_eq!(failure, None);
     captured
-}
-
-/// The Apps of every sealed minute of `fixture`, which a load that took their ticks in without
-/// them owes the store's stretches.
-fn owed_of(fixture: &Fixture) -> Owed {
-    let mut found = Vec::new();
-    super::find(&fixture.root, &mut found, None).unwrap();
-    found.reverse();
-    Owed::all(found)
 }

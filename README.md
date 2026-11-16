@@ -238,8 +238,9 @@ unchanged code and on each change and about doubles each change's test time. A c
 keeps the collector running past the tests' time limit shows as TIMEOUT rather than caught.
 
 `just read-benchmark RECORDING` prints what the app's live store costs on a copy of a
-recording: the time of each read the pages make, of taking a second and of each load, the
-memory footprint once loaded, and the bytes its rows take. Each figure comes with a digest
-of what the read returned. Run it before and after a change to how the store holds its
-seconds, on the same copy, and compare. No check runs it, since it needs a recording and
-takes about a minute.
+recording: the time of each read the pages make, of taking a second, of each load and of
+decoding the Apps a launch owes the charts of the hour, the memory footprint once loaded
+and at that decoding's highest, and the bytes its rows take. Each read comes with a digest of
+what it returned. Run it before and after a change to how the store holds its seconds, on
+the same copy, and compare. No check runs it, since it needs a recording and takes about a
+minute.

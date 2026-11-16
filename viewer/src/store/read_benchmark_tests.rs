@@ -1,8 +1,9 @@
 //! Opt-in measurement of what the live store costs on a recording: each read of its span,
-//! taking a second, loading the hour and the bytes its rows take. A change to how the store
-//! holds its seconds runs it before and after, and every digest must come out the same. It
-//! builds only with the `read-benchmark` feature, and `just read-benchmark <a recording>` runs
-//! each test in a process of its own, since two of them read the process's footprint.
+//! taking a second, loading the hour, decoding the Apps a launch owes its stretches and the
+//! bytes its rows take. A change to how the store holds its seconds runs it before and after,
+//! and every digest must come out the same. It builds only with the `read-benchmark` feature,
+//! and `just read-benchmark <a recording>` runs each test in a process of its own, since three
+//! of them read the process's footprint.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -176,6 +177,45 @@ fn continuing_a_load_costs() {
     report_memory("before the continued load", &before);
     report_memory("after the continued load", &after);
     report_span("the loaded span", &publish(&mut loaded.held));
+}
+
+#[test]
+fn decoding_the_owed_apps_costs() {
+    // Goal: say what the loaders cost in time and in memory in the pass the store runs once the
+    // window has its first View, which adds up the Apps a launch owes the store's stretches.
+    // Method: decode the Apps of the hour's sealed minutes on the pass's loaders, in a process
+    // that holds nothing else, and read the footprint before and after, so the peak's rise is
+    // what the loaders held at once. No store takes what they hand over, so the time and the
+    // memory of adding it to the store's stretches are left out. The parts counted are no
+    // digest: a stretch two loaders decode comes in two parts, so the count follows the number
+    // of loaders, and a recording whose minutes keep no App parts hands over none.
+    let root = prepared_root();
+    let owed = recording::Owed::of_hour(&root);
+    let before = Footprint::read().unwrap();
+    let mut part_count = 0_usize;
+
+    let started = Instant::now();
+    let left_out = recording::load_owed(&root, &owed, |_, _, apps| {
+        if let TickApps::Folded(_) = apps {
+            part_count += 1;
+        }
+    });
+    let elapsed = started.elapsed();
+    let after = Footprint::read().unwrap();
+
+    assert!(left_out.is_none());
+    println!(
+        "decoding the owed Apps: {} ns, {part_count} parts of stretches handed over",
+        elapsed.as_nanos(),
+    );
+    println!(
+        "before the owed Apps are decoded: footprint {} bytes, footprint peak {} bytes",
+        before.current_bytes, before.lifetime_bytes_max,
+    );
+    println!(
+        "once the owed Apps are decoded: footprint {} bytes, footprint peak {} bytes",
+        after.current_bytes, after.lifetime_bytes_max,
+    );
 }
 
 #[test]

@@ -499,6 +499,17 @@ impl Owed {
     fn all(found: Vec<Found>) -> Self {
         Self { found }
     }
+
+    /// The Apps of every sealed minute of the loaded hour of `root`, which a launch that took in
+    /// none of them owes the store's stretches.
+    #[cfg(test)]
+    pub(super) fn of_hour(root: &Path) -> Self {
+        let mut found = Vec::new();
+        find(root, &mut found, None).unwrap();
+        found.reverse();
+
+        Self::all(found)
+    }
 }
 
 /// Hands `take` the run, the place and the Apps of each tick of the minutes `owed` holds, oldest
