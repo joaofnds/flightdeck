@@ -19,6 +19,7 @@ struct Entry<K> {
 
 /// The measured amount and elapsed time one App adds to its context mean.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Total {
     pub amount: u128,
     pub elapsed_ns: u128,
@@ -216,3 +217,7 @@ impl<K: SumKey> Sums<K> {
 fn totals(elapsed: Option<u64>, measures: [Measure; 4]) -> [Total; 4] {
     measures.map(|measure| Total::of_reading(&measure, elapsed))
 }
+
+#[cfg(test)]
+#[path = "sums_tests.rs"]
+mod tests;
