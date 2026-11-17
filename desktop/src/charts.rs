@@ -525,7 +525,7 @@ fn paint_curve(
 
 /// The paths of `curve`, which has at least two points: those `frame` holds for the curve
 /// painted in its order last, moved to where `curve` stands, where that curve had the shape
-/// `curve` has, and a new tessellation otherwise.
+/// `curve` has, and newly built ones otherwise.
 fn held_curve_paths(
     line: &crate::data::Line,
     panel: &Panel,
@@ -585,8 +585,8 @@ impl CurveLook {
     }
 }
 
-/// The tessellated stroke of the curve through `points` on `plot` and, for a curve that is
-/// neither dashed nor clear, the area beneath it with its fill.
+/// The tessellated stroke of the curve through `points`, which are at least two, on `plot` and,
+/// for a curve that is neither dashed nor clear, the area beneath it with its fill.
 fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> CurvePaths {
     let width = if look.stacked { px(1.0) } else { px(2.0) };
     let mut stroke = PathBuilder::stroke(width);
@@ -594,17 +594,12 @@ fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> Cu
         stroke = stroke.dash_array(&[px(6.0), px(4.0)]);
     }
     let top: Vec<_> = points.iter().map(|sample| sample.top).collect();
-    smooth(&mut stroke, &top, true);
+    smooth(&mut stroke, &top);
 
     let mut area = None;
     if !look.dashed {
         if look.opacity > 0.0 {
-            let bottom: Vec<_> = points.iter().rev().map(|sample| sample.bottom).collect();
-            let mut builder = PathBuilder::fill();
-            smooth(&mut builder, &top, true);
-            smooth(&mut builder, &bottom, false);
-            builder.close();
-            area = built_path(builder).map(|area| {
+            area = curve_area(points).map(|area| {
                 let fill = curve_fill(look, plot, area.bounds);
                 (area, fill)
             });
@@ -614,6 +609,140 @@ fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> Cu
     CurvePaths {
         stroke: built_path(stroke),
         area,
+    }
+}
+
+/// How far, in pixels, a straight piece of an area's edge may lie from the bend it stands for:
+/// as far as the tessellator lets the stroke of the same bend lie from it.
+const AREA_TOLERANCE_PIXELS: f32 = gpui::StrokeOptions::DEFAULT_TOLERANCE;
+/// The most pieces one stretch of an area is cut into, which hold a bend of any width within
+/// `AREA_TOLERANCE_PIXELS` while it is no taller than 273 pixels.
+const AREA_PIECE_COUNT_MAX: u16 = 64;
+
+/// The corners of one triangle of an area.
+type AreaTriangle = (Point<Pixels>, Point<Pixels>, Point<Pixels>);
+
+/// The area between the top and the bottom of the curve through `points`, which are at least
+/// two, as triangles, or `None` where the curve stands on its base throughout. A top and a
+/// bottom point share their place across the plot, and so do the bends between two of them, so
+/// each stretch is cut straight down into pieces of two triangles, where a general tessellator
+/// sorts and sweeps every edge to cover the same. The area starts at its first piece that has a
+/// height, so its bounds, which its fill fades over, hold only what it covers.
+fn curve_area(points: &[RunPoint]) -> Option<Path<Pixels>> {
+    assert!(points.len() > 1);
+    // A triangle whose corners all say this is filled whole, as the tessellator's are.
+    let whole = (point(0.0, 1.0), point(0.0, 1.0), point(0.0, 1.0));
+    let mut area: Option<Path<Pixels>> = None;
+    let mut left = points[0];
+    for right in curve_area_cuts(points) {
+        if let Some([first, second]) = curve_area_piece(left, right) {
+            let area = area.get_or_insert_with(|| {
+                let mut area = Path::new(left.top);
+                // Two triangles a stretch, which is all of them where no stretch bends.
+                area.vertices.reserve(6 * (points.len() - 1));
+                area
+            });
+            area.push_triangle(first, whole);
+            area.push_triangle(second, whole);
+        }
+        left = right;
+    }
+
+    area
+}
+
+/// Where the area of the curve through `points` is cut past its first point, in their order:
+/// between two points wherever a piece of their stretch ends, and at the second of them.
+fn curve_area_cuts(points: &[RunPoint]) -> impl Iterator<Item = RunPoint> + '_ {
+    points.windows(2).flat_map(|pair| {
+        let (source, target) = (pair[0], pair[1]);
+        let piece_count = curve_area_piece_count(source, target);
+        (1..piece_count)
+            .map(move |piece_index| f32::from(piece_index) / f32::from(piece_count))
+            .map(move |share| curve_area_cut(source, target, share))
+            .chain(std::iter::once(target))
+    })
+}
+
+/// How many pieces the stretch from `source` to `target` is cut into: one where it runs
+/// straight, and otherwise as many as keep each piece's edges within `AREA_TOLERANCE_PIXELS` of
+/// the taller of its two bends.
+fn curve_area_piece_count(source: RunPoint, target: RunPoint) -> u16 {
+    if stretch_runs_straight(source.top, target.top) {
+        return 1;
+    }
+
+    let half_width = f32::from(target.top.x - source.top.x) / 2.0;
+    let top_height = f32::from(target.top.y - source.top.y).abs();
+    let bottom_height = f32::from(target.bottom.y - source.bottom.y).abs();
+    let height = top_height.max(bottom_height);
+    // A piece of a cubic cut at even steps lies within three quarters of the second difference
+    // of the cubic's control points, over the square of the piece count. For a bend that
+    // difference is half its width across and its whole height down. What lies across moves a
+    // piece off its bend only as far as the piece leans, and no piece leans more than the bend
+    // does halfway, twice its height over its width, so twice the height bounds the difference
+    // too, and a bend with little height takes few pieces however wide it is.
+    let second_difference = half_width.hypot(height).min(2.0 * height);
+    let piece_count = (0.75 * second_difference / AREA_TOLERANCE_PIXELS)
+        .sqrt()
+        .ceil();
+    // A count that no `u16` holds, or that is no number, takes the most pieces.
+    num_traits::ToPrimitive::to_u16(&piece_count).map_or(AREA_PIECE_COUNT_MAX, |piece_count| {
+        piece_count.clamp(1, AREA_PIECE_COUNT_MAX)
+    })
+}
+
+/// Where the stretch from `source` to `target` is cut at `share` of its bends' way, which is
+/// one place across the plot for its top and its bottom.
+fn curve_area_cut(source: RunPoint, target: RunPoint, share: f32) -> RunPoint {
+    assert!(share > 0.0);
+    assert!(share < 1.0);
+    // A bend leaves its source level and reaches its target level through control points
+    // halfway across, as `smooth_stretches` places them, so it runs across by this cubic of
+    // the share and down by the next.
+    let across = share * (1.5 - 1.5 * share + share * share);
+    let down = share * share * (3.0 - 2.0 * share);
+    let x = source.top.x + (target.top.x - source.top.x) * across;
+
+    RunPoint {
+        top: point(x, source.top.y + (target.top.y - source.top.y) * down),
+        bottom: point(
+            x,
+            source.bottom.y + (target.bottom.y - source.bottom.y) * down,
+        ),
+    }
+}
+
+/// The two triangles that cover the area between the cuts `left` and `right`, or `None` where
+/// it has no height at either. The triangles meet where the top crosses the bottom between the
+/// cuts, so neither covers what lies outside the area or what the other covers, which would
+/// show twice as dense.
+fn curve_area_piece(left: RunPoint, right: RunPoint) -> Option<[AreaTriangle; 2]> {
+    assert_eq!(left.top.x, left.bottom.x);
+    assert_eq!(right.top.x, right.bottom.x);
+    let left_height = f32::from(left.bottom.y - left.top.y);
+    let right_height = f32::from(right.bottom.y - right.top.y);
+    if left_height == 0.0 {
+        if right_height == 0.0 {
+            return None;
+        }
+    }
+
+    if left_height * right_height < 0.0 {
+        let share = left_height / (left_height - right_height);
+        let crossing = point(
+            left.top.x + (right.top.x - left.top.x) * share,
+            left.top.y + (right.top.y - left.top.y) * share,
+        );
+        Some([
+            (left.top, left.bottom, crossing),
+            (right.top, right.bottom, crossing),
+        ])
+    } else {
+        Some([
+            (left.top, left.bottom, right.top),
+            (left.bottom, right.bottom, right.top),
+        ])
     }
 }
 
@@ -645,7 +774,7 @@ fn built_path(builder: PathBuilder) -> Option<Path<Pixels>> {
     }
 }
 
-/// The tessellated paths of one curve: its stroke, and the area beneath it with its fill.
+/// The paths of one curve: its tessellated stroke, and the area beneath it with its fill.
 #[derive(Clone)]
 struct CurvePaths {
     stroke: Option<Path<Pixels>>,
@@ -672,16 +801,16 @@ impl CurvePaths {
 }
 
 /// The most curves a plot holds, far more than the lines and breaks of any chart draw. A plot
-/// tessellates each curve past them at every paint.
+/// builds each curve past them at every paint.
 const HELD_CURVES_MAX: usize = 256;
 
-/// The paths of the curves a plot painted last, each with the place it was tessellated for. The
+/// The paths of the curves a plot painted last, each with the place it was built for. The
 /// window of a following chart slides a second at a time while its points stay at their seconds,
 /// so a paint that finds a curve with the shape it had, standing a second's width further left,
-/// moves the paths held for it rather than tessellate them again.
+/// moves the paths held for it rather than build them again.
 pub struct HeldCurves {
     curves: RefCell<Vec<HeldCurve>>,
-    /// How many curves the plots sharing it have tessellated, which the page's reports give.
+    /// How many curves the plots sharing it have built, which the page's reports give.
     builds: Rc<Cell<u64>>,
 }
 
@@ -700,7 +829,7 @@ impl HeldCurves {
     }
 
     /// Runs `paint` with the curves `held` holds from the last paint, and holds the curves it
-    /// paints for the next. Where nothing holds a plot's curves, `paint` tessellates each.
+    /// paints for the next. Where nothing holds a plot's curves, `paint` builds each.
     fn hold(held: Option<&Self>, paint: impl FnOnce(Option<&mut CurveFrame<'_>>)) {
         let Some(held) = held else {
             paint(None);
@@ -728,7 +857,7 @@ struct CurveFrame<'a> {
 
 impl CurveFrame<'_> {
     /// The paths of the next curve, of `shape` at `place`: the last paint's curve in the same
-    /// order moved to `place` where it had `shape`, and the tessellation `build` makes otherwise.
+    /// order moved to `place` where it had `shape`, and the paths `build` makes otherwise.
     fn paths(
         &mut self,
         shape: CurveShape,
@@ -776,7 +905,7 @@ struct CurvePlace {
 }
 
 impl CurvePlace {
-    /// How far a curve of `shape` tessellated at `self` moves to stand at `to`: as far as its plot
+    /// How far a curve of `shape` built at `self` moves to stand at `to`: as far as its plot
     /// moved, and back across the plot by the share of its window the window slid on by.
     fn offset(self, to: Self, shape: &CurveShape) -> Point<Pixels> {
         let moved = to.origin - self.origin;
@@ -972,16 +1101,12 @@ struct RunPoint {
 
 /// Draws a curve through `points` in the order given, one stretch to each point from the one
 /// before.
-fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool) {
+fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>]) {
     let Some(first) = points.first() else {
         return;
     };
 
-    if start {
-        builder.move_to(*first);
-    } else {
-        builder.line_to(*first);
-    }
+    builder.move_to(*first);
     for stretch in smooth_stretches(points) {
         match stretch {
             Stretch::Straight(to) => builder.line_to(to),
@@ -1007,18 +1132,23 @@ const STRAIGHT_STRETCH_WIDTH_MAX: Pixels = px(2.0);
 /// Smoothie Charts draw a live curve: a stretch leaves one point level and reaches the next
 /// level, bending halfway between them, or runs straight where it is too narrow for the bend to
 /// show. It depends on its two ends alone, so a point arriving or leaving reshapes no stretch
-/// already drawn, and it never passes above or below its ends. Drawn the other way it traces the
-/// same curve, which the bottom edge of an area relies on, since that edge runs back in time.
+/// already drawn, and it never passes above or below its ends. An area cuts the bends of its top
+/// and of its bottom where `curve_area_cut` finds them from the control points chosen here.
 fn smooth_stretches(points: &[gpui::Point<Pixels>]) -> impl Iterator<Item = Stretch> + '_ {
     points.windows(2).map(|pair| {
         let (source, target) = (pair[0], pair[1]);
-        if (target.x - source.x).abs() <= STRAIGHT_STRETCH_WIDTH_MAX {
+        if stretch_runs_straight(source, target) {
             Stretch::Straight(target)
         } else {
             let halfway = source.x + (target.x - source.x) / 2.0;
             Stretch::Bend([target, point(halfway, source.y), point(halfway, target.y)])
         }
     })
+}
+
+/// Whether the stretch between `source` and `target` is too narrow for its bend to show.
+fn stretch_runs_straight(source: gpui::Point<Pixels>, target: gpui::Point<Pixels>) -> bool {
+    (target.x - source.x).abs() <= STRAIGHT_STRETCH_WIDTH_MAX
 }
 
 /// One axis of a chart: its bounds and the spacing of its labelled ticks, chosen as the approved
@@ -1873,10 +2003,10 @@ mod live_tests {
             .sum()
     }
 
-    /// Asserts that `paths` draw the shapes `expected` draws, whatever their fills. The
-    /// tessellator can split an area into other triangles once its points move by a rounding
-    /// error, so areas compare by where they stand and what they cover, and strokes, which it
-    /// builds point by point, by each vertex.
+    /// Asserts that `paths` draw the shapes `expected` draws, whatever their fills. A point
+    /// that moves by a rounding error can cut an area into other pieces, so areas compare by
+    /// where they stand and what they cover, and strokes, which the tessellator builds point by
+    /// point, by each vertex.
     fn assert_same_shapes(paths: &CurvePaths, expected: &CurvePaths) {
         let (Some(stroke), Some(expected_stroke)) = (&paths.stroke, &expected.stroke) else {
             panic!("both curves have a stroke");
@@ -1908,7 +2038,7 @@ mod live_tests {
     #[test]
     fn a_curve_whose_window_slid_with_no_new_reading_is_moved_rather_than_built_again() {
         // Goal: a plot painted again after its window slid a second with no reading arriving or
-        // leaving draws its curve as a new build would, without tessellating it again.
+        // leaving draws its curve as a new build would, without building it again.
         // Method: paint the readings of 1002 to 1900 in the window from 1001 and then from 1002
         // through one held set of curves, and compare the second paint with a new build.
         let builds = Rc::new(Cell::new(0));
@@ -1926,7 +2056,7 @@ mod live_tests {
     #[test]
     fn a_curve_on_a_plot_laid_out_elsewhere_is_moved_with_its_plot() {
         // Goal: a plot the page lays out at another place, as a scroll does, draws its curve
-        // there as a new build would, without tessellating the curve again. The fill fades by
+        // there as a new build would, without building the curve again. The fill fades by
         // the height within the plot, so a move leaves it as it was. Method: paint a chart on a
         // plot at the page's corner and then on one 20 pixels right and 30 down through one held
         // set of curves, and compare the second paint with a new build.
@@ -1942,7 +2072,7 @@ mod live_tests {
 
     #[test]
     fn a_curve_that_gained_a_reading_is_built_again() {
-        // Goal: a curve that gained a point is tessellated again, so no paint draws the curve it
+        // Goal: a curve that gained a point is built again, so no paint draws the curve it
         // had. Method: paint the readings of 1002 to 1900 in the window from 1001 and then those
         // to 1901 in the window from 1002 through one held set of curves, and compare the second
         // paint with a new build.
@@ -2073,6 +2203,395 @@ mod live_tests {
             180.0,
             linear_color_stop(alpha(look.tint, 0.125), 0.0),
             linear_color_stop(alpha(look.tint, 0.375), 1.0),
+        );
+        assert_eq!(area_fill(&paths), expected);
+    }
+
+    /// The points of a curve `width` pixels apart, each as the height of its top and of its
+    /// base.
+    fn area_points(width: f32, heights: &[(f32, f32)]) -> Vec<RunPoint> {
+        heights
+            .iter()
+            .enumerate()
+            .map(|(index, (top, bottom))| {
+                let x = px(10.0 + width * number(index));
+                RunPoint {
+                    top: point(x, px(*top)),
+                    bottom: point(x, px(*bottom)),
+                }
+            })
+            .collect()
+    }
+
+    /// The area between the top and the bottom of the curve through `points` as the general
+    /// tessellator fills it by its even-odd rule: out along the top and back along the bottom.
+    fn swept_area(points: &[RunPoint]) -> Path<Pixels> {
+        let top: Vec<_> = points.iter().map(|sample| sample.top).collect();
+        let bottom: Vec<_> = points.iter().rev().map(|sample| sample.bottom).collect();
+        let mut builder = PathBuilder::fill();
+        smooth(&mut builder, &top);
+        builder.line_to(bottom[0]);
+        for stretch in smooth_stretches(&bottom) {
+            match stretch {
+                Stretch::Straight(to) => builder.line_to(to),
+                Stretch::Bend([to, leaving, reaching]) => {
+                    builder.cubic_bezier_to(to, leaving, reaching);
+                }
+            }
+        }
+        builder.close();
+        builder.build().unwrap()
+    }
+
+    /// Whether a triangle of `path` covers the place `x` across and `y` down.
+    fn covers(path: &Path<Pixels>, x: f32, y: f32) -> bool {
+        path.vertices.as_chunks::<3>().0.iter().any(|triangle| {
+            let [first, second, third] = triangle.each_ref().map(|corner| corner.xy_position);
+            // Most triangles stand wholly to one side of the place, which costs less to see.
+            let across = [first.x, second.x, third.x].map(f32::from);
+            if across.iter().all(|corner| *corner < x) {
+                return false;
+            }
+            if across.iter().all(|corner| *corner > x) {
+                return false;
+            }
+
+            let side = |from: Point<Pixels>, to: Point<Pixels>| {
+                f32::from(to.x - from.x) * (y - f32::from(from.y))
+                    - f32::from(to.y - from.y) * (x - f32::from(from.x))
+            };
+            let sides = [side(first, second), side(second, third), side(third, first)];
+            let inside = |turn: fn(f32) -> bool| sides.iter().all(|side| turn(*side));
+            inside(|side| side > 0.0) || inside(|side| side < 0.0)
+        })
+    }
+
+    /// How many places of a grid half a pixel apart over `expected` it covers, and at how many
+    /// places of that grid `area` covers what `expected` leaves or leaves what it covers. The
+    /// grid starts 1.877 pixels before `expected`, so none of its places stands on the edge of
+    /// a triangle of a curve whose points stand at whole pixels, where a rounding error decides
+    /// which side the place is on.
+    fn covered_places(area: &Path<Pixels>, expected: &Path<Pixels>) -> (usize, usize) {
+        let bounds = expected.bounds;
+        let (mut covered, mut differing) = (0, 0);
+        let mut y = f32::from(bounds.origin.y) - 1.877;
+        while y < f32::from(bounds.origin.y + bounds.size.height) + 2.0 {
+            let mut x = f32::from(bounds.origin.x) - 1.877;
+            while x < f32::from(bounds.origin.x + bounds.size.width) + 2.0 {
+                let expected_covers = covers(expected, x, y);
+                covered += usize::from(expected_covers);
+                differing += usize::from(covers(area, x, y) != expected_covers);
+                x += 0.5;
+            }
+            y += 0.5;
+        }
+        (covered, differing)
+    }
+
+    /// Asserts that the area of the curve through `points` covers what the general tessellator
+    /// fills between the curve's top and its bottom, but for a sliver of at most
+    /// `sliver_thousandths` of it: at the same places of a half-pixel grid, over the same square
+    /// pixels, which count twice where two triangles cover one place, and within the same
+    /// bounds, so its fill fades over the same heights.
+    fn assert_covers_what_the_tessellator_fills(points: &[RunPoint], sliver_thousandths: u16) {
+        let area = curve_area(points).unwrap();
+
+        let swept = swept_area(points);
+        let (covered, differing) = covered_places(&area, &swept);
+        assert!(covered > 0);
+        assert!(
+            differing * 1000 <= covered * usize::from(sliver_thousandths),
+            "{differing} {covered}"
+        );
+        let (pixels, swept_pixels) = (covered_area(&area), covered_area(&swept));
+        let sliver_pixels = swept_pixels * f64::from(sliver_thousandths) / 1000.0;
+        assert!(
+            (pixels - swept_pixels).abs() <= 0.5 + sliver_pixels,
+            "{pixels} {swept_pixels}"
+        );
+        assert_same_bounds(&area, &swept);
+    }
+
+    #[test]
+    fn an_area_under_straight_stretches_covers_what_the_tessellator_fills() {
+        // Goal: the area cut stretch by stretch covers what the general tessellator fills, each
+        // place once, and stands where it stands.
+        // Method: points two pixels apart at varying heights over a level base, a stretch of
+        // them on the base, compared with the tessellator's area.
+        let heights = [80.0, 20.0, 50.0, 50.0, 100.0, 100.0, 100.0, 10.0, 60.0];
+        let points = area_points(2.0, &heights.map(|top| (top, 100.0)));
+
+        assert_covers_what_the_tessellator_fills(&points, 0);
+    }
+
+    #[test]
+    fn an_area_whose_top_crosses_its_base_covers_both_sides_of_the_crossing() {
+        // Goal: where a line passes through its base between two readings, as a battery's power
+        // does between charging and draining, the area covers what lies between the line and the
+        // base on each side of the crossing and nothing else, as the tessellator fills it.
+        // Method: points two pixels apart whose tops stand above and below a base at 50, some
+        // of them on it, compared with the tessellator's area.
+        let heights = [20.0, 80.0, 30.0, 50.0, 70.0, 50.0, 90.0, 45.0];
+        let points = area_points(2.0, &heights.map(|top| (top, 50.0)));
+
+        assert_covers_what_the_tessellator_fills(&points, 0);
+    }
+
+    #[test]
+    fn an_area_under_bends_covers_what_the_tessellator_fills_but_for_its_edge() {
+        // Goal: an area whose top and bottom both bend, as a stacked line's do, covers what the
+        // tessellator fills. The two cut each bend into straight pieces at other places, so they
+        // differ in a sliver along the bends and nowhere else.
+        // Method: points 30 pixels apart whose tops and bases vary, compared with the
+        // tessellator's area, allowing a sliver of a two-hundredth of it.
+        let heights = [
+            (80.0, 95.0),
+            (20.0, 60.0),
+            (50.0, 90.0),
+            (5.0, 40.0),
+            (70.0, 70.0),
+        ];
+        let points = area_points(30.0, &heights);
+
+        assert_covers_what_the_tessellator_fills(&points, 5);
+    }
+
+    #[test]
+    fn every_triangle_of_an_area_is_filled_whole() {
+        // Goal: the renderer fills each triangle of an area to its edges, and cuts none along a
+        // curve inside it, as it would a triangle whose corners carry a curve's coordinates.
+        // Method: read the coordinates every corner of an area under bends carries, which are
+        // the ones the tessellator gives the triangles it fills whole.
+        let points = area_points(30.0, &[(80.0, 95.0), (20.0, 60.0), (50.0, 90.0)]);
+
+        let area = curve_area(&points).unwrap();
+
+        let whole = point(0.0, 1.0);
+        assert!(
+            area.vertices
+                .iter()
+                .all(|corner| corner.st_position == whole)
+        );
+    }
+
+    /// How far `place` lies from the straight line between `from` and `to`, in pixels.
+    fn distance(place: Point<Pixels>, from: Point<Pixels>, to: Point<Pixels>) -> f32 {
+        let along = (f32::from(to.x - from.x), f32::from(to.y - from.y));
+        let offset = (f32::from(place.x - from.x), f32::from(place.y - from.y));
+        let length_squared = along.0 * along.0 + along.1 * along.1;
+        let share = ((offset.0 * along.0 + offset.1 * along.1) / length_squared).clamp(0.0, 1.0);
+        (offset.0 - along.0 * share).hypot(offset.1 - along.1 * share)
+    }
+
+    /// How far `place` lies from the bend from `source` to `target` that the stroke draws, read
+    /// as 4,000 straight pieces of the cubic through the bend's control points.
+    fn bend_distance(place: Point<Pixels>, source: Point<Pixels>, target: Point<Pixels>) -> f32 {
+        let stretches: Vec<_> = smooth_stretches(&[source, target]).collect();
+        let [Stretch::Bend([_, leaving, reaching])] = stretches[..] else {
+            panic!("the stretch bends");
+        };
+        let at = |step: u16| {
+            let share = f32::from(step) / 4000.0;
+            let rest = 1.0 - share;
+            let weights = [
+                rest * rest * rest,
+                3.0 * rest * rest * share,
+                3.0 * rest * share * share,
+                share * share * share,
+            ];
+            let corners = [source, leaving, reaching, target];
+            let mix = |coordinate: fn(Point<Pixels>) -> f32| {
+                corners
+                    .iter()
+                    .zip(weights)
+                    .map(|(corner, weight)| coordinate(*corner) * weight)
+                    .sum::<f32>()
+            };
+            point(
+                px(mix(|corner| f32::from(corner.x))),
+                px(mix(|corner| f32::from(corner.y))),
+            )
+        };
+
+        (0..4000)
+            .map(|step| distance(place, at(step), at(step + 1)))
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The pieces of `area`, the area of a curve whose top stays above its bottom, in order
+    /// across the plot: each as the cut it starts at and the cut it ends at, which are the
+    /// corners of its two triangles.
+    fn area_pieces(area: &Path<Pixels>) -> Vec<(RunPoint, RunPoint)> {
+        assert!(area.vertices.len().is_multiple_of(6));
+        area.vertices
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|piece| {
+                let corners = piece.each_ref().map(|corner| corner.xy_position);
+                let left = RunPoint {
+                    top: corners[0],
+                    bottom: corners[1],
+                };
+                let right = RunPoint {
+                    top: corners[2],
+                    bottom: corners[4],
+                };
+                (left, right)
+            })
+            .collect()
+    }
+
+    /// Asserts that the area of the one stretch `points` hold, whose top stays above its bottom,
+    /// is cut into `piece_count` pieces that join from its first point to its second, each of
+    /// which ends on the bends the stroke draws there, at one place across the plot, and lies
+    /// within a tenth of a pixel of each bend halfway along.
+    fn assert_follows_its_bends(points: &[RunPoint], piece_count: usize) {
+        let [source, target] = points else {
+            panic!("the points hold one stretch");
+        };
+        let area = curve_area(points).unwrap();
+
+        let pieces = area_pieces(&area);
+        assert_eq!(pieces.len(), piece_count);
+        assert_eq!(pieces[0].0, *source);
+        assert_eq!(pieces[piece_count - 1].1, *target);
+        for (index, pair) in pieces.windows(2).enumerate() {
+            assert_eq!(pair[0].1, pair[1].0, "piece {index}");
+        }
+        let middle = |from: Point<Pixels>, to: Point<Pixels>| {
+            point(
+                from.x + (to.x - from.x) * 0.5,
+                from.y + (to.y - from.y) * 0.5,
+            )
+        };
+        for (index, (left, right)) in pieces.iter().enumerate() {
+            assert_eq!(right.top.x, right.bottom.x, "piece {index}");
+            let top = bend_distance(right.top, source.top, target.top);
+            assert!(top < 0.001, "piece {index} {top}");
+            let bottom = bend_distance(right.bottom, source.bottom, target.bottom);
+            assert!(bottom < 0.001, "piece {index} {bottom}");
+            let top = middle(left.top, right.top);
+            let top = bend_distance(top, source.top, target.top);
+            assert!(top <= 0.1, "piece {index} {top}");
+            let bottom = middle(left.bottom, right.bottom);
+            let bottom = bend_distance(bottom, source.bottom, target.bottom);
+            assert!(bottom <= 0.1, "piece {index} {bottom}");
+        }
+    }
+
+    #[test]
+    fn a_bend_of_an_area_is_cut_into_pieces_a_tenth_of_a_pixel_from_it_at_most() {
+        // Goal: each straight piece of an area's edge starts and ends on the bend the stroke
+        // draws there and lies within a tenth of a pixel of it, which is how closely the
+        // tessellator follows the stroke.
+        // Method: one stretch 30 pixels wide whose top falls 70 pixels and whose base rises 10.
+        // The taller bend, the top, takes the root of 0.75 times the hypotenuse of 15 and 70
+        // over a tenth, which is 23.2, so 24 pieces.
+        let points = area_points(30.0, &[(15.0, 100.0), (85.0, 90.0)]);
+
+        assert_follows_its_bends(&points, 24);
+    }
+
+    #[test]
+    fn an_area_whose_base_bends_further_than_its_top_is_cut_for_its_base() {
+        // Goal: a stacked line that hardly moves over a line that climbs under it is cut often
+        // enough for its base, the taller of its two bends, to stay within a tenth of a pixel.
+        // Method: one stretch 30 pixels wide whose top rises 5 pixels and whose base falls 70,
+        // which takes the 24 pieces a top falling 70 does, where the top alone would take 9.
+        let points = area_points(30.0, &[(20.0, 30.0), (15.0, 100.0)]);
+
+        assert_follows_its_bends(&points, 24);
+    }
+
+    #[test]
+    fn a_wide_bend_of_an_area_with_little_height_takes_few_pieces() {
+        // Goal: a stretch that spans a long gap between two readings and hardly moves costs few
+        // triangles, since its pieces lean too little for their width to move them off the
+        // bend, and it still lies within a tenth of a pixel of it.
+        // Method: one stretch 200 pixels wide whose top falls one pixel over a level base. Twice
+        // its height bounds it, so it takes the root of 0.75 times 2 over a tenth, which is
+        // 3.9, so 4 pieces, where its width would have it take 28.
+        let points = area_points(200.0, &[(50.0, 100.0), (51.0, 100.0)]);
+
+        assert_follows_its_bends(&points, 4);
+    }
+
+    #[test]
+    fn a_bend_taller_than_the_bound_allows_for_is_cut_into_the_most_pieces() {
+        // Goal: the pieces of a stretch stay bounded however tall its bend is.
+        // Method: count the corners of the area of a stretch three pixels wide that falls 5,000
+        // pixels, six for each of its 64 pieces.
+        let points = area_points(3.0, &[(0.0, 0.0), (5000.0, 0.0)]);
+
+        let area = curve_area(&points).unwrap();
+
+        assert_eq!(area.vertices.len(), 6 * 64);
+    }
+
+    #[test]
+    fn a_level_stretch_of_an_area_is_one_piece() {
+        // Goal: a stretch wide enough to bend whose top and base both stay level costs two
+        // triangles, since no cut would move its edges.
+        // Method: count the corners of the area of a level stretch three pixels wide.
+        let points = area_points(3.0, &[(50.0, 100.0), (50.0, 100.0)]);
+
+        let area = curve_area(&points).unwrap();
+
+        assert_eq!(area.vertices.len(), 6);
+    }
+
+    #[test]
+    fn a_curve_that_stands_on_its_base_has_no_area() {
+        // Goal: a line at its base, as a counter that stays at zero is, costs no triangle.
+        // Method: build the area of a curve level with its base.
+        let points = area_points(2.0, &[(100.0, 100.0); 6]);
+
+        assert!(curve_area(&points).is_none());
+    }
+
+    #[test]
+    fn a_curve_that_leaves_its_base_at_one_reading_has_an_area_beside_that_reading_alone() {
+        // Goal: a line that leaves its base for one reading costs the triangles of the two
+        // stretches that reach that reading, and its area stands only over them.
+        // Method: count the corners of the area of a curve level with its base but for one
+        // point, each stretch one piece of two triangles, and compare where the area stands
+        // with where the tessellator's does.
+        let mut points = area_points(2.0, &[(100.0, 100.0); 6]);
+        points[3].top.y = px(60.0);
+
+        let area = curve_area(&points).unwrap();
+
+        assert_eq!(area.vertices.len(), 12);
+        assert_same_bounds(&area, &swept_area(&points));
+    }
+
+    #[test]
+    fn an_area_that_starts_past_a_stretch_on_its_base_fades_over_what_it_covers() {
+        // Goal: a stacked line that stands on its base for a stretch, as an App with nothing to
+        // add to the Apps below it does, has an area only where it leaves the base, and that
+        // area takes at each end the opacity the plot-wide fade has there, however far up the
+        // plot the stretch on the base stood.
+        // Method: build a curve on a plot 100 pixels tall that stands on its base a quarter of
+        // the way down, then three quarters of the way down, and leaves it there to reach
+        // halfway down, and compare its fill with a gradient between the plot-wide fade at
+        // halfway and at three quarters.
+        let look = CurveLook {
+            tint: 0x004f_8cff,
+            dashed: false,
+            stacked: true,
+            opacity: 1.0,
+            negative: false,
+        };
+        let heights = [(25.0, 25.0), (75.0, 75.0), (50.0, 75.0), (50.0, 75.0)];
+        let points = area_points(30.0, &heights);
+
+        let paths = curve_paths(look, &points, plot_at(0.0, 0.0));
+
+        let expected = linear_gradient(
+            180.0,
+            linear_color_stop(alpha(look.tint, 0.5), 0.0),
+            linear_color_stop(alpha(look.tint, 0.25), 1.0),
         );
         assert_eq!(area_fill(&paths), expected);
     }

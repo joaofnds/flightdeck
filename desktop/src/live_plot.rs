@@ -53,7 +53,7 @@ impl Shown {
 
 /// One chart's plot, which GPUI draws again only when its view is new or its bounds change.
 /// The plot that replaces it keeps its curves, so a chart drawn again for a slide of its window
-/// moves the curves it drew rather than tessellating them again.
+/// moves the curves it drew rather than building them again.
 pub(crate) struct Plot {
     shown: Shown,
     measured: Rc<Cell<Bounds<Pixels>>>,
@@ -103,7 +103,7 @@ impl Plots {
         self.renders.get()
     }
 
-    /// How many curves the plots have tessellated, which the page's reports give.
+    /// How many curves the plots have built, which the page's reports give.
     pub(crate) fn curve_builds(&self) -> u64 {
         self.curve_builds.get()
     }
