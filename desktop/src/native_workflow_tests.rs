@@ -488,6 +488,13 @@ fn snapshot() -> Box<Snapshot> {
     })
 }
 
+/// The first reading of the recording `dashboard` is opening, as that recording's reader marks it.
+fn candidate_reading(dashboard: &LiveDashboard) -> Box<Snapshot> {
+    let mut reading = snapshot();
+    reading.generation = dashboard.native.candidate.as_ref().unwrap().generation;
+    reading
+}
+
 fn missing_recording() -> PathBuf {
     std::env::temp_dir().join(format!("flightdeck-missing-native-{}", std::process::id()))
 }
@@ -591,8 +598,7 @@ fn opening_a_recording_with_an_unpresentable_result_preserves_the_current_record
     let previous_request = dashboard.request.clone();
     let previous_generation = dashboard.generation;
     dashboard.begin_recording(missing_recording());
-    let mut invalid = snapshot();
-    invalid.generation = dashboard.native.candidate.as_ref().unwrap().generation;
+    let mut invalid = candidate_reading(&dashboard);
     invalid.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(8);
     invalid.apps = Some(crate::live_source::Presentation::Legacy(
         json!({"page": {}}),
@@ -627,8 +633,7 @@ fn a_saved_source_becomes_recorded_only_when_its_open_commits() {
     let mut dashboard = dashboard("overview");
     dashboard.snapshot = Some(snapshot());
     dashboard.begin_recording(missing_recording());
-    let mut ready = snapshot();
-    ready.generation = dashboard.native.candidate.as_ref().unwrap().generation;
+    let ready = candidate_reading(&dashboard);
     assert_eq!(
         dashboard.native.source,
         crate::live_source_mode::SourceMode::Live
@@ -658,6 +663,44 @@ fn canceling_an_open_keeps_the_current_source_mode() {
         crate::live_source_mode::SourceMode::Live
     );
     assert_eq!(dashboard.native.source.following_label(true), "Live");
+}
+
+#[test]
+fn a_page_kept_from_one_recording_is_not_shown_once_another_is_opened() {
+    // Goal: a page the user left while the app followed one recording never shows over another
+    // recording, whose readings are not its readings. Method: show a reading on Memory, open
+    // Overview, accept a candidate recording with another reading through its update port, open
+    // Memory again, then look at what the page shows before the new recording's reader answers.
+    let mut dashboard = dashboard("memory");
+    dashboard.snapshot = Some(snapshot());
+    dashboard.switch_route("overview");
+    dashboard.begin_recording(missing_recording());
+    let mut ready = candidate_reading(&dashboard);
+    ready.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(8);
+    assert!(dashboard.recording_receive(crate::live_source::Update::Ready(ready)));
+
+    dashboard.switch_route("memory");
+
+    assert!(dashboard.snapshot.is_none());
+}
+
+#[test]
+fn a_canceled_open_keeps_the_pages_the_user_left() {
+    // Goal: an open the user cancels changes nothing, so a page left before it still shows its
+    // last reading at once. Method: show a reading on Memory, open Overview, begin an open and
+    // cancel it, open Memory again, then look at the reading the page shows.
+    let mut dashboard = dashboard("memory");
+    dashboard.snapshot = Some(snapshot());
+    dashboard.switch_route("overview");
+    dashboard.begin_recording(missing_recording());
+    dashboard.cancel_recording("Recording unchanged");
+
+    dashboard.switch_route("memory");
+
+    assert_eq!(
+        dashboard.snapshot.as_ref().unwrap().selection["selected"]["publication"],
+        7
+    );
 }
 
 #[test]

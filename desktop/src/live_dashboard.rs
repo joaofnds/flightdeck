@@ -1133,6 +1133,11 @@ impl LiveDashboard {
         assert!(self.visited.len() <= ROUTES.len());
     }
 
+    /// Lets go of every page kept, since each holds readings of the recording the app leaves.
+    pub(crate) fn forget_kept_pages(&mut self) {
+        self.visited.clear();
+    }
+
     pub(crate) fn switch_route(&mut self, route: &str) {
         self.settings.open = false;
         if self.request.route != route {

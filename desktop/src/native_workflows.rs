@@ -490,6 +490,7 @@ impl LiveDashboard {
             self.picker = None;
             self.cpu_inspection = None;
             self.native.alternative_page = 0;
+            self.forget_kept_pages();
 
             self.accept_presentation(presentation);
 
