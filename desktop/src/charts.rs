@@ -604,14 +604,10 @@ fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> Cu
             smooth(&mut builder, &top, true);
             smooth(&mut builder, &bottom, false);
             builder.close();
-            let span = points
-                .iter()
-                .fold(None, |span: Option<(Pixels, Pixels)>, sample| {
-                    let (low, high) = span.unwrap_or((sample.top.y, sample.bottom.y));
-                    Some((low.min(sample.top.y), high.max(sample.bottom.y)))
-                });
-            let fill = curve_fill(look, plot, span);
-            area = built_path(builder).map(|path| (path, fill));
+            area = built_path(builder).map(|area| {
+                let fill = curve_fill(look, plot, area.bounds);
+                (area, fill)
+            });
         }
     }
 
@@ -622,12 +618,9 @@ fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> Cu
 }
 
 /// The prototype fades every area from its full opacity at the plot's top to nothing at the
-/// plot's bottom, however tall the area is. A gradient spans the area's own bounds, so each end
-/// takes the opacity the plot-wide fade has at that height.
-fn curve_fill(look: CurveLook, plot: Bounds<Pixels>, span: Option<(Pixels, Pixels)>) -> Background {
-    let Some((high, low)) = span else {
-        return alpha(look.tint, 0.0).into();
-    };
+/// plot's bottom, however tall the area is. A gradient spans the bounds of the path it fills,
+/// `area` here, so each end takes the opacity the plot-wide fade has at that height.
+fn curve_fill(look: CurveLook, plot: Bounds<Pixels>, area: Bounds<Pixels>) -> Background {
     let fade = |y: Pixels| {
         let depth = ((y - plot.origin.y) / plot.size.height).clamp(0.0, 1.0);
         let level = if look.negative { depth } else { 1.0 - depth };
@@ -636,8 +629,8 @@ fn curve_fill(look: CurveLook, plot: Bounds<Pixels>, span: Option<(Pixels, Pixel
 
     linear_gradient(
         180.0,
-        linear_color_stop(fade(high.min(low)), 0.0),
-        linear_color_stop(fade(high.max(low)), 1.0),
+        linear_color_stop(fade(area.top()), 0.0),
+        linear_color_stop(fade(area.bottom()), 1.0),
     )
 }
 
@@ -2046,6 +2039,42 @@ mod live_tests {
                 Stretch::Straight(at(10.0, 80.0)),
             ]
         );
+    }
+
+    #[test]
+    fn an_area_below_its_base_fades_between_the_ends_of_what_it_covers() {
+        // Goal: the area of a line drawn below its base, as sent traffic is, takes at each end
+        // the opacity the plot-wide fade has there, so it grows denser down to its deepest
+        // reading. Method: build a curve on a plot 100 pixels tall whose base stands a quarter of
+        // the way down and whose readings reach from the base to three quarters of the way down,
+        // and compare its fill with a gradient between the plot-wide fade at those two heights.
+        let look = CurveLook {
+            tint: 0x004f_8cff,
+            dashed: false,
+            stacked: false,
+            opacity: 0.5,
+            negative: true,
+        };
+        let points: Vec<_> = [25.0, 75.0, 50.0]
+            .iter()
+            .enumerate()
+            .map(|(index, top)| {
+                let x = px(30.0 * number(index));
+                RunPoint {
+                    top: point(x, px(*top)),
+                    bottom: point(x, px(25.0)),
+                }
+            })
+            .collect();
+
+        let paths = curve_paths(look, &points, plot_at(0.0, 0.0));
+
+        let expected = linear_gradient(
+            180.0,
+            linear_color_stop(alpha(look.tint, 0.125), 0.0),
+            linear_color_stop(alpha(look.tint, 0.375), 1.0),
+        );
+        assert_eq!(area_fill(&paths), expected);
     }
 
     #[test]
