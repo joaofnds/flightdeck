@@ -583,14 +583,12 @@ impl Payload {
     }
 
     /// The additional measures of each App of `sample`, which are the ones the second before
-    /// holds for the App where that second read the same. One pass over the Apps of the second
-    /// before finds each App, since both lists ascend by key.
+    /// holds for the App where that second read the same.
     fn capture_with_names_apps(
         sample: &Sample,
         budget: &Arc<ByteBudget>,
         previous: &Previous<'_>,
     ) -> Result<Vec<Arc<Shared<AppDetails>>>, Missing> {
-        let previous_details = previous.payload.map_or(&[][..], |payload| &payload.apps);
         let mut apps = Vec::with_capacity(sample.apps().len());
         let mut previous_index = 0;
         for app in sample.apps() {
@@ -600,14 +598,8 @@ impl Payload {
                 disk_written_bytes: app.disk_written_bytes,
                 footprint_bytes: app.footprint_bytes,
             };
-            let key = &app.key;
-            let held = super::apps::previous_app(
-                key.kind,
-                &key.bytes,
-                previous.app_rows,
-                &mut previous_index,
-            )
-            .and_then(|index| previous_details.get(index));
+            let held =
+                Self::previous_details(previous, &app.key.bytes, app.key.kind, &mut previous_index);
             apps.push(Shared::share(details, held, budget)?);
         }
 
@@ -615,9 +607,7 @@ impl Payload {
     }
 
     /// The row of each process of `sample`, which is the row of `previous_rows` where that
-    /// second read the same. One pass over `previous_rows` finds each process, since both lists
-    /// ascend by pid and then the creation's unique id, the order the packer asserts of every
-    /// second it packs.
+    /// second read the same.
     fn capture_with_names_rows(
         sample: &Sample,
         names: &ProcessNames,
@@ -632,15 +622,82 @@ impl Payload {
                 .as_ref()
                 .map(|name| names.name(name, additions));
             let row = ProcessRow::capture(process, name);
-            previous_index += previous_rows[previous_index..]
-                .iter()
-                .take_while(|shared| shared.row.pid < row.pid)
-                .count();
-            let held = previous_rows.get(previous_index);
+            let held = Self::previous_row(previous_rows, row.pid, &mut previous_index);
             rows.push(Shared::share(row, held, names.budget())?);
         }
 
         Ok(rows)
+    }
+
+    /// Takes from `previous`, the second before, each process row and each App's additional
+    /// measures that read the same there, as a capture handed `previous` shares them, for a
+    /// payload captured apart from the second before it. `app_rows` are this second's App rows,
+    /// in the order of its App details.
+    pub(in crate::store) fn share_with(&mut self, app_rows: &[AppRow], previous: &AppsSecond) {
+        let previous = Previous::of(Some(previous));
+        let Some(held) = previous.payload else {
+            return;
+        };
+        let ProcessRows::Plain { rows, .. } = &mut self.rows else {
+            unreachable!("a capture holds rows of its own");
+        };
+        let previous_rows = held.plain_rows();
+        let mut previous_index = 0;
+        for row in rows.iter_mut() {
+            if let Some(shared) =
+                Self::previous_row(previous_rows, row.row.pid, &mut previous_index)
+                && shared.row == row.row
+            {
+                *row = Arc::clone(shared);
+            }
+        }
+
+        assert_eq!(self.apps.len(), app_rows.len());
+        let mut previous_index = 0;
+        for (details, app) in self.apps.iter_mut().zip(app_rows) {
+            let found = Self::previous_details(
+                &previous,
+                &app.name.bytes,
+                app.name.kind,
+                &mut previous_index,
+            );
+            if let Some(shared) = found
+                && shared.row == details.row
+            {
+                *details = Arc::clone(shared);
+            }
+        }
+    }
+
+    /// The row of `previous_rows`, the second before's, that holds the process `pid` names if
+    /// the second before held it, found from `previous_index` on, where it leaves the place it
+    /// reached. One pass over `previous_rows` finds each process of a second, since both lists
+    /// ascend by pid and then the creation's unique id, the order the packer asserts of every
+    /// second it packs.
+    fn previous_row<'a>(
+        previous_rows: &'a [Arc<Shared<ProcessRow>>],
+        pid: i32,
+        previous_index: &mut usize,
+    ) -> Option<&'a Arc<Shared<ProcessRow>>> {
+        *previous_index += previous_rows[*previous_index..]
+            .iter()
+            .take_while(|shared| shared.row.pid < pid)
+            .count();
+        previous_rows.get(*previous_index)
+    }
+
+    /// The additional measures `previous`, the second before, holds for the App the key of
+    /// `kind` over `bytes` names, found from `previous_index` on, where it leaves the place it
+    /// reached. One pass over the Apps of the second before finds each App of a second, since
+    /// both lists ascend by key.
+    fn previous_details<'a>(
+        previous: &Previous<'a>,
+        bytes: &[u8],
+        kind: crate::live_app_response::KeyKind,
+        previous_index: &mut usize,
+    ) -> Option<&'a Arc<Shared<AppDetails>>> {
+        let index = super::apps::previous_app(kind, bytes, previous.app_rows, previous_index)?;
+        previous.payload?.apps.get(index)
     }
 
     /// The App index of each process of `sample`, in the sample's order.

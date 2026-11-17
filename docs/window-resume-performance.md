@@ -20,6 +20,19 @@ and nothing is read. If the writer overwrites an admitted checkpoint during cons
 Store withholds that View and switches once to reading the sealed minutes. A completed pinned window keeps its selection and leaves live
 ingestion parked.
 
+A launch reads the same way in its history, the sealed minutes older than the one it selects
+to show first, and hands over one View once that history is installed. It reads a few of
+those minutes at once, each on a thread of its own through the witness it found them by, and
+decodes each later one on a thread of its own from the last frame of the minute before it.
+The Store's thread installs them in order, and each second it installs shares the readings
+that repeat the second before it, so the history holds what a launch of one minute at a time
+holds. A minute whose decoding began from another seed than the one the minute before it left
+is decoded again on the Store's thread. A group that runs short of memory goes on at once one
+minute at a time. A minute refused, or changed since the launch found it before its thread
+checked it, stops the launch at that minute, as a launch of one minute at a time does. A
+minute that changes once its thread checked it fails the launch at the check of every minute
+before the launch completes.
+
 Overview waits for the Store instead of asking the legacy page reader to load the
 same period. Initial bootstrap, incomplete histories and unavailable Store data retain
 the page-reader path, and so does every reading of the other pages but the chart by App

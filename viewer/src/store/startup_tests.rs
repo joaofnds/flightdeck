@@ -316,7 +316,8 @@ fn staged_history_then_a_clock_set_back_leave_the_leaders_of_the_seconds_after_i
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
-    let mut startup = super::recording::staged::Startup::new();
+    // A step of one minute lets the native second arrive while the history still owes one.
+    let mut startup = super::recording::staged::Startup::one_minute_a_step();
     let input = super::recording::staged::Input {
         root: &fixture.root,
         budget: &budget,

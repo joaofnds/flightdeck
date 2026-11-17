@@ -5,6 +5,9 @@ use crate::store::startup_tests::usage;
 use crate::store::{Buffers, MachineSecond, SampledSecond, Span, StartupState};
 use persistence::work::ingestion::{Event, Key, Kind, Purpose, Trace};
 
+#[path = "startup_history_tests.rs"]
+mod history;
+
 #[test]
 fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
     // Goal: a reader holding a recent second's buffer stops no install, even with every App
@@ -14,6 +17,8 @@ fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
     // append two real ticks, then finish, compare the span's seconds with the retired one and
     // count each publication's derivations.
     let mut run = TurnStage::new(recent_fixture(), 6, RECENT_TICKS);
+    // A step of one minute lets the native ticks arrive while the history still owes one.
+    run.stage.startup.history_group_minutes_max = 1;
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -161,7 +166,17 @@ const FAR_OLDER_TICKS: &[[u64; 3]] = &[
 ];
 impl TurnStage {
     fn new(fixture: Fixture, recent_capacity: usize, ticks: &'static [[u64; 3]]) -> Self {
-        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+        Self::under(fixture, recent_capacity, ticks, 256 * 1024 * 1024)
+    }
+
+    /// A stage as `new` makes it, whose budget holds `bytes`.
+    fn under(
+        fixture: Fixture,
+        recent_capacity: usize,
+        ticks: &'static [[u64; 3]],
+        bytes: usize,
+    ) -> Self {
+        let budget = Arc::new(ByteBudget::new(bytes));
         let mut stage = GuardStage::new(&fixture, &budget);
         stage.held.span = Span::new(
             recent_capacity,

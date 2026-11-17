@@ -375,6 +375,20 @@ impl AppsSecond {
         self.totals = Totals::default();
     }
 
+    /// Takes from `previous`, the second before, the name of each App it holds and each process
+    /// row and App's additional measures that read the same there, as `fill` and the payload's
+    /// capture take them when they are handed `previous`, for a second captured apart from the
+    /// second before it.
+    pub(in crate::store) fn share_with(&mut self, previous: &Self) {
+        self.take_names(Some(previous));
+        if let Ok(processes) = &mut self.processes {
+            let Some(payload) = Arc::get_mut(processes) else {
+                unreachable!("a second captured apart holds the only reference to its payload");
+            };
+            payload.share_with(self.apps.as_slice(), previous);
+        }
+    }
+
     /// Holds each App of `sample`. An App that `previous` holds keeps the name it holds there, so
     /// the store keeps one name for every second of an App.
     pub(super) fn fill(

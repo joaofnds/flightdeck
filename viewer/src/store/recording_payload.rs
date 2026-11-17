@@ -572,13 +572,13 @@ pub(super) struct Decoder {
 /// publication of the frame it keeps, where it keeps one, and the run of the machine readings it
 /// keeps, where it keeps them. Two seeds of one read that agree on it hold the same.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct SeedKey {
+pub(super) struct SeedKey {
     predecessor: Option<(RunIdentity, u64)>,
     previous_run: Option<RunIdentity>,
 }
 
 impl Decoder {
-    fn seed_key(&self) -> SeedKey {
+    pub(super) fn seed_key(&self) -> SeedKey {
         SeedKey {
             predecessor: self.predecessor.as_ref().map(|before| {
                 let (endpoint, _) = before.previous();
