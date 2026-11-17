@@ -132,8 +132,9 @@ pub struct LiveDashboard {
     /// Room to choose the Apps the charts by App drawn from `store_view` draw on lines of their
     /// own.
     leaders: viewer::store::Leaders,
-    /// The last live reading of each page the reader has left, shown again at once when the
-    /// page is opened while the worker reads a fresh one. At most one for each route.
+    /// The last reading of each page the user left while it followed the newest second, shown
+    /// again at once when the page is opened while the worker reads a fresh one. At most one for
+    /// each route.
     visited: std::collections::BTreeMap<String, Box<crate::live_acceptance::Presentation>>,
     pub panels: Vec<Rc<Panel>>,
     pub generation: u64,
@@ -1111,7 +1112,8 @@ impl LiveDashboard {
         cx.notify();
     }
 
-    /// Keeps the live reading of the page being left, so a page opened again shows it at once.
+    /// Keeps the reading of the page being left while it follows the newest second, so a page
+    /// opened again shows it at once.
     fn keep_page(&mut self) {
         if self.request.second.is_some() || self.preview.is_some() {
             return;
@@ -1133,8 +1135,21 @@ impl LiveDashboard {
         assert!(self.visited.len() <= ROUTES.len());
     }
 
-    /// Lets go of every page kept, since each holds readings of the recording the app leaves.
-    pub(crate) fn forget_kept_pages(&mut self) {
+    /// Lets go of what the page holds of the recording the app leaves: the user's choices on
+    /// it, a hold, and every page kept, since each names readings the opened recording lacks.
+    pub(crate) fn accept_recording_reset(&mut self) {
+        self.expanded = None;
+        self.request.executable = None;
+        self.executables.clear();
+        self.hidden.clear();
+        self.chart_hover = None;
+        self.preview = None;
+        self.hold_drop();
+        // The new recording's page follows its newest second, so nothing stays pinned.
+        self.pinning = Pinning::Unpinned;
+        self.picker = None;
+        self.cpu_inspection = None;
+        self.native.alternative_page = 0;
         self.visited.clear();
     }
 
@@ -1167,8 +1182,8 @@ impl LiveDashboard {
         self.rebuild();
         self.submit();
         self.switch_route_hold();
-        // A page kept while the page followed the live Mac ends where it was left, so the page of
-        // a selected or held second is read again.
+        // A page kept while the page followed the newest second ends where it was left, so the
+        // page of a selected or held second is read again.
         let kept = if self.request.second.is_none() {
             self.visited.remove(route)
         } else {

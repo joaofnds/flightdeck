@@ -478,20 +478,7 @@ impl LiveDashboard {
             self.native.source = candidate.worker.mode();
             let old = std::mem::replace(&mut self.worker, candidate.worker);
             self.generation = candidate.generation;
-            self.expanded = None;
-            self.request.executable = None;
-            self.executables.clear();
-            self.hidden.clear();
-            self.chart_hover = None;
-            self.preview = None;
-            self.hold_drop();
-            // The new recording's page follows its newest second, so nothing stays pinned.
-            self.pinning = crate::live_dashboard::Pinning::Unpinned;
-            self.picker = None;
-            self.cpu_inspection = None;
-            self.native.alternative_page = 0;
-            self.forget_kept_pages();
-
+            self.accept_recording_reset();
             self.accept_presentation(presentation);
 
             self.native.notice = Some("Recording opened".into());
