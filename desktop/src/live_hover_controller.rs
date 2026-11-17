@@ -51,7 +51,12 @@ impl LiveDashboard {
         origin: Origin,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.snapshot.is_none() {
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        // A page opened again names no reading of its charts' seconds until its next reading,
+        // so a hover of one is ignored until the pointer moves after that reading arrives.
+        if target.identity.is_none() && snapshot.points_dropped {
             return false;
         }
 

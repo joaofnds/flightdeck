@@ -95,6 +95,19 @@ pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
     }
 }
 
+/// Takes the points of the charts out of `snapshot`, the reading of the page the user leaves,
+/// and leaves the selected second's own reading and the window its charts end in. A reading
+/// left a second time before its page's next reading holds no points but still waits for them.
+fn switch_route_drop_points(snapshot: &mut Snapshot) {
+    snapshot.selection.edit(|selection| {
+        if let Some(fields) = selection.as_object_mut() {
+            drop(fields.remove("trends"));
+            drop(fields.remove("earlier_trends"));
+        }
+    });
+    snapshot.points_dropped = true;
+}
+
 /// Spreads `view` across `panel` where it is drawn against the clock.
 fn zoom_panel(panel: &mut Rc<Panel>, view: crate::chart_axes::TimeWindow) {
     let Some(window) = panel.window else {
@@ -197,6 +210,9 @@ pub struct LiveDashboard {
 pub(crate) struct WindowState {
     request: Request,
     snapshot: Option<Box<Snapshot>>,
+    /// The charts the page drew from a reading whose points were dropped, which the window
+    /// opened again draws until the page's next reading.
+    panels: Vec<Rc<Panel>>,
     range: crate::time_range::Range,
     pinning: Pinning,
     hidden: Vec<String>,
@@ -440,10 +456,20 @@ impl LiveDashboard {
         // A held second keeps the View its charts were drawn from, and a window that follows
         // the live Mac takes the store's newest View once it opens again.
         let store_view = hold.as_ref().and_then(|_| self.store_view.take());
+        let snapshot = self.snapshot.take();
+        let panels = if snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.points_dropped)
+        {
+            std::mem::take(&mut self.panels)
+        } else {
+            Vec::new()
+        };
 
         WindowState {
             request: self.request.clone(),
-            snapshot: self.snapshot.take(),
+            snapshot,
+            panels,
             range: self.range,
             pinning: self.pinning,
             hidden: self.hidden.clone(),
@@ -462,7 +488,11 @@ impl LiveDashboard {
         dashboard.store_view = state.store_view;
         if let Some(snapshot) = state.snapshot {
             dashboard.generation = snapshot.generation;
-            dashboard.accept(snapshot);
+            if snapshot.points_dropped {
+                dashboard.restore_drawn(snapshot, state.panels);
+            } else {
+                dashboard.accept(snapshot);
+            }
         }
         if !dashboard.pinned_reading_complete() {
             if dashboard.can_resume_from_store(cx) {
@@ -473,6 +503,21 @@ impl LiveDashboard {
         }
 
         dashboard
+    }
+
+    /// Shows `snapshot`, whose points were dropped, over `panels`, the charts the closed window
+    /// drew from it.
+    fn restore_drawn(&mut self, snapshot: Box<Snapshot>, panels: Vec<Rc<Panel>>) {
+        match crate::live_acceptance::Presentation::prepare(&self.request, snapshot) {
+            Ok(mut presentation) => {
+                presentation.panels = panels;
+                self.accept_presentation(presentation);
+            }
+            Err(error) => {
+                self.clear_presentation();
+                self.error = Some(error);
+            }
+        }
     }
 
     fn pinned_reading_complete(&self) -> bool {
@@ -536,7 +581,7 @@ impl LiveDashboard {
 
         self.snapshot
             .as_ref()
-            .is_some_and(|snapshot| !snapshot.histories_pending)
+            .is_some_and(|snapshot| !snapshot.awaits_reading())
     }
 
     fn new_request(route: String) -> Request {
@@ -1092,6 +1137,11 @@ impl LiveDashboard {
         self.settings.open = false;
         if self.request.route != route {
             self.sections.reset();
+            // The points of the page's charts are most of its reading, and the charts it keeps
+            // already draw them.
+            if let Some(snapshot) = &mut self.snapshot {
+                switch_route_drop_points(snapshot);
+            }
         }
         self.keep_page();
         self.chart_hover = None;
@@ -1782,6 +1832,7 @@ mod selection_tests {
             app_attribution_history: None,
             overview_app_histories: None,
             histories_pending: false,
+            points_dropped: false,
             process_history: None,
             rankings: None,
             app_ranks: None,
@@ -1897,6 +1948,103 @@ mod selection_tests {
         let shown = dashboard.snapshot.as_ref().unwrap();
         assert_eq!(shown.selection["second"], 1000);
         assert_eq!(dashboard.request.route, "overview");
+    }
+
+    /// Readings of the live Mac whose charts hold the newest two seconds and an older reading.
+    fn charted_readings() -> Box<Snapshot> {
+        use crate::live_store_fixtures::{reading_at, trend_point};
+
+        let mut readings = crate::live_store_page_fixtures::readings(&[
+            reading_at(9_999, 0),
+            reading_at(10_000, 0),
+        ]);
+        let older = trend_point(&reading_at(8_000, 0));
+        readings.selection.legacy_mut().unwrap()["earlier_trends"] = json!([older]);
+        readings
+    }
+
+    #[test]
+    fn a_page_left_while_it_follows_the_live_mac_keeps_none_of_its_chart_points() {
+        // Goal: a page the user leaves while it follows the live Mac keeps a small reading, since
+        // the points of its charts are most of a reading and the charts it keeps already draw
+        // them. Method: show readings whose charts hold recent and older points, open another
+        // page, then look at the reading kept for the page left.
+        let mut dashboard = dashboard();
+        dashboard.accept(charted_readings());
+
+        dashboard.switch_route("cpu");
+
+        let kept = &dashboard.visited["overview"].snapshot.selection;
+        assert_eq!(kept.get("trends"), None);
+        assert_eq!(kept.get("earlier_trends"), None);
+    }
+
+    #[test]
+    fn a_page_opened_again_draws_the_charts_it_drew_when_it_was_left() {
+        // Goal: a page the user returns to draws at once exactly the charts it drew when the user
+        // left it, although it kept none of their points. Method: show readings whose charts hold
+        // points, open another page and return with no reply from the worker between, then
+        // compare the charts with those drawn before leaving.
+        let mut dashboard = dashboard();
+        dashboard.accept(charted_readings());
+        let drawn: Vec<Panel> = dashboard
+            .panels
+            .iter()
+            .map(|panel| (**panel).clone())
+            .collect();
+        assert!(!drawn.is_empty());
+
+        dashboard.switch_route("cpu");
+        dashboard.switch_route("overview");
+
+        let shown: Vec<Panel> = dashboard
+            .panels
+            .iter()
+            .map(|panel| (**panel).clone())
+            .collect();
+        assert_eq!(shown, drawn);
+    }
+
+    #[test]
+    fn a_page_left_while_it_follows_the_live_mac_keeps_none_of_the_chart_points_the_store_admitted()
+    {
+        // Goal: the reading a page keeps when the user leaves it holds none of its charts' points
+        // when the Store admitted that reading, as every reading of the live Mac is. Method: show
+        // Overview's reading of a sealed recording read through the Store, open another page, then
+        // look at the reading kept for Overview.
+        let mut dashboard = dashboard();
+        dashboard.accept(crate::live_source::tests::rankings::stored_overview_reading());
+        assert!(
+            dashboard
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .selection
+                .get("trends")
+                .is_some()
+        );
+
+        dashboard.switch_route("cpu");
+
+        let kept = &dashboard.visited["overview"].snapshot.selection;
+        assert!(matches!(kept, crate::live_source::Presentation::Store(_)));
+        assert_eq!(kept.get("trends"), None);
+        assert_eq!(kept.get("earlier_trends"), None);
+    }
+
+    #[test]
+    fn a_page_opened_again_from_its_own_entry_keeps_its_chart_points() {
+        // Goal: choosing the page already shown leaves nothing, so the page keeps its charts'
+        // points and its hovers and steps go on as before. Method: show readings whose charts hold
+        // points, choose the page shown, then look at the page's reading.
+        let mut dashboard = dashboard();
+        dashboard.accept(charted_readings());
+
+        dashboard.switch_route("overview");
+
+        let selection = &dashboard.snapshot.as_ref().unwrap().selection;
+        assert!(selection.get("trends").is_some());
+        assert!(selection.get("earlier_trends").is_some());
     }
 
     #[test]

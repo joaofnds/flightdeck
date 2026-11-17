@@ -416,6 +416,67 @@ fn reopening_a_completed_live_overview_waits_for_the_store_without_a_second_read
 }
 
 #[gpui::test]
+fn an_overview_opened_again_and_shown_again_over_its_installed_store_reads_its_page(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an Overview opened again, whose window macOS hides and shows again before its next
+    // reading, asks the reader for that reading rather than wait for the store's View, since the
+    // reading it kept holds none of its charts' points and only the reader brings them. Method:
+    // answer the window's first request, install a real store, open the CPU page and Overview
+    // again, hide and show the window, and step the reader's mailbox.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = recording.start_store();
+    let mut window = VisibilityHarness::open(cx);
+    window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
+    window.tick();
+    window
+        .cx
+        .update(|cx| crate::live_dashboard::install_store(store, cx));
+    window.open_overview_again();
+    window.change(WindowVisibility::Hidden);
+
+    window.change(WindowVisibility::Visible);
+
+    assert_eq!(window.reader.receive(), (Received::Taken, true));
+}
+
+#[gpui::test]
+fn an_overview_opened_again_and_reopened_over_its_installed_store_reads_its_page(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an Overview opened again, whose window is closed and opened again before its next
+    // reading, asks the reader for that reading rather than resume from the store, since the
+    // reading it kept holds none of its charts' points and only the reader brings them. Method:
+    // answer the window's first request, install a real store, open the CPU page and Overview
+    // again, move the page's retained state and idle reader into a new page, then whether the
+    // new page waits on a reply from the reader.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = recording.start_store();
+    let mut window = VisibilityHarness::open(cx);
+    window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
+    window.tick();
+    window
+        .cx
+        .update(|cx| crate::live_dashboard::install_store(store, cx));
+    window.open_overview_again();
+
+    let (worker, state) = window
+        .window
+        .update(&mut window.cx, |page, _, _| {
+            let state = page.window_state();
+            (page.worker.hand_over().unwrap().unwrap(), state)
+        })
+        .unwrap();
+    let reopened = window
+        .cx
+        .update(|cx| cx.new(|cx| LiveDashboard::restore(worker, state, cx)));
+
+    assert!(window.cx.update(|cx| reopened.read(cx).reply_pending));
+}
+
+#[gpui::test]
 fn an_overview_awaiting_its_app_histories_keeps_its_reader_reading(cx: &mut TestAppContext) {
     // Goal: an Overview drawn from the store's View keeps its reader reading the App histories
     // its first readings leave pending, whose read a resting reader drops.
@@ -645,6 +706,7 @@ impl VisibilityHarness {
             app_ranks: None,
             app_parts: None,
             histories_pending,
+            points_dropped: false,
             read_ms: 0.0,
         });
         crate::live_source::worker_publish(
@@ -673,6 +735,17 @@ impl VisibilityHarness {
         self.window
             .update(&mut self.cx, |dashboard, _, cx| {
                 dashboard.set_reading_target("visibility".into(), target, origin, cx);
+            })
+            .unwrap();
+    }
+
+    /// Leaves Overview for the CPU page and opens Overview again, whose next reading is still to
+    /// come.
+    fn open_overview_again(&mut self) {
+        self.window
+            .update(&mut self.cx, |dashboard, _, cx| {
+                dashboard.navigate("cpu", cx);
+                dashboard.navigate("overview", cx);
             })
             .unwrap();
     }

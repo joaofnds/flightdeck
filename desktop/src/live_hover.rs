@@ -155,7 +155,8 @@ impl Preview {
             }
         }
         let matched = target.matches(&snapshot.selection["selected"]);
-        let complete = resident_complete(&request.route, matched, &reading);
+        let complete =
+            resident_complete(&request.route, matched, snapshot.points_dropped, &reading);
 
         Self {
             source: gpui::SharedString::default(),
@@ -268,6 +269,7 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
         overview_app_histories: snapshot.overview_app_histories.clone(),
         process_history: snapshot.process_history.clone(),
         histories_pending: snapshot.histories_pending,
+        points_dropped: false,
         rankings: resident_rankings(snapshot, target),
         app_ranks: None,
         app_parts: None,
@@ -277,9 +279,13 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
 
 /// Whether the preview holds every reading of its target the page shows, so the page reads
 /// nothing for it.
-fn resident_complete(route: &str, matched: bool, reading: &Snapshot) -> bool {
+fn resident_complete(route: &str, matched: bool, points_dropped: bool, reading: &Snapshot) -> bool {
     if matched {
         return true;
+    }
+    // The summary of every second but the selected one went with the points of the charts.
+    if points_dropped {
+        return false;
     }
 
     if crate::live_source::route_ranks_apps(route) {

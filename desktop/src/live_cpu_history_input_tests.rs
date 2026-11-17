@@ -171,6 +171,107 @@ fn pressing_on_the_cells_leaves_the_plot_unfocused(cx: &mut TestAppContext) {
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_hover_on_the_history_of_a_page_opened_again_before_its_reading_shows_its_observation(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the CPU history names each observation it draws, so a hover on it shows the hovered
+    // observation on a page opened again before its next reading, as before the page was left,
+    // although the reading the page kept holds none of its charts' points. Method: the CPU page
+    // following the live Mac over the history, Overview, the CPU page again, a hover over the
+    // interval drawn at 1000.9, then the second shown and the observation inspected.
+    let mut harness = CPUHistoryHarness::setup_following(cx);
+    harness.driver.open_cpu_again();
+
+    harness.driver.hover_at(1000 * NS + NS * 9 / 10);
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(1001));
+    assert_eq!(harness.driver.inspected_publication(), Some(2));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_the_history_of_a_page_opened_again_before_its_reading_pins_its_observation(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on the CPU history of a page opened again before its next reading pins the
+    // observation under the pointer, as it does before the page is left. Method: the CPU page
+    // following the live Mac over the history, Overview, the CPU page again, a click on the
+    // interval drawn at 1000.9, then the pinned second and the observation the page asks for.
+    let mut harness = CPUHistoryHarness::setup_following(cx);
+    harness.driver.open_cpu_again();
+
+    harness.driver.click_at(1000 * NS + NS * 9 / 10);
+
+    assert_eq!(harness.driver.pinned_second(), Some(1001));
+    let (_, identity) = harness.driver.requested_selection();
+    assert_eq!(identity.unwrap()["publication"], json!(2));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_on_the_history_of_a_page_opened_again_before_its_reading_reads_its_observation(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the reading a page kept when it was left lost every other observation's summary
+    // with its charts' points, so a hover on the CPU history of a page opened again before its
+    // next reading asks the reader for the hovered observation, although the kept ranks and CPU
+    // history hold the rest of its readings. Method: the CPU page following the live Mac over
+    // the history with the ranks of each observation it draws, Overview, the CPU page again, a
+    // hover over the interval drawn at 1000.9 and a tick of the hover, then the observation the
+    // reader was asked for.
+    let mut harness = CPUHistoryHarness::setup_following(cx);
+    harness.driver.keep_window_ranks();
+    harness.driver.open_cpu_again();
+
+    harness.driver.hover_at(1000 * NS + NS * 9 / 10);
+    harness.driver.tick_hover();
+
+    let asked = harness.driver.reader_asked_identity();
+    assert_eq!(
+        asked.map(|identity| identity["publication"].clone()),
+        Some(json!(2))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_on_the_history_of_a_page_opened_again_shows_the_reading_the_reader_answers(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the reader's answer to a hover on the CPU history of a page opened again before its
+    // next reading shows the hovered observation's reading in the CPU readouts. Method: the CPU
+    // page following the live Mac over the history with the ranks of each observation it draws,
+    // Overview, the CPU page again, a hover over the interval drawn at 1000.9 and a tick of the
+    // hover, the reader's answer, then the readouts against that observation's reading.
+    let mut harness = CPUHistoryHarness::setup_following(cx);
+    harness.driver.keep_window_ranks();
+    harness.driver.open_cpu_again();
+    harness.driver.hover_at(1000 * NS + NS * 9 / 10);
+    harness.driver.tick_hover();
+
+    harness.driver.answer_hover(hovered_observation_selection());
+
+    let expected = crate::live_views::summary::cards("cpu", &hovered_observation_selection());
+    assert_eq!(
+        harness.driver.readout_texts(),
+        crate::live_store_page_fixtures::texts(&expected)
+    );
+    harness.teardown();
+}
+
+/// The reader's reading of publication 2, the observation drawn at 1000.9, whose CPU was 13%
+/// busy.
+fn hovered_observation_selection() -> Value {
+    let (payload, _) = super::tests::fixture();
+    let observation = payload["observations"][1]["observation"].clone();
+    let mut summary = observation.clone();
+    summary["cpu_percent"] = json!(13.0);
+
+    json!({"second":1001,"context_last_second":1001,"selected":observation,
+        "summary":summary,"trends":[]})
+}
+
 struct CPUHistoryHarness {
     driver: CPUHistoryDriver,
 }
@@ -194,6 +295,23 @@ impl CPUHistoryHarness {
             driver: CPUHistoryDriver { view, context },
         };
         harness.driver.seed_history();
+
+        harness
+    }
+
+    /// Opens the CPU page following the live Mac over the CPU history.
+    fn setup_following(cx: &mut TestAppContext) -> Self {
+        let mut harness = Self::setup(cx);
+        harness
+            .driver
+            .view
+            .update(&mut harness.driver.context, |dashboard, _| {
+                dashboard.request.second = None;
+                dashboard.request.identity = None;
+            });
+        harness
+            .driver
+            .accept_history(CPUHistoryDriver::seed_history_fixture());
 
         harness
     }
@@ -258,10 +376,18 @@ impl CPUHistoryDriver {
     }
 
     fn install_history(&mut self, fixture: CPUHistoryFixture) {
+        let selected = fixture.selection["selected"].clone();
+        self.view.update(&mut self.context, |dashboard, _| {
+            dashboard.request.second = Some(1001);
+            dashboard.request.identity = Some(selected);
+        });
+        self.accept_history(fixture);
+    }
+
+    /// Hands the page the reader's answer to its request, the readings of `fixture`.
+    fn accept_history(&mut self, fixture: CPUHistoryFixture) {
         let history = Arc::new(CPUHistory::decode(fixture.payload, &fixture.selection).unwrap());
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.request.second = Some(1001);
-            dashboard.request.identity = Some(fixture.selection["selected"].clone());
             dashboard.accept(Box::new(Snapshot {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
@@ -277,6 +403,7 @@ impl CPUHistoryDriver {
                 app_attribution_history: None,
                 overview_app_histories: None,
                 histories_pending: false,
+                points_dropped: false,
                 process_history: None,
                 rankings: None,
                 app_ranks: None,
@@ -421,6 +548,86 @@ impl CPUHistoryDriver {
     fn requested_selection(&self) -> (Option<u64>, Option<Value>) {
         self.view.read_with(&self.context, |dashboard, _| {
             (dashboard.request.second, dashboard.request.identity.clone())
+        })
+    }
+
+    /// Leaves the CPU page for Overview and opens the CPU page again, whose next reading is
+    /// still to come.
+    fn open_cpu_again(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.navigate("overview", cx);
+            dashboard.navigate("cpu", cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Keeps the ranks of each observation of a sealed recording's window beside the page's
+    /// readings, whose observations share the run and boot of the history's.
+    fn keep_window_ranks(&mut self) {
+        let ranks = crate::live_source::tests::rankings::kept_window_ranks();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.snapshot.as_mut().unwrap().app_ranks = Some(ranks);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn tick_hover(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// The observation the window's last command asked the reader for.
+    fn reader_asked_identity(&self) -> Option<Value> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.worker.sent_request()?.identity
+        })
+    }
+
+    /// Hands the hover the reader's answer to its read, a reading whose selection is
+    /// `selection`.
+    fn answer_hover(&mut self, selection: Value) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let generation = dashboard.preview.as_ref().unwrap().generation.unwrap();
+            let reply = Box::new(Snapshot {
+                generation,
+                catalog: json!({"first_second":1000,"last_second":1001}),
+                selection: crate::live_source::Presentation::Legacy(selection),
+                apps: None,
+                detail: None,
+                history: None,
+                cpu_detail: None,
+                cpu_history: None,
+                resident_history: None,
+                app_attribution_history: None,
+                overview_app_histories: None,
+                histories_pending: false,
+                points_dropped: false,
+                process_history: None,
+                rankings: None,
+                app_ranks: None,
+                app_parts: None,
+                read_ms: 0.0,
+            });
+            assert!(dashboard.take_update(crate::live_source::Update::Ready(reply)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// The label, reading, note and colour of each of the readouts the page shows.
+    fn readout_texts(&self) -> Vec<(String, String, String, u32)> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            crate::live_store_page_fixtures::texts(&dashboard.summary_cards())
+        })
+    }
+
+    /// The second of the reading a hover or a step shows, if one shows.
+    fn shown_reading_second(&self) -> Option<u64> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.reading_target().map(|target| target.second)
         })
     }
 

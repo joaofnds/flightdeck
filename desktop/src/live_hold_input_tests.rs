@@ -2782,7 +2782,334 @@ fn a_tab_passes_over_the_row_of_a_hidden_line(cx: &mut TestAppContext) {
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_hover_on_a_page_opened_again_before_its_reading_shows_what_the_page_kept(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page opened again keeps none of its charts' points until its next reading, so a
+    // hover meanwhile leaves the readouts on the second the page kept rather than show a second
+    // it cannot read. Method: Memory over the hour's newest two seconds, the CPU page, Memory
+    // again, a hover a second before the newest on the memory chart, then the readouts against
+    // those Memory showed when it was left.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    let left = harness.driver.readout_texts();
+    harness.driver.open_memory_again();
+
+    harness
+        .driver
+        .hover_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    assert_eq!(harness.driver.readout_texts(), left);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_on_a_page_left_twice_before_its_reading_shows_what_the_page_kept(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page left again before its next reading still waits for the points it dropped the
+    // first time, so a hover leaves the readouts on the second the page kept. Method: Memory over
+    // the hour's newest two seconds, the CPU page and Memory again twice with no reply between,
+    // a hover a second before the newest, then the readouts against those Memory showed first.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    let left = harness.driver.readout_texts();
+    harness.driver.open_memory_again();
+    harness.driver.open_memory_again();
+
+    harness
+        .driver
+        .hover_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    assert_eq!(harness.driver.readout_texts(), left);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_on_a_page_opened_again_shows_the_hovered_second_once_its_reading_arrives(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the next reading of a page opened again brings its charts' points back, so a hover
+    // shows the second under the pointer as it did before the page was left. Method: Memory over
+    // the hour's newest two seconds, the CPU page, Memory again and its next reading, a hover a
+    // second before the newest on the memory chart, then the second the readouts show and their
+    // text against that second's reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    harness.driver.open_memory_again();
+    harness.driver.show_memory_reading();
+
+    harness
+        .driver
+        .hover_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HOUR_NEWEST - 1));
+    let hovered = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
+    let expected = summary::cards("memory", &hovered);
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_a_page_opened_again_before_its_reading_shows_no_reading_of_another_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on a page opened again before its next reading holds the clicked second
+    // and shows no reading for it until the read of the page the hold sends answers, rather
+    // than the reading of the second the page kept. Method: Memory over the hour's newest two
+    // seconds, the CPU page, Memory again, a click a second before the newest on the memory
+    // chart, then the readouts against those of a second with no reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    harness.driver.open_memory_again();
+
+    harness
+        .driver
+        .click_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    let expected = summary::cards("memory", &serde_json::Value::Null);
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_a_page_opened_again_shows_the_clicked_second_once_the_page_is_read(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the reader's answer to the read of the page a click on a page opened again sends
+    // shows the clicked second's reading. Method: Memory over the hour's newest two seconds,
+    // the CPU page, Memory again, a click a second before the newest on the memory chart, the
+    // reader's answer, then the readouts against that second's reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    harness.driver.open_memory_again();
+    harness
+        .driver
+        .click_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    harness.driver.show_memory_reading();
+
+    let clicked = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
+    let expected = summary::cards("memory", &clicked);
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn an_arrow_step_on_a_page_opened_again_before_its_reading_shows_what_the_page_kept(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an arrow step on a page opened again before its next reading leaves the readouts on
+    // the second the page kept, since the kept reading lacks the second before it. Method:
+    // Memory over the hour's newest two seconds, the CPU page, Memory again, a step a second
+    // left on the memory chart, then the readouts against those Memory showed when it was left.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    let left = harness.driver.readout_texts();
+    harness.driver.open_memory_again();
+
+    harness.driver.step_left_on_memory();
+
+    assert_eq!(harness.driver.readout_texts(), left);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_peak_picked_on_a_page_opened_again_before_its_reading_reads_the_page(cx: &mut TestAppContext) {
+    // Goal: the Data table of a page opened again lists what the kept charts draw, and picking
+    // its highest reading before the page's next reading holds that second and reads the page
+    // whose context ends where the charts were drawn, since the reading the page kept lacks the
+    // peak's own. Method: Memory over the hour's newest two seconds, whose memory peaks a second
+    // before the newest, the CPU page, Memory again, the Total row of the memory chart's table
+    // picked, then the second the reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness
+        .driver
+        .show_memory_reading_peaking_before_its_newest();
+    harness.driver.open_memory_again();
+    harness.driver.click_control("chart-data:live-memory");
+
+    harness
+        .driver
+        .click_control("chart-maximum:live-memory:Total");
+
+    let page = HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS;
+    assert_eq!(harness.driver.reader_asked_second(), Some(page));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_peak_picked_on_a_page_opened_again_shows_its_reading_once_the_page_is_read(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the reader's answer to the read of the page a peak picked on a page opened again
+    // sends shows the peak's reading. Method: Memory over the hour's newest two seconds, whose
+    // memory peaks a second before the newest, the CPU page, Memory again, the Total row of the
+    // memory chart's table picked, the reader's answer, then the readouts against the peak's
+    // reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness
+        .driver
+        .show_memory_reading_peaking_before_its_newest();
+    harness.driver.open_memory_again();
+    harness.driver.click_control("chart-data:live-memory");
+    harness
+        .driver
+        .click_control("chart-maximum:live-memory:Total");
+
+    harness
+        .driver
+        .show_memory_reading_peaking_before_its_newest();
+
+    let expected = summary::cards("memory", &summary_selection(&memory_peak()));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pause_on_a_page_opened_again_before_its_reading_holds_the_second_it_shows(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Pause on a page opened again before its next reading holds the second the page
+    // kept, whose own reading the kept reading still holds, and shows it. Method: Memory over
+    // the hour's newest two seconds, the CPU page, Memory again, Pause, then the second the
+    // page asks for and the readouts against those Memory showed when it was left.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    let left = harness.driver.readout_texts();
+    harness.driver.open_memory_again();
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.requested_second(), Some(HOUR_NEWEST));
+    assert_eq!(harness.driver.readout_texts(), left);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_after_pause_on_a_page_opened_again_shows_the_hovered_second_once_the_page_is_read(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Pause on a page opened again before its next reading reads the page again rather
+    // than the paused second alone, so its charts' points come back and a hover while paused
+    // shows the second under the pointer. Method: Memory over the hour's newest two seconds,
+    // the CPU page, Memory again, Pause, the reader's answer to the read Pause sent, a hover a
+    // second before the newest on the memory chart, then the second the readouts show.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    harness.driver.open_memory_again();
+    harness.driver.pause();
+    harness.driver.show_memory_reading();
+
+    harness
+        .driver
+        .hover_second_on("live-memory-plot", HOUR_NEWEST - 1);
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HOUR_NEWEST - 1));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_window_closed_over_a_page_opened_again_draws_the_charts_the_page_drew_when_it_was_left(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window closed and opened again before the next reading of a page opened again
+    // draws at once the charts the page drew when it was left, although the reading it kept
+    // holds none of their points. Method: Memory over the hour's newest two seconds, the CPU
+    // page, Memory again, the window closed and opened from what the app keeps of it, then the
+    // charts the page draws against those it drew before it was left.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    let drawn = harness.driver.drawn_panels();
+    assert!(!drawn.is_empty());
+    harness.driver.open_memory_again();
+
+    harness.driver.close_and_open_window();
+
+    assert_eq!(harness.driver.drawn_panels(), drawn);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn an_arrow_step_on_a_page_opened_again_shows_the_second_before_once_its_reading_arrives(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the next reading of a page opened again brings its charts' points back, so an arrow
+    // step shows the second before the one the page shows, as it did before the page was left.
+    // Method: Memory over the hour's newest two seconds, the CPU page, Memory again and its next
+    // reading, a step a second left on the memory chart, then the second the readouts show and
+    // their text against that second's reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness.driver.show_memory_reading();
+    harness.driver.open_memory_again();
+    harness.driver.show_memory_reading();
+
+    harness.driver.step_left_on_memory();
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HOUR_NEWEST - 1));
+    let stepped = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
+    let expected = summary::cards("memory", &stepped);
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+/// The second before the hour's newest, whose App memory is the most the two newest seconds
+/// hold.
+fn memory_peak() -> viewer::store::MachineSecond {
+    let mut peak = reading_at(HOUR_NEWEST - 1, 0);
+    peak.memory.as_mut().unwrap().app_bytes = Some(1 << 34);
+    peak
+}
+
 impl InputDriver {
+    /// Focuses Memory's chart with a right press, which selects no second, and steps it a
+    /// second left.
+    fn step_left_on_memory(&mut self) {
+        let bounds = self.context.debug_bounds("live-memory-plot").unwrap();
+        self.context
+            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context
+            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.press("left");
+        self.context.run_until_parked();
+    }
+
+    /// Hands Memory the reader's answer to its newest command, the hour's newest two seconds,
+    /// whose summary is the newest second's reading.
+    fn show_memory_reading(&mut self) {
+        let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        reply.selection.legacy_mut().unwrap()["summary"] = trend_point(&reading_at(HOUR_NEWEST, 0));
+        self.reply_to_last_request(reply);
+    }
+
+    /// Hands Memory the reader's answer to its newest command, the hour's newest two seconds,
+    /// whose App memory peaks at the older of them, with the newest second's reading as their
+    /// summary.
+    fn show_memory_reading_peaking_before_its_newest(&mut self) {
+        let mut reply = readings(&[memory_peak(), reading_at(HOUR_NEWEST, 0)]);
+        reply.selection.legacy_mut().unwrap()["summary"] = trend_point(&reading_at(HOUR_NEWEST, 0));
+        self.reply_to_last_request(reply);
+    }
+
+    /// The charts the page draws.
+    fn drawn_panels(&self) -> Vec<crate::data::Panel> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard
+                .panels
+                .iter()
+                .map(|panel| (**panel).clone())
+                .collect()
+        })
+    }
+
+    /// Leaves Memory for the CPU page and opens Memory again, whose next reading is still to
+    /// come.
+    fn open_memory_again(&mut self) {
+        self.navigate("cpu");
+        self.navigate("memory");
+    }
+
     /// Shows the page over the View of the hour and the worker's reply to its request, the
     /// readings of the hour's newest two seconds, following the newest second at the newest
     /// fifteen minutes.

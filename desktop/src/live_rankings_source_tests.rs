@@ -376,6 +376,14 @@ pub(crate) fn kept_window_ranks() -> std::sync::Arc<crate::live_source::RanksWin
     snapshot.app_ranks.unwrap()
 }
 
+/// The reading the Store admits for Overview following the newest second of a sealed recording,
+/// whose charts hold that recording's points.
+pub(crate) fn stored_overview_reading() -> Box<Snapshot> {
+    let recording = SealedRecording::with_ranked_apps();
+
+    recording.read(SealedRecording::request()).unwrap()
+}
+
 /// The ranks the first read of a newly opened page brings from a sealed recording whose
 /// minutes keep their App ranks, while its App histories wait for its next read, and whose
 /// observations share the run and boot of the input tests' snapshots.

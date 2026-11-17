@@ -137,7 +137,18 @@ pub struct Snapshot {
     /// The page's App histories, or the older tail its charts draw, are still being read, and
     /// a later snapshot carries them.
     pub histories_pending: bool,
+    /// The points of the reading's charts were dropped as the user left its page, whose charts
+    /// still draw them, and the page's next reading brings them again.
+    pub points_dropped: bool,
     pub read_ms: f64,
+}
+
+impl Snapshot {
+    /// Whether a later reading brings part of what the page draws, its App histories, the older
+    /// tail of its charts or their points.
+    pub fn awaits_reading(&self) -> bool {
+        self.histories_pending || self.points_dropped
+    }
 }
 
 pub enum Update {
@@ -1261,6 +1272,7 @@ fn reader_snapshot_owned(
         app_attribution_history: None,
         overview_app_histories: None,
         histories_pending: false,
+        points_dropped: false,
         process_history: None,
         rankings: None,
         app_ranks: None,

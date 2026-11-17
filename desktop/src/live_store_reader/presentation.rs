@@ -49,6 +49,15 @@ impl<T> Presentation<T> {
         }
     }
 
+    /// Edits the value in place, as `edited` does.
+    pub fn edit(&mut self, edit: impl FnOnce(&mut T))
+    where
+        T: Clone + Default,
+    {
+        let presentation = std::mem::replace(self, Self::Legacy(T::default()));
+        *self = presentation.edited(edit);
+    }
+
     /// Fixture mutations are allowed only for values created without a Store owner.
     #[cfg(test)]
     pub fn legacy_mut(&mut self) -> Option<&mut T> {

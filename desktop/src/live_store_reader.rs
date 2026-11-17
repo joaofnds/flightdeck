@@ -19,7 +19,7 @@ use viewer::store::{
     QuerySelection, QueryToken, QueryUnavailable,
 };
 
-use super::{Command, Context, Histories, Presentation, Reader, Shared, Snapshot, Update};
+use super::{Command, Context, Histories, Reader, Shared, Snapshot, Update};
 
 /// Steps of the worker, ten seconds of them at its pace, a page waits for the Store to answer it.
 /// Past them the saved minutes answer, or the limit on contexts says so, since a Store that cannot
@@ -582,9 +582,8 @@ fn read_earlier(
         .is_some_and(|store| store.tail_pending);
     let plan = super::reader_snapshot_plan(reader, &command.request.route);
     let tail_at_once = plan.tail_at_once && !tail_pending;
-    let selection = std::mem::replace(&mut snapshot.selection, Presentation::Legacy(Value::Null));
     let mut pending = false;
-    snapshot.selection = selection.edited(|selection| {
+    snapshot.selection.edit(|selection| {
         pending = read_earlier_selection(reader, root, command, shared, tail_at_once, selection);
     });
     if let Some(store) = &mut reader.store {

@@ -71,25 +71,25 @@ impl LiveDashboard {
     }
 
     /// Stops the reader following the live Mac with the hold's first read: the page at the
-    /// hold's last second where the page has no readings yet, its App histories are pending or
-    /// the held second names no reading, since that read brings them, or where the reader
-    /// rests, which reads a second's own read as a newly opened page, and otherwise the held
-    /// second's own. A rested reader follows nothing, so a hold the View completes sends it
-    /// nothing.
+    /// hold's last second where the page has no readings yet, awaits a reading that brings its
+    /// App histories, its older tail or its charts' points, or the held second names no reading,
+    /// since that read brings them, or where the reader rests, which reads a second's own read
+    /// as a newly opened page, and otherwise the held second's own. A rested reader follows
+    /// nothing, so a hold the View completes sends it nothing.
     fn hold_first_read(&mut self) {
         let Some(hold) = &self.hold else {
             unreachable!("the hold's first read follows the hold");
         };
-        let pending = self
+        let page_unread = self
             .snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.histories_pending);
+            .is_none_or(|snapshot| snapshot.awaits_reading());
         let rested = self.reader_rested();
 
         if rested && hold.reading.complete {
             return;
         }
-        if pending || rested || hold.reading.target.identity.is_none() {
+        if page_unread || rested || hold.reading.target.identity.is_none() {
             self.request_reading();
         } else {
             self.hold_read();
@@ -379,6 +379,7 @@ fn hold_resident_unread() -> crate::live_source::Snapshot {
         app_ranks: None,
         app_parts: None,
         histories_pending: false,
+        points_dropped: false,
         read_ms: 0.0,
     }
 }
