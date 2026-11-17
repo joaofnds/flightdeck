@@ -326,6 +326,7 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         overview_app_histories: None,
         histories_pending: false,
         points_dropped: false,
+        app_chart_source: crate::live_source::AppChartSource::Reading,
         process_history: None,
         rankings: Some(std::sync::Arc::clone(&rankings)),
         app_ranks: None,

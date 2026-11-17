@@ -995,6 +995,7 @@ impl SnapshotReader {
                     taken_payloads: std::collections::BTreeMap::new(),
                     output_complete: false,
                     sent: None,
+                    sent_app_chart_source: None,
                     generation: 1,
                     request: None,
                     output: None,
@@ -1005,6 +1006,7 @@ impl SnapshotReader {
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
                 cancellation: Arc::new(Cancellation::default()),
+                app_chart_from_view: AtomicBool::new(false),
             }),
         }
     }

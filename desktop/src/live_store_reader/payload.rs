@@ -7,7 +7,7 @@ use viewer::store::{QueryContext, QueryReadiness, Response};
 
 use super::ownership::{PartsWindow, RanksWindow};
 use super::presentation::Presentation;
-use crate::live_source::{Command, Context, Shared, Snapshot};
+use crate::live_source::{AppChartSource, Command, Context, Shared, Snapshot};
 
 pub(super) fn snapshot(
     context: &Arc<QueryContext>,
@@ -179,22 +179,26 @@ fn histories(
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
     let request = &command.request;
+    // A chart the window draws from the Store's View would replace this reading's history of
+    // it, so the reading builds none, and says so, since the window may have stopped drawing
+    // from the View by the time it takes the reading. The top Apps of each second stay, since a
+    // hover reads them. Overview's readings bring its charts by App whatever the window said, so
+    // a reading that says it left them to the View is never Overview's.
+    let source = if request.route == "overview" {
+        AppChartSource::Reading
+    } else {
+        shared.app_chart_source()
+    };
+    snapshot.app_chart_source = source;
     if request.load_resident_history {
-        if matches!(request.route.as_str(), "memory" | "overview") {
-            let history = context
-                .app_resident_history(&shared.cancellation, command.epoch)
-                .map_err(|error| error.to_string())?
-                .map(|value| {
-                    crate::live_resident_history::ResidentHistory::prepare(
-                        &value,
-                        &snapshot.selection,
-                    )
-                });
-            snapshot.resident_history = Some(Arc::new(Presentation::Store(history)));
+        if source == AppChartSource::Reading {
+            histories_resident(context, command, shared, snapshot)?;
         }
     }
     if request.load_app_attribution_history {
-        attribution(context, command, shared, snapshot)?;
+        if source == AppChartSource::Reading {
+            attribution(context, command, shared, snapshot)?;
+        }
         if crate::live_source::route_ranks_apps(&request.route) {
             snapshot.app_ranks = Some(Arc::new(RanksWindow::Store(
                 context.app_ranks().map_err(|error| error.to_string())?,
@@ -205,6 +209,26 @@ fn histories(
         if request.load_process_history {
             process(context, command, shared, snapshot)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Reads the history of resident memory by App on the pages that draw it.
+fn histories_resident(
+    context: &QueryContext,
+    command: &Command,
+    shared: &Shared,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    if matches!(command.request.route.as_str(), "memory" | "overview") {
+        let history = context
+            .app_resident_history(&shared.cancellation, command.epoch)
+            .map_err(|error| error.to_string())?
+            .map(|value| {
+                crate::live_resident_history::ResidentHistory::prepare(&value, &snapshot.selection)
+            });
+        snapshot.resident_history = Some(Arc::new(Presentation::Store(history)));
     }
 
     Ok(())

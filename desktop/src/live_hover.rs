@@ -270,6 +270,7 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
         process_history: snapshot.process_history.clone(),
         histories_pending: snapshot.histories_pending,
         points_dropped: false,
+        app_chart_source: snapshot.app_chart_source,
         rankings: resident_rankings(snapshot, target),
         app_ranks: None,
         app_parts: None,

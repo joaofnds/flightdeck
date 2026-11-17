@@ -15,14 +15,7 @@ impl LiveDashboard {
         let chart = if let Some(panel) = panel {
             self.live_chart(panel, cx).into_any_element()
         } else {
-            let reading = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.resident_history.as_ref())
-                .map_or_else(
-                    || self.history_absent("Resident App history unavailable at this observation"),
-                    |history| history.coverage(None),
-                );
+            let reading = self.memory_attribution_absent();
             crate::live_chart_view::absent_chart(
                 &AbsentChart {
                     id: crate::live_resident_history::PANEL_ID,
@@ -49,5 +42,14 @@ impl LiveDashboard {
                     .child(self.app_rankings(&[1], cx)),
             )
             .into_any_element()
+    }
+
+    /// What the card of the chart of resident memory by App reads where the page draws no
+    /// such chart: why the history it would draw leaves it out, or that the page has none.
+    pub(crate) fn memory_attribution_absent(&self) -> String {
+        self.resident_history().map_or_else(
+            || self.history_absent("Resident App history unavailable at this observation"),
+            |history| history.coverage(None),
+        )
     }
 }

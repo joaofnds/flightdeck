@@ -380,6 +380,7 @@ fn hold_resident_unread() -> crate::live_source::Snapshot {
         app_parts: None,
         histories_pending: false,
         points_dropped: false,
+        app_chart_source: crate::live_source::AppChartSource::Reading,
         read_ms: 0.0,
     }
 }

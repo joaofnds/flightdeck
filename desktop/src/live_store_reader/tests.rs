@@ -84,7 +84,21 @@ fn primary_sealed(
     Box<Snapshot>,
     crate::live_source::measurement::Hold,
 ) {
+    primary_sealed_under(selected_second, crate::live_source::AppChartSource::Reading)
+}
+
+/// The Primary reading `primary_sealed` gives, built while the window said `source` draws the
+/// page's chart by App.
+fn primary_sealed_under(
+    selected_second: Option<u64>,
+    source: crate::live_source::AppChartSource,
+) -> (
+    Harness,
+    Box<Snapshot>,
+    crate::live_source::measurement::Hold,
+) {
     let (mut harness, lease, handle) = Harness::sealed_blocked();
+    harness.worker.set_app_chart_source(source);
     let hold = harness
         .worker
         .hold_measurement_stage(crate::live_source::measurement::Stage::Pending);
@@ -455,6 +469,142 @@ fn a_store_worker_delivers_memory_and_the_requested_resident_history() {
     assert!(snapshot.rankings.is_some());
     assert!(!snapshot.histories_pending);
     harness.assert_source_free();
+}
+
+mod when_the_view_draws_the_app_chart {
+    use super::*;
+    use crate::live_source::AppChartSource;
+
+    #[test]
+    fn a_cpu_reading_builds_no_app_history_and_still_ranks_the_apps() {
+        // Goal: the CPU page whose chart by App the View draws gets a reading with no App
+        // history, and the top Apps of each second a hover reads. Method: say the View draws
+        // the chart, then ask for the CPU page with its App histories as the page asks.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+
+        let snapshot = harness.read_with_histories("cpu");
+
+        assert!(snapshot.app_attribution_history.is_none());
+        assert!(snapshot.app_ranks.is_some());
+        harness.assert_source_free();
+    }
+
+    #[test]
+    fn a_reading_says_it_left_the_chart_to_the_view() {
+        // Goal: a reading built while the View draws the chart says so, so the page reads its
+        // missing App history as the chart the View drew. Method: say the View draws the
+        // chart, then ask for the CPU page.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+
+        let snapshot = harness.read_with_histories("cpu");
+
+        assert_eq!(snapshot.app_chart_source, AppChartSource::View);
+        harness.assert_source_free();
+    }
+
+    #[test]
+    fn a_memory_reading_builds_no_resident_history_and_still_ranks_the_apps() {
+        // Goal: as for the CPU page, the Memory page whose chart the View draws gets no
+        // resident history and the top Apps of each second. Method: as for the CPU page.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+
+        let snapshot = harness.read_with_histories("memory");
+
+        assert!(snapshot.resident_history.is_none());
+        assert!(snapshot.app_ranks.is_some());
+        harness.assert_source_free();
+    }
+
+    #[test]
+    fn an_overview_reading_builds_its_histories_all_the_same() {
+        // Goal: Overview's readings always bring its charts by App, so a request for Overview
+        // sent with nothing said since a page the View drew still carries them, and never says
+        // it left them to the View. Method: say the View draws the chart, then ask for Overview.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+
+        let snapshot = harness.read_with_histories("overview");
+
+        assert!(snapshot.resident_history.is_some());
+        assert_eq!(snapshot.app_chart_source, AppChartSource::Reading);
+        harness.assert_source_free();
+    }
+}
+
+mod when_the_reading_draws_the_app_chart {
+    use super::*;
+    use crate::live_source::AppChartSource;
+
+    #[test]
+    fn a_cpu_reading_builds_the_app_history() {
+        // Goal: a page that draws its chart by App from the worker's reading gets the history.
+        // Method: say the reading draws it after the View did, then ask for the CPU page.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+        harness.worker.set_app_chart_source(AppChartSource::Reading);
+
+        let snapshot = harness.read_with_histories("cpu");
+
+        assert!(snapshot.app_attribution_history.is_some());
+        assert!(snapshot.app_ranks.is_some());
+        harness.assert_source_free();
+    }
+
+    #[test]
+    fn a_reading_says_it_brought_the_chart() {
+        // Goal: a reading built while the reading draws the chart says so, so the page reads
+        // its App history as the chart. Method: say the reading draws it after the View did,
+        // then ask for the CPU page.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+        harness.worker.set_app_chart_source(AppChartSource::Reading);
+
+        let snapshot = harness.read_with_histories("cpu");
+
+        assert_eq!(snapshot.app_chart_source, AppChartSource::Reading);
+        harness.assert_source_free();
+    }
+}
+
+mod when_a_reading_reads_no_app_history {
+    use super::*;
+    use crate::live_source::AppChartSource;
+
+    #[test]
+    fn a_hover_s_reading_says_the_reading_draws_the_chart() {
+        // Goal: a hover's reading, which reads no App history whatever the page draws, left
+        // nothing to the View, so the page treats it as it did before readings said what drew
+        // their chart. Method: say the View draws the chart, read the Memory page, then
+        // inspect its second as a hover does.
+        let mut harness = Harness::new();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+        let page = harness.read_with_histories("memory");
+        let mut inspection = request("memory");
+        inspection.second = page.selection["second"].as_u64();
+        inspection.identity = Some(page.selection["selected"].clone());
+        harness.worker.inspect(inspection).unwrap();
+
+        let inspected = harness.ready();
+
+        assert_eq!(inspected.app_chart_source, AppChartSource::Reading);
+        harness.assert_source_free();
+    }
+
+    #[test]
+    fn a_reading_whose_histories_are_pending_says_the_reading_draws_the_chart() {
+        // Goal: a reading that leaves its App histories to a later one left nothing to the
+        // View, so the page treats it as it did before readings said what drew their chart.
+        // Method: say the View draws the chart, then hold the Store's answer back until the
+        // worker presents its first reading of the Memory page.
+        let (harness, primary, hold) = primary_sealed_under(None, AppChartSource::View);
+
+        assert_eq!(primary.app_chart_source, AppChartSource::Reading);
+        hold.release();
+        harness.assert_source_free();
+    }
 }
 
 #[test]
@@ -873,6 +1023,17 @@ impl Harness {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("Store worker exceeded its bounded attempts: {failure:?}");
+    }
+
+    /// The worker's whole reading of the page `route`, asked for with its App histories as the
+    /// window asks for a page.
+    fn read_with_histories(&mut self, route: &str) -> Box<Snapshot> {
+        let mut request = request(route);
+        request.load_resident_history = true;
+        request.load_app_attribution_history = true;
+        self.worker.request(request).unwrap();
+
+        self.ready()
     }
 
     fn assert_source_free(&self) {

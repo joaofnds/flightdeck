@@ -826,6 +826,7 @@ impl Epoch {
             overview_app_histories: None,
             histories_pending: false,
             points_dropped: false,
+            app_chart_source: crate::live_source::AppChartSource::Reading,
             process_history: None,
             rankings: None,
             app_ranks: None,

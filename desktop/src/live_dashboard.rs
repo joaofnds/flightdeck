@@ -221,6 +221,9 @@ pub(crate) struct WindowState {
     /// window opened again shows as the closed one did.
     hold: Option<hold::Hold>,
     store_view: Option<std::sync::Arc<viewer::store::View>>,
+    /// The charts the page drew from the store's View, which the window opened again shows for
+    /// a reading that left its chart by App to the View.
+    store_panels: store_view::StorePanels,
 }
 
 impl WindowState {
@@ -457,6 +460,8 @@ impl LiveDashboard {
         // A held second keeps the View its charts were drawn from, and a window that follows
         // the live Mac takes the store's newest View once it opens again.
         let store_view = hold.as_ref().and_then(|_| self.store_view.take());
+        // Whether the window keeps the charts drawn from the View depends on the reading.
+        let store_panels = self.store_view_window_state();
         let snapshot = self.snapshot.take();
         let panels = if snapshot
             .as_ref()
@@ -476,6 +481,7 @@ impl LiveDashboard {
             hidden: self.hidden.clone(),
             hold,
             store_view,
+            store_panels,
         }
     }
 
@@ -487,6 +493,7 @@ impl LiveDashboard {
         // The page draws its charts from the held View as it takes the readings it held over.
         dashboard.hold = state.hold;
         dashboard.store_view = state.store_view;
+        dashboard.store_panels = state.store_panels;
         if let Some(snapshot) = state.snapshot {
             dashboard.generation = snapshot.generation;
             if snapshot.points_dropped {
@@ -662,12 +669,22 @@ impl LiveDashboard {
             self.tick_rest();
             self.tick_store_pending(cx);
         }
+        self.share_app_chart_source();
         let status = self.status();
         if self.last_status != status {
             self.last_status = status;
             cx.notify();
         }
         self.tick_deadline(cx);
+    }
+
+    /// Tells the worker what draws the page's chart by App now, so its next reading builds the
+    /// App history of that chart only where the page draws it from the reading. Each tick says
+    /// it, and so does each request before it goes out, so the reading a request asks for is
+    /// built under what the page draws as it asks. A page can change what draws it between
+    /// those, as a kept page opened again does, and the next tick then says it.
+    fn share_app_chart_source(&self) {
+        self.worker.set_app_chart_source(self.app_chart_source());
     }
 
     /// Takes the store's newest View, but none while a second is held, which keeps the View its
@@ -859,6 +876,7 @@ impl LiveDashboard {
             return;
         }
 
+        self.share_app_chart_source();
         match self.worker.restore(self.page_request()) {
             Ok(generation) => {
                 self.generation = generation;
@@ -1473,6 +1491,7 @@ impl LiveDashboard {
         if let Some(preview) = &mut self.preview {
             preview.page_reply_kept = false;
         }
+        self.share_app_chart_source();
         match self.worker.request(self.page_request()) {
             Ok(generation) => {
                 self.generation = generation;
@@ -1853,6 +1872,7 @@ mod selection_tests {
             overview_app_histories: None,
             histories_pending: false,
             points_dropped: false,
+            app_chart_source: crate::live_source::AppChartSource::Reading,
             process_history: None,
             rankings: None,
             app_ranks: None,

@@ -65,6 +65,16 @@ pub struct Request {
     pub executable: Option<String>,
 }
 
+/// What draws the page's chart by App: the worker's reading, or the Store's View the window
+/// draws it from, which leaves the reading no App history of that chart to build. A reading
+/// says which one it was built for, so the window reads a reading with no App history as one
+/// that left the chart to the View only where it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppChartSource {
+    Reading,
+    View,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppKey {
     pub kind: String,
@@ -140,6 +150,10 @@ pub struct Snapshot {
     /// The points of the reading's charts were dropped as the user left its page, whose charts
     /// still draw them, and the page's next reading brings them again.
     pub points_dropped: bool,
+    /// What the window said draws the page's chart by App as the reading read its App
+    /// histories. A reading that read none, a hover's or one whose histories are pending, says
+    /// the reading, since it left nothing to the View that it would otherwise have read.
+    pub app_chart_source: AppChartSource,
     pub read_ms: f64,
 }
 
@@ -182,6 +196,20 @@ struct Shared {
     wake: Condvar,
     stopped: AtomicBool,
     cancellation: Arc<Cancellation>,
+    /// Whether the window draws its page's chart by App from the Store's View, which it says
+    /// before each request and at each tick, so the step that reads the page next takes what the
+    /// window draws then. A request alone would carry it only while that request stands.
+    app_chart_from_view: AtomicBool,
+}
+
+impl Shared {
+    fn app_chart_source(&self) -> AppChartSource {
+        if self.app_chart_from_view.load(Ordering::Acquire) {
+            AppChartSource::View
+        } else {
+            AppChartSource::Reading
+        }
+    }
 }
 
 struct Mailbox {
@@ -194,6 +222,9 @@ struct Mailbox {
     /// The last request the window sent, which a test reads after the worker took it.
     #[cfg(test)]
     sent: Option<Request>,
+    /// What the window had said draws the page's chart by App when it sent `sent`.
+    #[cfg(test)]
+    sent_app_chart_source: Option<AppChartSource>,
     generation: u64,
     request: Option<Command>,
     output: Option<Update>,
@@ -415,6 +446,31 @@ impl Worker {
         self.submit(request, Context::Select)
     }
 
+    /// Tells the reader what draws the page's chart by App, `source`, so a reading of a page
+    /// whose chart the Store's View draws builds no App history of it. The reader takes it at its
+    /// next step, under the request it follows, with no new request and no context read again.
+    pub(crate) fn set_app_chart_source(&self, source: AppChartSource) {
+        self.shared
+            .app_chart_from_view
+            .store(source == AppChartSource::View, Ordering::Release);
+    }
+
+    /// The second of the reading the reader left for the window and the window has not taken.
+    #[cfg(test)]
+    pub(crate) fn output_second(&self) -> Option<u64> {
+        let mailbox = self.mailbox().unwrap();
+        let Some(Update::Ready(snapshot)) = &mailbox.output else {
+            return None;
+        };
+        snapshot.selection["second"].as_u64()
+    }
+
+    /// What the window had said draws the page's chart by App when it sent its last command.
+    #[cfg(test)]
+    pub(crate) fn sent_app_chart_source(&self) -> Option<AppChartSource> {
+        self.mailbox().unwrap().sent_app_chart_source
+    }
+
     pub(crate) fn restore(&mut self, request: Request) -> Result<u64, String> {
         assert!(request.second.is_some());
         self.submit(request, Context::Select)
@@ -455,6 +511,7 @@ impl Worker {
         #[cfg(test)]
         {
             mailbox.sent = Some(request.clone());
+            mailbox.sent_app_chart_source = Some(self.shared.app_chart_source());
         }
         mailbox.request = Some(Command {
             generation,
@@ -603,6 +660,8 @@ impl Shared {
                 output_complete: false,
                 #[cfg(test)]
                 sent: None,
+                #[cfg(test)]
+                sent_app_chart_source: None,
                 generation: 0,
                 request: None,
                 output: None,
@@ -613,6 +672,7 @@ impl Shared {
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
+            app_chart_from_view: AtomicBool::new(false),
         }
     }
 }
@@ -1273,6 +1333,7 @@ fn reader_snapshot_owned(
         overview_app_histories: None,
         histories_pending: false,
         points_dropped: false,
+        app_chart_source: AppChartSource::Reading,
         process_history: None,
         rankings: None,
         app_ranks: None,

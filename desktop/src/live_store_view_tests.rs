@@ -617,6 +617,7 @@ mod when_the_page_is_another_page {
 
 mod when_the_page_has_a_chart_by_app {
     use super::*;
+    use crate::live_source::AppChartSource;
 
     #[test]
     fn the_cpu_page_draws_its_chart_by_app_from_the_view() {
@@ -708,6 +709,347 @@ mod when_the_page_has_a_chart_by_app {
         dashboard.accept(readings(&trends));
 
         assert!(dashboard.attribution_history(Metric::Cpu).is_none());
+    }
+
+    mod what_draws_it {
+        use super::*;
+
+        #[test]
+        fn the_view_draws_the_cpu_page_s_chart_once_the_page_has_a_reading() {
+            // Goal: a page whose chart by App the View draws says so, so the worker builds no
+            // App history of it. Method: the CPU page with the worker's readings takes a View.
+            let dashboard = drawn_from_view("cpu");
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
+        }
+
+        #[test]
+        fn the_view_draws_the_memory_page_s_chart_once_the_page_has_a_reading() {
+            // Goal: as on the CPU page, the Memory page says the View draws its chart of
+            // resident memory. Method: as on the CPU page.
+            let dashboard = drawn_from_view("memory");
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
+        }
+
+        #[test]
+        fn the_reading_draws_it_before_the_page_s_first_reading() {
+            // Goal: a newly opened page draws its chart by App from the worker's first reading,
+            // so that reading brings the history and the chart shows at once. Method: the CPU
+            // page, newly opened, takes a View before the worker answers.
+            let mut dashboard = opening_on("cpu");
+
+            dashboard.take_view(Arc::new(charted_view()));
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn the_reading_draws_it_at_a_second_chosen_without_a_hold() {
+            // Goal: a chosen second draws the charts of its own readings, so its reading brings
+            // the history. Method: the CPU page drawn from a View chooses a second.
+            let mut dashboard = drawn_from_view("cpu");
+
+            dashboard.request.second = Some(10_000);
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn the_reading_draws_it_in_a_saved_recording() {
+            // Goal: a window that opened a saved recording draws only what its worker reads.
+            // Method: the CPU page drawn from a View reads a saved recording instead.
+            let mut dashboard = drawn_from_view("cpu");
+
+            dashboard.native.source = crate::live_source_mode::SourceMode::Recorded;
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn the_view_draws_it_while_a_second_is_held() {
+            // Goal: a held second keeps the chart drawn from the View it was held over, so the
+            // reading of the held page needs no history. Method: the CPU page drawn from a View
+            // holds a second of it.
+            let mut dashboard = drawn_from_view("cpu");
+
+            hold_second(&mut dashboard);
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
+        }
+
+        #[test]
+        fn a_held_second_reads_the_chart_drawn_from_the_view() {
+            // Goal: a held second shows the chart and readouts the View drew, whatever the
+            // reading brought. Method: the CPU page drawn from a View holds a second of it.
+            let mut dashboard = drawn_from_view("cpu");
+            let drawn = std::ptr::from_ref(dashboard.attribution_history(Metric::Cpu).unwrap());
+
+            hold_second(&mut dashboard);
+
+            let held = dashboard.attribution_history(Metric::Cpu).unwrap();
+            assert!(std::ptr::eq(held, drawn));
+        }
+
+        #[test]
+        fn the_reading_draws_overview_s_charts_by_app() {
+            // Goal: Overview's readings go on bringing its charts by App as before. Method:
+            // Overview with the worker's readings takes a View.
+            let dashboard = drawn_from_view("overview");
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn the_reading_draws_it_once_the_window_hides() {
+            // Goal: a hidden window lets go of the View, so its page shown again reads the
+            // history unless a View draws it first. Method: the CPU page drawn from a View hides.
+            let mut dashboard = drawn_from_view("cpu");
+
+            dashboard.tick_hidden();
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn a_hidden_window_keeps_the_chart_it_drew() {
+            // Goal: the chart drawn from the View stays drawn while the window hides, so the
+            // window shown again shows no blank chart before its next reading. Method: the CPU
+            // page drawn from a View hides.
+            let mut dashboard = drawn_from_view("cpu");
+            let view = charted_view();
+
+            dashboard.tick_hidden();
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+        }
+
+        #[test]
+        fn choosing_a_second_tells_the_worker_before_it_reads_the_second() {
+            // Goal: a chosen second is read once, so the worker learns the reading draws the
+            // chart before the request for that read goes out. Method: the CPU page drawn from
+            // a View, which the worker was told, chooses a second and asks for it, and the
+            // worker's mailbox keeps what the worker had been told as the request arrived.
+            let mut dashboard = drawn_from_view("cpu");
+            dashboard.worker.set_app_chart_source(AppChartSource::View);
+            dashboard.request.second = Some(10_000);
+
+            dashboard.request_reading();
+
+            let sent = dashboard.worker.sent_app_chart_source();
+            assert_eq!(sent, Some(AppChartSource::Reading));
+        }
+
+        #[test]
+        fn the_reading_draws_it_while_a_hover_holds_the_page_s_first_view_back() {
+            // Goal: a hover shown as the page's first View arrives holds the charts the reading
+            // drew, so the reading goes on bringing the history they draw. Method: the CPU page
+            // with the worker's readings shows a hover of them, then takes its first View.
+            let mut dashboard = dashboard_on("cpu", &trends());
+            dashboard.preview = Some(preview(&dashboard));
+
+            dashboard.take_view(Arc::new(charted_view()));
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+
+        #[test]
+        fn a_hover_reads_the_chart_drawn_from_the_view() {
+            // Goal: a hover on a page whose reading left its chart by App to the View reads the
+            // chart the View drew, and the worker goes on building none. Method: the CPU page
+            // drawn from a View takes a reading that left the chart to it, then a hover of the
+            // worker's readings begins.
+            let mut dashboard = drawn_from_view("cpu");
+            dashboard.accept(left_to_the_view(&trends()));
+            let drawn = std::ptr::from_ref(dashboard.attribution_history(Metric::Cpu).unwrap());
+
+            dashboard.preview = Some(preview(&dashboard));
+
+            let hovered = dashboard.attribution_history(Metric::Cpu).unwrap();
+            assert!(std::ptr::eq(hovered, drawn));
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
+        }
+
+        #[gpui::test]
+        fn a_window_opened_again_draws_the_chart_its_reading_left_to_the_view(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            // Goal: a window closed and opened again shows the chart its reading left to the
+            // View, with its history, before the store's next View or the reader's next
+            // reading. Method: the CPU page drawn from a View takes a reading that left the
+            // chart to it, the window closes, and a window opens again from what it kept.
+            use gpui::AppContext;
+            let mut dashboard = drawn_from_view("cpu");
+            dashboard.accept(left_to_the_view(&trends()));
+            let state = dashboard.window_state();
+            let worker = opening_on("cpu").worker;
+
+            let page = cx.new(|cx| LiveDashboard::restore(worker, state, cx));
+
+            let view = charted_view();
+            cx.update(|cx| {
+                let page = page.read(cx);
+                let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+                assert_eq!(by_app(&page.panels), expected);
+                assert!(page.attribution_history(Metric::Cpu).is_some());
+            });
+        }
+
+        #[test]
+        fn a_window_closed_keeps_the_charts_only_for_a_reading_that_left_them_to_the_view() {
+            // Goal: a closed window holds the charts drawn from the View only for a reading
+            // that left its chart by App to them, so it never holds a chart its reading brought
+            // a second time. Method: the CPU page drawn from a View closes once after a reading
+            // that left the chart to the View, and once after a reading that brought it.
+            let mut left = drawn_from_view("cpu");
+            left.accept(left_to_the_view(&trends()));
+            let mut brought = drawn_from_view("cpu");
+            brought.accept(readings(&trends()));
+
+            let left = left.window_state();
+            let brought = brought.window_state();
+
+            assert!(left.store_panels.version.is_some());
+            assert!(brought.store_panels.version.is_none());
+        }
+
+        /// Holds the View's newest second on `dashboard`, as a click on a chart does.
+        fn hold_second(dashboard: &mut LiveDashboard) {
+            let reading = preview(dashboard);
+            dashboard.request.second = Some(reading.target.second);
+            dashboard.hold = Some(crate::live_dashboard::hold::Hold {
+                last: 10_005,
+                anchor_second: reading.target.second,
+                reading,
+            });
+        }
+    }
+
+    mod when_the_view_falls_behind_a_reading_that_left_it_the_chart {
+        use super::*;
+
+        #[test]
+        fn the_view_goes_on_drawing_the_chart() {
+            // Goal: a reading that left the chart by App to the View brings none of it, so a
+            // View a second behind that reading still draws it and the chart is never blank.
+            // Method: the CPU page drawn from a View that ends at 10,005, then a reading that
+            // left the chart to it and ends at 10,006.
+            let view = charted_view();
+            let mut dashboard = drawn_from_view("cpu");
+
+            dashboard.accept(left_to_the_view(&trends_past_view()));
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+        }
+
+        #[test]
+        fn the_page_s_next_reading_brings_the_chart() {
+            // Goal: a View that fell behind the page's reading leaves the next reading to bring
+            // the chart, so the chart lags the page by one reading at most. Method: the CPU page
+            // drawn from a View that ends at 10,005, then a reading that left the chart to it
+            // and ends at 10,006.
+            let mut dashboard = drawn_from_view("cpu");
+
+            dashboard.accept(left_to_the_view(&trends_past_view()));
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
+        }
+    }
+
+    mod when_the_view_falls_behind_a_reading_that_carries_the_chart {
+        use super::*;
+
+        #[test]
+        fn the_reading_draws_the_chart() {
+            // Goal: a store that falls behind the worker never draws less than the worker read.
+            // Method: the CPU page drawn from a View that ends at 10,005, then a reading that
+            // ends at 10,006 and carries the CPU history by App.
+            let view = charted_view();
+            let mut dashboard = drawn_from_view("cpu");
+            let mut snapshot = readings(&trends_past_view());
+            let history =
+                AppAttributionHistory::from_view(Metric::Cpu, &view, &charted_cohorts(&view));
+            snapshot.app_attribution_history =
+                Some(Arc::new(crate::live_source::Presentation::Legacy(history)));
+
+            dashboard.accept(snapshot);
+
+            let read = dashboard.snapshot.as_ref().unwrap();
+            let read: &AppAttributionHistory = read.app_attribution_history.as_deref().unwrap();
+            let shown = dashboard.attribution_history(Metric::Cpu).unwrap();
+            assert!(std::ptr::eq(shown, read));
+        }
+    }
+
+    mod when_a_page_kept_is_opened_again {
+        use super::*;
+
+        #[test]
+        fn the_view_draws_its_chart_by_app() {
+            // Goal: a page opened again from the pages kept shows its chart by App from the View
+            // at once, though its kept reading brought none. Method: the CPU page drawn from a
+            // View, the Memory page opened and read, then the CPU page opened again.
+            let view = Arc::new(charted_view());
+            let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+            let mut dashboard = dashboard_on("cpu", &trends);
+            assert!(dashboard.take_view(Arc::clone(&view)));
+            dashboard.switch_route("memory");
+            dashboard.accept(readings(&trends));
+
+            dashboard.switch_route("cpu");
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+        }
+    }
+
+    mod when_the_view_leaves_out_the_memory_chart {
+        use super::*;
+
+        #[test]
+        fn the_card_says_why() {
+            // Goal: the Memory page whose reading left its chart of resident memory to the View
+            // says why the View left the chart out, as it said when the reading drew it.
+            // Method: the Memory page takes a View whose Apps the store still loads, then a
+            // reading that left the chart to it.
+            let mut dashboard = dashboard_on("memory", &trends());
+            let mut view = charted_view();
+            view.apps_loaded = false;
+            assert!(dashboard.take_view(Arc::new(view)));
+
+            dashboard.accept(left_to_the_view(&trends()));
+
+            let reading = dashboard.memory_attribution_absent();
+            let expected = "Resident App history unavailable: Resident App history is empty";
+            assert_eq!(reading, expected);
+        }
+    }
+
+    /// The worker's readings of the two seconds before a `charted_view`.
+    fn trends() -> [MachineSecond; 2] {
+        [reading_at(9_999, 0), reading_at(10_000, 0)]
+    }
+
+    /// The worker's readings of the newest second of a `charted_view` and of the one after it.
+    fn trends_past_view() -> [MachineSecond; 2] {
+        [reading_at(10_005, 0), reading_at(10_006, 0)]
+    }
+
+    /// The page `route` with the worker's readings, drawn from a `charted_view`.
+    fn drawn_from_view(route: &str) -> LiveDashboard {
+        let mut dashboard = dashboard_on(route, &trends());
+        assert!(dashboard.take_view(Arc::new(charted_view())));
+        dashboard
+    }
+
+    /// The worker's readings of `trends`, read while the page said the View draws its chart by
+    /// App, so they bring no App history.
+    fn left_to_the_view(trends: &[MachineSecond]) -> Box<crate::live_source::Snapshot> {
+        let mut snapshot = readings(trends);
+        snapshot.app_chart_source = AppChartSource::View;
+        snapshot
     }
 
     /// The charts by App the page `route` draws once it takes `view`, after the worker's
@@ -1298,6 +1640,187 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
     wait_for_store_activity(cx, false);
     assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn a_followed_cpu_page_drawn_from_the_view_reads_no_app_history(cx: &mut gpui::TestAppContext) {
+    // Goal: while the CPU page draws its chart by App from the store's View, the worker's
+    // reading of each new second builds no App history of it and still ranks the Apps a hover
+    // reads, and the page reads the chart the View drew. Method: the CPU page over a real store
+    // and reader settles on the View, then the recording publishes a second and the page takes
+    // the worker's reading of it.
+    let (recording, page) = followed_page_read_again(cx, "cpu");
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        let snapshot = page.snapshot.as_ref().unwrap();
+        assert!(snapshot.app_attribution_history.is_none());
+        assert!(snapshot.app_ranks.is_some());
+        assert!(page.attribution_history(Metric::Cpu).is_some());
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn a_followed_memory_page_drawn_from_the_view_reads_no_resident_history(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: as on the CPU page, the Memory page's reading builds no resident history while the
+    // View draws that chart. Method: as on the CPU page.
+    let (recording, page) = followed_page_read_again(cx, "memory");
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        let snapshot = page.snapshot.as_ref().unwrap();
+        assert!(snapshot.resident_history.is_none());
+        assert!(snapshot.app_ranks.is_some());
+        assert!(page.resident_history().is_some());
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn a_cpu_page_hidden_with_a_reading_on_its_way_keeps_its_chart_by_app(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: a reading the worker built while the View drew the chart, which the page takes
+    // after macOS hid the window and the page let go of the View, shows the chart drawn from
+    // the View with its history, and so does the window shown again before the store's next
+    // View. Method: the CPU page over a real store and reader settles on the View, the
+    // recording publishes a second, the worker reads it, macOS hides the window, and the page
+    // ticks, then macOS shows the window and the page ticks again.
+    let (mut recording, page) = followed_page_read_again(cx, "cpu");
+    recording.publish_resources();
+    let second = recording.last_second();
+    wait_for_worker_reading(cx, &page, second);
+
+    page.update(cx, |page, cx| page.observe_visibility_callback(false, cx));
+    page.update(cx, LiveDashboard::tick);
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        let snapshot = page.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.selection["second"].as_u64(), Some(second));
+        assert!(page.store_view.is_none());
+        assert!(by_app_holds(&page.panels, Metric::Cpu.panel_id()));
+        assert!(page.attribution_history(Metric::Cpu).is_some());
+    });
+    page.update(cx, |page, cx| page.observe_visibility_callback(true, cx));
+    page.update(cx, LiveDashboard::tick);
+    cx.update(|cx| {
+        let page = page.read(cx);
+        assert!(by_app_holds(&page.panels, Metric::Cpu.panel_id()));
+        assert!(page.attribution_history(Metric::Cpu).is_some());
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn a_second_inspected_on_a_cpu_page_drawn_from_the_view_reads_its_chart_until_the_reply(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: a second chosen without a hold, as an arrow step past the readings or the
+    // automation's inspect chooses one, keeps the chart's readouts on the history the View
+    // drew until the reading of that second replaces them. Method: the CPU page over a real
+    // store and reader settles on the View and the worker's reading, then inspects the second
+    // before the newest.
+    let (recording, page) = followed_page_read_again(cx, "cpu");
+    let second = recording.last_second() - 1;
+
+    page.update(cx, |page, cx| page.inspect(second, cx));
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        assert_eq!(page.request.second, Some(second));
+        assert!(page.awaiting_reply());
+        assert!(page.attribution_history(Metric::Cpu).is_some());
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+/// Waits, without ticking `page`, until its worker holds a reading of `second` for the page.
+fn wait_for_worker_reading(
+    cx: &mut gpui::TestAppContext,
+    page: &gpui::Entity<LiveDashboard>,
+    second: u64,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    for _ in 0..4_000 {
+        let read = cx.update(|cx| page.read(cx).worker.output_second());
+        if read == Some(second) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never read {second}: {read:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the worker never read {second}");
+}
+
+/// Whether `panels` hold the chart by App of id `id`.
+fn by_app_holds(panels: &[Rc<Panel>], id: &str) -> bool {
+    by_app(panels).iter().any(|(drawn, _, _)| drawn == id)
+}
+
+/// The page `route` over a real store and reader following a live recording, settled on the
+/// store's View of its second publication and then on the worker's reading of a third.
+fn followed_page_read_again(
+    cx: &mut gpui::TestAppContext,
+    route: &str,
+) -> (
+    crate::live_dashboard::input_tests::source_mode::LiveRecording,
+    gpui::Entity<LiveDashboard>,
+) {
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, route.into(), None)));
+    tick_until_settled(cx, &page, 2);
+
+    recording.publish_resources();
+    tick_until_read(cx, &page, recording.last_second());
+    (recording, page)
+}
+
+/// Ticks `page` until it shows the worker's reading of `second` with nothing more to come and
+/// draws from the store's View of that second.
+fn tick_until_read(cx: &mut gpui::TestAppContext, page: &gpui::Entity<LiveDashboard>, second: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    for _ in 0..4_000 {
+        page.update(cx, LiveDashboard::tick);
+        let (read, drawn, awaiting) = cx.update(|cx| {
+            let page = page.read(cx);
+            let read = page
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.selection["second"].as_u64());
+            let drawn = page
+                .store_view
+                .as_ref()
+                .and_then(|view| view.seconds.last())
+                .map(|newest| newest.wall_ns / super::NANOSECONDS_PER_SECOND);
+            (read, drawn, page.awaiting_reply())
+        });
+        if read == Some(second) && drawn == Some(second) && !awaiting {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page never read {second}: {read:?}, {drawn:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the page never read {second}");
 }
 
 #[gpui::test]
