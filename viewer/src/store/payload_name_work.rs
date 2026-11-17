@@ -26,7 +26,7 @@ impl Comparison {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::store) struct NameWork {
     pub comparisons: [u64; 5],
     pub logical_bytes: [u64; 5],
@@ -67,7 +67,18 @@ impl NameWork {
     }
 }
 
+/// Whether a trace on this thread takes the receipts. Counting costs time at every comparison,
+/// so with no trace to read the counts nothing counts, and the read benchmark times only what
+/// the app does.
+pub(super) fn traced() -> bool {
+    ACTIVE.with(|slot| slot.borrow().is_some())
+}
+
 pub(super) fn comparison(work: &Cell<NameWork>, site: Comparison, left: &Bytes, right: &Bytes) {
+    if !traced() {
+        return;
+    }
+
     let raw = logical_prefix(&left.bytes, &right.bytes);
     let display = if left.bytes == right.bytes {
         logical_prefix(left.display.as_bytes(), right.display.as_bytes())

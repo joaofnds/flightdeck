@@ -119,7 +119,7 @@ test-event-capacity:
     cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --release --locked -p persister --features event-capacity --test event_stream -- --include-ignored --no-capture --test-threads=1
 
-# Each test runs in a process of its own, since three of them read the lifetime peak of their
+# Each test runs in a process of its own, since several read the lifetime peak of their
 # process's footprint. A change to how the live store holds its seconds runs the recipe before
 # and after, on the same recording, and compares the times, the bytes and the digests printed.
 # Opt-in cost of each read of the live store on a recording: just read-benchmark <a recording>

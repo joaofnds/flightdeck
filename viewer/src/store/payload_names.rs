@@ -281,6 +281,10 @@ impl ProcessNames {
 
     #[cfg(test)]
     fn record_work(&self, change: impl FnOnce(&mut NameWork)) {
+        if !work::traced() {
+            return;
+        }
+
         let mut work = self.work.get();
         change(&mut work);
         self.work.set(work);
@@ -357,6 +361,26 @@ mod tests {
         drop((first, second, names, records));
         assert_eq!(budget.used(), 0);
         assert_eq!(observer.used(), 0);
+    }
+
+    #[test]
+    fn a_capture_with_no_trace_counts_no_name_work() {
+        // Goal: a capture counts no name work unless a trace on its thread takes the receipts, so
+        // the read benchmark times the app's comparisons without the counting of each.
+        // Method: capture a real two-name Sample with no trace on this thread and read the work.
+        let sample = super::super::name_tests::native_sample();
+        let budget = Arc::new(ByteBudget::new(64 * 1024));
+        let mut names = ProcessNames::new(2, &budget).unwrap();
+
+        let (payload, additions) =
+            super::super::Payload::capture_with_names(&sample, &names, None).unwrap();
+        names.commit(additions);
+
+        let work = names.work_snapshot();
+        assert_eq!(names.entries.len(), 2);
+        assert_eq!(work, NameWork::default());
+        drop((payload, names));
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

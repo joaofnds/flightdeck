@@ -3,7 +3,7 @@
 //! the Apps a launch owes its stretches and the bytes its rows take. A change to how the store
 //! holds its seconds runs it before and after, and every digest must come out the same. It builds
 //! only with the `read-benchmark` feature, and `just read-benchmark <a recording>` runs each test
-//! in a process of its own, since three of them read the process's footprint.
+//! in a process of its own, since several of them read the process's footprint.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -157,12 +157,14 @@ fn loading_the_hour_costs() {
 
 #[test]
 fn launching_costs() {
-    // Goal: say what a launch costs in time before the store has its first View to hand over,
-    // and from there until it holds the Apps of every second it holds whole.
+    // Goal: say what a launch costs in time and in memory before the store has its first View to
+    // hand over, and from there until it holds the Apps of every second it holds whole.
     // Method: step the launch's staged load over the hour's sealed minutes as the store's thread
-    // steps it, with the packing thread beside it and a ring that follows no collector, and time
-    // the steps up to the first View and the steps after it. The Apps the launch then owes its
-    // stretches are what `decoding_the_owed_apps_costs` times.
+    // steps it, with the packing thread beside it and a ring that follows no collector, time the
+    // steps up to the first View and the steps after it, and read the process's footprint and
+    // the store's budget at both ends, the second once the packing thread has packed what the
+    // launch gave it. The Apps the launch then owes its stretches are what
+    // `decoding_the_owed_apps_costs` times.
     let root = prepared_root();
     let budget = Arc::new(ByteBudget::new(super::BYTES_MAX));
     let (store_end, packing_end) = super::packing::pair(
@@ -188,9 +190,12 @@ fn launching_costs() {
     let first_elapsed = started.elapsed();
     report_span("the span of the first View", &first_view);
     drop(first_view);
+    report_memory("at the first View", &Memory::read(&budget));
     let resumed = Instant::now();
     let later_steps = launch_steps(&mut startup, &input, &mut held, &mut ring);
     let later_elapsed = resumed.elapsed();
+    held.apps.settle();
+    report_memory("once the launch is loaded", &Memory::read(&budget));
 
     println!(
         "launch to the first View: {} ns in {} steps",
@@ -206,14 +211,20 @@ fn launching_costs() {
     println!("steps to the first View, in nanoseconds: {first_steps:?}");
     println!("steps after the first View, in nanoseconds: {later_steps:?}");
     report_span("the span once the launch is loaded", &publish(&mut held));
+    launching_costs_owed(&root, &mut held);
+}
+
+/// Adds the Apps the launch owes the stretches of `held`, as the store does once the window has
+/// taken the launch's first View, and reports what that took and what the charts then cost.
+fn launching_costs_owed(root: &Path, held: &mut Held) {
     let owed = held.owed.take().unwrap();
     let resumed = Instant::now();
-    super::run_owed_add(&root, &mut held, &owed);
+    super::run_owed_add(root, held, &owed);
     println!(
         "adding the Apps the launch owes its stretches: {} ns",
         resumed.elapsed().as_nanos(),
     );
-    let view = publish(&mut held);
+    let view = publish(held);
     report_span("the span once the owed Apps are added", &view);
     println!(
         "stretches once the owed Apps are added: {}",
