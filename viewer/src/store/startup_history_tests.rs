@@ -749,10 +749,10 @@ fn seal_changing_guess(
 /// A decoder thread's work the budget refused, where both minutes were read, as
 /// `history_group_guess` decodes only then.
 fn refused_guess(
-    _: &Input<'_>,
+    _input: &Input<'_>,
     before: &Result<HistoryRead<'_>, Failure>,
     read: &Result<HistoryRead<'_>, Failure>,
-    _: &[Option<Observation>],
+    _recent: &[Option<Observation>],
 ) -> Option<HistoryGuess> {
     let (Ok(_), Ok(_)) = (before, read) else {
         return None;
@@ -766,7 +766,7 @@ fn refused_guess(
 /// the minute before it.
 fn self_seeded_guess(
     input: &Input<'_>,
-    _: &Result<HistoryRead<'_>, Failure>,
+    _before: &Result<HistoryRead<'_>, Failure>,
     read: &Result<HistoryRead<'_>, Failure>,
     recent: &[Option<Observation>],
 ) -> Option<HistoryGuess> {
