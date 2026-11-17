@@ -591,6 +591,80 @@ fn a_clockless_publication_leaves_the_store_taking_in_the_one_after_it() {
 }
 
 #[test]
+fn a_step_that_took_ticks_asks_once_for_the_ring_pages_back() {
+    // Goal: a step asks macOS once to stop charging the app for the ring's pages of the ticks
+    // it took, however many it took. The trace shows the request, and not what macOS charges.
+    // Method: step over two publications at once and count the releases the trace records.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(100, &usage(0));
+    let trace = Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
+    crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
+    ring.follow().unwrap();
+    fixture.publish_with_usage(101, &usage(1));
+    fixture.publish_with_usage(102, &usage(2));
+    let released_before = page_release_count(&trace);
+
+    let taken = step_once(&mut held, &mut ring, &operation);
+
+    assert_eq!(taken, NativeRead::Accepted);
+    assert_eq!(held.newest.unwrap().publication, 3);
+    assert_eq!(page_release_count(&trace), released_before + 1);
+    drop(scope);
+}
+
+#[test]
+fn a_step_that_took_no_tick_asks_for_no_pages_back() {
+    // Goal: a step that found nothing new in the ring maps nothing again.
+    // Method: step with nothing published since the last step and count the releases the trace
+    // records.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(100, &usage(0));
+    let trace = Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
+    crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
+    ring.follow().unwrap();
+    step_once(&mut held, &mut ring, &operation);
+    let released_before = page_release_count(&trace);
+
+    let idle = step_once(&mut held, &mut ring, &operation);
+
+    assert_eq!(idle, NativeRead::Idle);
+    assert_eq!(page_release_count(&trace), released_before);
+    drop(scope);
+}
+
+fn step_once(held: &mut Held, ring: &mut Ring, operation: &Operation) -> NativeRead {
+    crate::store::step(
+        held,
+        ring,
+        Ok(()),
+        &crate::store::Mailbox::new(),
+        operation,
+        crate::store::Publication::Complete,
+    )
+    .unwrap()
+}
+
+fn page_release_count(trace: &Trace) -> usize {
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    events
+        .iter()
+        .filter(|event| event.kind == Kind::RingPagesReleased)
+        .count()
+}
+
+#[test]
 fn the_complete_store_retains_native_facets_from_one_ingestion() {
     // Goal: ordinary complete Store steps retain measured facts without a second producer.
     // Method: ingest two real publications, then read summary/process facts and work counts.

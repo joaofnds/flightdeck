@@ -1654,6 +1654,8 @@ fn step(
     // The exchange after the publish keeps a new second's way to the screen as short as it was,
     // and runs whether or not the step published.
     held.apps.exchange();
+    // After the publish too, and once a step however many ticks it took.
+    ring.release_pages();
 
     Ok(progress)
 }

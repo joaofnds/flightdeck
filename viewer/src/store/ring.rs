@@ -50,6 +50,8 @@ pub(super) struct Ring {
     registered: bool,
     /// Whether the ring the store follows published a tick since the store last looked.
     published: bool,
+    /// Whether the Store took a tick whose pages of the ring it has not given back.
+    pages_held: bool,
     delta: Option<Delta>,
 }
 
@@ -116,6 +118,7 @@ impl Ring {
             followed: Ok(()),
             registered: false,
             published: false,
+            pages_held: false,
             delta: None,
         }
     }
@@ -217,7 +220,33 @@ impl Ring {
         );
         source.native_frame = accepted.into_frame();
         mem::swap(&mut source.current, &mut source.previous);
+        self.pages_held = true;
         Ok(NativeRead::Accepted)
+    }
+
+    /// Gives back the pages of the ring that the ticks the Store took since the last call were
+    /// read from. The Store keeps its own copy of each tick, and macOS charges the app for a
+    /// page of the ring it read for as long as the page stays mapped. A mapping macOS refuses
+    /// leaves the reader the one it has, so the refusal is reported and the Store reads on.
+    pub(super) fn release_pages(&mut self) {
+        let Some(source) = &mut self.source else {
+            return;
+        };
+
+        if self.pages_held {
+            self.pages_held = false;
+            match source.reader.release_pages() {
+                Ok(()) => persistence::work::ingestion::record(
+                    persistence::work::ingestion::Key::Unattributed {
+                        recording: source.identity.recording,
+                    },
+                    persistence::work::ingestion::Kind::RingPagesReleased,
+                ),
+                Err(error) => {
+                    collector::diagnostics::error(format_args!("ring page release: {error}"));
+                }
+            }
+        }
     }
 
     pub(super) fn accept(&mut self, terminal: Option<super::recording::Terminal>) {

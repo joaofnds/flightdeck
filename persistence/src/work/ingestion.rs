@@ -32,6 +32,7 @@ pub enum Purpose {
 pub enum Kind {
     RingReadAttempt,
     RingRead,
+    RingPagesReleased,
     FrameCaptureAttempt,
     FrameCapture,
     CommittedFrameCaptureAttempt,
