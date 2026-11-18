@@ -17,7 +17,7 @@ impl LiveDashboard {
     pub fn overview_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let summary = crate::live_views::matching_summary(selection);
         let pressure = self
             .panels
@@ -54,7 +54,7 @@ impl LiveDashboard {
     ) -> gpui::AnyElement {
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let battery = &crate::live_views::matching_summary(selection)["battery"];
         let reading = |reading| self.shown_reading(reading);
         let details = overview_context_card("battery-details")
@@ -121,7 +121,7 @@ impl LiveDashboard {
     ) -> gpui::AnyElement {
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let summary = crate::live_views::matching_summary(selection);
         let columns = match self.reading_chart_columns() {
             1 => 1,
@@ -197,7 +197,7 @@ impl LiveDashboard {
             Some(key) => {
                 let selection = self
                     .reading_snapshot()
-                    .map_or(&Value::Null, |snapshot| &snapshot.selection);
+                    .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
                 let summary = crate::live_views::matching_summary(selection);
                 let reading = hardware_reading(summary, key, " °C", 1);
                 (SENSOR_HELP, self.shown_reading(reading))

@@ -22,7 +22,25 @@ fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
 
     assert!(snapshot.selection["second"].is_null());
     assert!(snapshot.selection["selected"].is_null());
-    assert_eq!(snapshot.selection["trends"], json!([]));
+    assert_eq!(snapshot.selection.trends_json(), json!([]));
+}
+
+#[test]
+fn a_split_selection_flattens_to_the_json_it_was_read_from() {
+    // Goal: in the desktop build, whose serde_json keeps keys in the order they came and moves
+    // the last key into the place of one it removes, a selection split at its boundary still
+    // flattens to the JSON it was read from. Method: split a selection whose segments stand
+    // among each point's keys, then compare its flattened JSON as `Value` compares it.
+    let value = json!({"second": 3, "trends": [
+        {"run": "a", "segment": 1, "wall_ns": 2, "publication": 3},
+        {"segment": 2, "run": "b"}, {"run": "c", "segment": 3}],
+        "selected": null, "summary": {}});
+
+    let selection = viewer::Selection::from_json(value.clone());
+
+    assert_eq!(selection.json(), value);
+    assert_eq!(selection.trends().unwrap()[0].point()["publication"], 3);
+    assert_eq!(selection.trends().unwrap()[0].segment(), Some(1));
 }
 
 #[test]
@@ -1043,7 +1061,8 @@ impl SnapshotReader {
 
     /// What a page's older tail adds to a selection whose context ends at `last_second`.
     fn earlier(&mut self, recording: &SealedRecording, last_second: u64) -> serde_json::Value {
-        let mut selection = json!({"context_last_second": last_second});
+        let mut selection =
+            viewer::Selection::from_json(json!({"context_last_second": last_second}));
         let pending = super::store_reader::read_earlier_selection(
             &mut self.reader,
             &recording.root,
@@ -1054,7 +1073,7 @@ impl SnapshotReader {
         );
         assert!(!pending);
 
-        selection
+        selection.json()
     }
 
     fn read_at(&mut self, root: &std::path::Path) -> Result<Option<Box<super::Snapshot>>, String> {
@@ -1206,7 +1225,7 @@ fn a_hover_read_brings_its_second_alone_and_keeps_the_context() {
 
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
     assert_eq!(snapshot.selection["summary"]["publication"], 2);
-    assert!(snapshot.selection.get("trends").is_none());
+    assert!(snapshot.selection.trends().is_none());
     assert_eq!(
         snapshot.cpu_detail.as_deref().unwrap().observation["publication"],
         2

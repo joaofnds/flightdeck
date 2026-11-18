@@ -59,7 +59,7 @@ fn capture(options: &command::Capture<'_>) -> Result<(), Box<dyn std::error::Err
 
     // Both public responses remain intact; validation rejects mismatched or oversized capture.
     let envelope = decode(&serde_json::to_vec(&value)?)?;
-    let expected = measure::preflight(&envelope)?;
+    let (expected, _) = measure::preflight(&envelope)?;
     write_new(options.output, envelope.value())?;
     let value = envelope.value();
     println!(
@@ -169,7 +169,11 @@ fn validate(value: &Value) -> io::Result<()> {
     for point in trends {
         validate_selected(point)?;
         validate_clock(point, "continuous_ns")?;
-        integer(&point["segment"])?;
+        // The viewer writes a chart point's segment as an unsigned integer, and the split
+        // refuses any other, so a file holding text here is refused as outside input.
+        point["segment"]
+            .as_u64()
+            .ok_or_else(|| io::Error::other("Trend point requires an unsigned integer segment"))?;
     }
 
     validate_history(value)

@@ -100,6 +100,12 @@ pub fn selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
         "trends": trends, "earlier_trends": earlier, "earlier_stride_seconds": 10})
 }
 
+/// The selection of `value`, a fixture's selection JSON, split by the conversion a saved
+/// selection takes as it enters a snapshot.
+pub fn selection_of_json(value: &Value) -> viewer::Selection {
+    viewer::Selection::from_json(value.clone())
+}
+
 /// The trend point the viewer writes for `second`.
 pub fn trend_point(second: &MachineSecond) -> Value {
     let memory = second.memory.as_ref();

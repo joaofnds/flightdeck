@@ -118,7 +118,7 @@ impl LiveDashboard {
 
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         UtilizationReadings::of_summary(super::matching_summary(selection))
     }
 }

@@ -21,7 +21,10 @@ const _: () = {
 pub(super) fn run(probe: &mut Probe) -> Result<Value, String> {
     let latest = probe_read(probe, &probe_request("apps"))?;
     let context_last_second = context_last_second(&latest.selection)?;
-    let scalar = history_coverage(&latest.selection, "trends", false, context_last_second)?;
+    let scalar = history_coverage(
+        &HistorySource::trends(&latest.selection),
+        context_last_second,
+    )?;
     let selected_apps = run_apps(probe, &latest)?;
     let cpu = run_cpu(probe)?;
 
@@ -121,7 +124,7 @@ fn run_apps_validate(snapshot: &Snapshot, request: &Request) -> Result<Value, St
         if request.identity.is_some() {
             return Err("Captured App disappeared from its pinned observation".into());
         }
-        let coverage = history_coverage(history, "points", true, context_last_second)?;
+        let coverage = history_coverage(&HistorySource::app(history), context_last_second)?;
         return Ok(json!({"selected": snapshot.selection["selected"],
             "detail_available": false, "history": coverage}));
     }
@@ -143,7 +146,7 @@ fn run_apps_validate(snapshot: &Snapshot, request: &Request) -> Result<Value, St
             return Err("Selected App detail contains a member from another App".into());
         }
     }
-    let coverage = history_coverage(history, "points", true, context_last_second)?;
+    let coverage = history_coverage(&HistorySource::app(history), context_last_second)?;
     run_apps_endpoint(history, detail)?;
 
     // Captured paths remain private; equality was checked against the original bytes above.
@@ -219,18 +222,19 @@ fn run_apps_rapid(probe: &mut Probe, selected: &Request) -> Result<u64, String> 
 fn run_cpu(probe: &mut Probe) -> Result<Value, String> {
     let latest = probe_read(probe, &probe_request("cpu"))?;
     probe_validate(&latest, "cpu")?;
-    let trends = latest.selection["trends"]
-        .as_array()
-        .ok_or("Missing CPU context")?;
+    let trends = latest.selection.trends().ok_or("Missing CPU context")?;
     if trends.len() > OBSERVATIONS_MAX {
         return Err("CPU context exceeds the observation bound".into());
     }
-    let first = trends.first().ok_or("CPU context has no observation")?;
+    let first = trends
+        .first()
+        .ok_or("CPU context has no observation")?
+        .json();
     let mut request = probe_request("cpu");
-    request.second = Some(observation_second(first)?);
+    request.second = Some(observation_second(&first)?);
     request.identity = Some(first.clone());
     let earliest = probe_read(probe, &request)?;
-    identity_validate(&earliest.selection["selected"], first)?;
+    identity_validate(&earliest.selection["selected"], &first)?;
     probe_validate(&earliest, "cpu")?;
     let paused = probe_read(probe, &request)?;
     let earliest = run_cpu_report(&earliest)?;
@@ -275,22 +279,62 @@ fn observation_wall(observation: &Value) -> Result<u64, String> {
     })
 }
 
+/// The readings of a context as `history_coverage` reads them: the selected observation, the
+/// coverage the readings' source reports, and the readings, which an App's history holds with
+/// their observation in `"observation"`.
+pub(super) struct HistorySource<'a> {
+    selected: &'a Value,
+    coverage: Option<&'a Value>,
+    points: Option<Vec<&'a Value>>,
+    app: bool,
+}
+
+impl<'a> HistorySource<'a> {
+    /// The chart points of `selection`.
+    pub(super) fn trends(selection: &'a viewer::Selection) -> Self {
+        Self {
+            selected: &selection["selected"],
+            coverage: selection.get("coverage"),
+            points: selection.trends().map(|trends| {
+                trends
+                    .iter()
+                    .take(OBSERVATIONS_MAX + 1)
+                    .map(viewer::TrendPoint::point)
+                    .collect()
+            }),
+            app: false,
+        }
+    }
+
+    /// The points of `history`, an App's history.
+    pub(super) fn app(history: &'a Value) -> Self {
+        Self {
+            selected: &history["selected"],
+            coverage: history.get("coverage"),
+            points: history["points"]
+                .as_array()
+                .map(|points| points.iter().take(OBSERVATIONS_MAX + 1).collect()),
+            app: true,
+        }
+    }
+}
+
 /// The last second of the context the viewer read with the selection, which may run past the
 /// selected second.
-pub(super) fn context_last_second(selection: &Value) -> Result<u64, String> {
+pub(super) fn context_last_second(selection: &viewer::Selection) -> Result<u64, String> {
     selection["context_last_second"]
         .as_u64()
         .ok_or_else(|| "Missing context end".into())
 }
 
+/// How fully the readings of `source` cover the seconds its charts hold.
 pub(super) fn history_coverage(
-    source: &Value,
-    field: &str,
-    app: bool,
+    source: &HistorySource<'_>,
     context_last_second: u64,
 ) -> Result<Value, String> {
-    let window = history_coverage_window(&source["selected"], context_last_second)?;
-    let points = source[field].as_array().ok_or("Missing history points")?;
+    let app = source.app;
+    let window = history_coverage_window(source.selected, context_last_second)?;
+    let points = source.points.as_ref().ok_or("Missing history points")?;
     if points.len() > OBSERVATIONS_MAX {
         return Err("History exceeds the observation bound".into());
     }
@@ -298,7 +342,7 @@ pub(super) fn history_coverage(
     let mut identities = BTreeSet::new();
     let mut walls = BTreeSet::new();
     let mut present = 0_u32;
-    for point in points {
+    for point in points.iter().copied() {
         let observation = if app { &point["observation"] } else { point };
         let second = observation_second(observation)?;
         if !(window.first..=context_last_second).contains(&second) {
@@ -337,7 +381,7 @@ pub(super) fn history_coverage(
         "context_missing_seconds": CONTEXT_SECONDS - covered,
         "full_context_covered": covered == CONTEXT_SECONDS,
         "app_present_samples": if app { Some(present) } else { None },
-        "source_coverage": source.get("coverage")}),
+        "source_coverage": source.coverage}),
     )
 }
 
@@ -363,7 +407,26 @@ fn history_coverage_window(
 mod tests {
     use serde_json::json;
 
-    use super::{history_coverage, run_apps_endpoint};
+    use super::{HistorySource, history_coverage, run_apps_endpoint};
+
+    /// The coverage of the chart points of `source`, a selection's JSON, read as the probe
+    /// reads a snapshot's.
+    fn history_coverage_trends(
+        source: &serde_json::Value,
+        context_last_second: u64,
+    ) -> Result<serde_json::Value, String> {
+        let selection = viewer::Selection::from_json(source.clone());
+
+        history_coverage(&HistorySource::trends(&selection), context_last_second)
+    }
+
+    /// The coverage of the points of `source`, an App's history.
+    fn history_coverage_app(
+        source: &serde_json::Value,
+        context_last_second: u64,
+    ) -> Result<serde_json::Value, String> {
+        history_coverage(&HistorySource::app(source), context_last_second)
+    }
 
     #[test]
     fn accepts_the_exact_app_history_endpoint_with_matching_measurements() {
@@ -553,7 +616,7 @@ mod tests {
         let source = json!({"selected": observation(903, 4), "trends": [
             observation(900, 1), observation(900, 2), observation(903, 4)]});
 
-        let report = history_coverage(&source, "trends", false, 903).unwrap();
+        let report = history_coverage_trends(&source, 903).unwrap();
 
         assert_eq!(report["sample_count"], 3);
         assert_eq!(report["unique_seconds"], 2);
@@ -561,6 +624,20 @@ mod tests {
         assert_eq!(report["observed_second_slots"], 4);
         assert_eq!(report["missing_seconds_within_span"], 2);
         assert_eq!(report["full_context_covered"], false);
+    }
+
+    #[test]
+    fn refuses_chart_points_past_the_observation_bound() {
+        // Goal: a selection holding more chart points than the probe's bound is refused, not cut
+        // to the bound and measured as if it were whole. Method: give a selection one point more
+        // than the bound and read its coverage.
+        let trends = vec![observation(2000, 9); super::OBSERVATIONS_MAX + 1];
+        let source = json!({"selected": observation(2000, 9), "trends": trends});
+
+        assert_eq!(
+            history_coverage_trends(&source, 2000).unwrap_err(),
+            "History exceeds the observation bound"
+        );
     }
 
     #[test]
@@ -572,7 +649,7 @@ mod tests {
             {"observation": observation(903, 4), "members": 2},
             {"observation": observation(904, 5), "members": 2}]});
 
-        let report = history_coverage(&source, "points", true, 904).unwrap();
+        let report = history_coverage_app(&source, 904).unwrap();
 
         assert_eq!(report["last_second"], 904);
     }
@@ -586,7 +663,7 @@ mod tests {
         let source = json!({"selected": observation(2000, 9), "trends": [
             observation(1050, 1), observation(2000, 9)]});
 
-        let report = history_coverage(&source, "trends", false, 2000).unwrap();
+        let report = history_coverage_trends(&source, 2000).unwrap();
 
         assert_eq!(report["unique_seconds"], 2);
         assert_eq!(report["context_missing_seconds"], 899);
@@ -600,7 +677,7 @@ mod tests {
         let source = json!({"selected": observation(2000, 9), "trends": [observation(1040, 1)]});
 
         assert_eq!(
-            history_coverage(&source, "trends", false, 2000).unwrap_err(),
+            history_coverage_trends(&source, 2000).unwrap_err(),
             "History observation is outside its charted seconds"
         );
     }
@@ -613,7 +690,7 @@ mod tests {
             observation(903, 4), observation(904, 5)]});
 
         assert_eq!(
-            history_coverage(&source, "trends", false, 903).unwrap_err(),
+            history_coverage_trends(&source, 903).unwrap_err(),
             "History observation is outside its charted seconds"
         );
     }
@@ -625,7 +702,7 @@ mod tests {
         let source = json!({"selected": observation(903, 4), "trends": []});
 
         assert_eq!(
-            history_coverage(&source, "trends", false, 902).unwrap_err(),
+            history_coverage_trends(&source, 902).unwrap_err(),
             "History context ends before its selected second"
         );
     }
@@ -636,8 +713,8 @@ mod tests {
         // Method: select 903 with contexts that end 450 and 451 seconds later.
         let source = json!({"selected": observation(903, 4), "trends": []});
 
-        let longest = history_coverage(&source, "trends", false, 1353);
-        let longer = history_coverage(&source, "trends", false, 1354);
+        let longest = history_coverage_trends(&source, 1353);
+        let longer = history_coverage_trends(&source, 1354);
 
         assert!(longest.is_ok());
         assert_eq!(
@@ -653,7 +730,7 @@ mod tests {
             {"observation": observation(902, 3), "members": null},
             {"observation": observation(903, 4), "members": 2}]});
 
-        let report = history_coverage(&source, "points", true, 903).unwrap();
+        let report = history_coverage_app(&source, 903).unwrap();
 
         assert_eq!(report["app_present_samples"], 1);
         assert_eq!(report["observed_span_seconds"], 1.0);

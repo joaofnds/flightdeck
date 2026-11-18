@@ -39,7 +39,7 @@ fn requires_a_started_read_to_observe_interruption_before_replacement() {
     let mut reader = SnapshotReader::new();
     let (snapshot, _) = read_complete(&mut reader, &recording.root);
     let expected = json!({"selected": snapshot.selection["selected"],
-        "observations": snapshot.selection["trends"],
+        "observations": snapshot.selection.trends_json(),
         "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
 
     crate::live_probe::matched_tests::checks_interrupted_read(&recording.root, &expected);
@@ -62,7 +62,7 @@ fn withholds_mailbox_completion_until_pending_ranks_finish() {
     let mut reader = SnapshotReader::new();
     let (snapshot, _) = read_complete(&mut reader, &recording.root);
     let expected = json!({"selected": snapshot.selection["selected"],
-        "observations": snapshot.selection["trends"],
+        "observations": snapshot.selection.trends_json(),
         "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
 
     crate::live_probe::matched_tests::checks_pending_completion(&recording.root, &expected);
@@ -76,7 +76,7 @@ fn waits_for_expected_completed_payloads_through_the_real_mailbox() {
     let mut reader = SnapshotReader::new();
     let (snapshot, _) = read_complete(&mut reader, &recording.root);
     let expected = json!({"selected": snapshot.selection["selected"],
-        "observations": snapshot.selection["trends"],
+        "observations": snapshot.selection.trends_json(),
         "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
 
     let delivered = crate::live_probe::matched_tests::read_recorded(&recording.root, &expected);
@@ -114,7 +114,7 @@ fn records_unavailable_history_as_a_failed_payload() {
         "unavailable"
     );
     let mut expected = json!({"selected": snapshot.selection["selected"],
-        "observations": snapshot.selection["trends"], "payloads": {"overview": report}});
+        "observations": snapshot.selection.trends_json(), "payloads": {"overview": report}});
     expected["payloads"]["overview"]["resident_history"] = json!({"state": "ready"});
     let error = payloads::validate(&snapshot, "overview", &expected).unwrap_err();
     assert!(error.contains("payload availability differs"));
@@ -179,10 +179,10 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     let report = json!({"route": route, "phase": phase, "root": root, "selection_kind": selection,
         "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
-        "context_values": snapshot.selection["trends"],
+        "context_values": snapshot.selection.trends_json(),
         "effective_threads": {"maximum": std::env::var("POLARS_MAX_THREADS").unwrap(),
             "asynchronous": std::env::var("POLARS_ASYNC_THREAD_COUNT").unwrap()},
-        "point_count": snapshot.selection["trends"].as_array().map(Vec::len),
+        "point_count": snapshot.selection.trends_json().as_array().map(Vec::len),
         "context_mode": expected["context_mode"],
         "kept_observations": expected["kept_observations"],
         "payloads": payloads, "reader_complete": true,

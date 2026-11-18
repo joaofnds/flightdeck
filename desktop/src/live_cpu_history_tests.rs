@@ -8,7 +8,11 @@ fn decodes_a_selected_history_without_filling_missing_activity() {
     // Method: decode two bounded observations with null followed by measured zero.
     let (payload, selection) = fixture();
 
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert_eq!(history.wire.cpus[0].busy_percent, vec![None, Some(0.0)]);
     assert_eq!(history.total(), 1);
@@ -26,7 +30,11 @@ fn decodes_a_history_whose_context_runs_past_the_selected_second() {
     selection["second"] = json!(1000);
     selection["selected"] = earlier;
 
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert_eq!(history.wire.observations.len(), 2);
 }
@@ -41,7 +49,11 @@ fn decodes_a_history_whose_selection_holds_readings_before_its_context() {
     let trends = selection["trends"].as_array_mut().unwrap();
     trends.insert(0, observation(0, 101 * NS));
 
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert_eq!(history.wire.observations.len(), 2);
     assert_eq!(history.wire.selected_index, 1);
@@ -58,7 +70,11 @@ fn retains_an_unavailable_cpu_domain_without_inventing_an_idle_cpu() {
     payload["observations"][1]["cpu_count"] = json!(0);
     payload["observations"][1]["interval_available"] = json!(false);
 
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert!(history.wire.cpus.is_empty());
     assert_eq!(history.selected(), None);
@@ -83,7 +99,10 @@ fn rejects_a_selected_identity_with_different_context_clock_metadata() {
     payload["observations"][1]["observation"]["wall_ns"] = json!(1001 * NS + 1);
     selection["trends"][1]["wall_ns"] = json!(1001 * NS + 1);
 
-    let result = CPUHistory::decode(payload, &selection);
+    let result = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert!(result.is_err());
 }
@@ -93,7 +112,11 @@ fn hits_the_actual_predecessor_interval_and_selects_the_exact_publication() {
     // Goal: a cell targets its observation instead of rounding to a neighboring second.
     // Method: hit the measured interval and the unmeasured second immediately after it.
     let (payload, selection) = fixture();
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
     let inside = history.fraction(1000 * NS + NS / 2);
     let gap = history.fraction(1001 * NS + NS / 2);
 
@@ -131,7 +154,11 @@ fn later_intervals_own_overlapping_wall_time_even_when_their_row_is_missing() {
         .push(Value::Null);
     selection["selected"] = selected.clone();
     selection["trends"].as_array_mut().unwrap().push(selected);
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     let older = history
         .inspect(0, history.fraction(1000 * NS + NS / 4))
@@ -163,7 +190,11 @@ fn pages_a_partial_cpu_domain_without_relabeling_its_rows() {
             .collect::<Vec<_>>()
     );
 
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert_eq!(
         history
@@ -183,7 +214,11 @@ fn activity_gives_the_measured_cores_of_the_named_observation() {
     // Method: name the measured observation of a decoded history and read its cores.
     let (mut payload, selection) = fixture();
     payload["cpus"][0]["busy_percent"][1] = json!(37.5);
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     let activity = history.activity(&selection["selected"]).unwrap().unwrap();
 
@@ -202,7 +237,11 @@ fn activity_gives_unmeasured_cores_for_an_observation_without_an_interval() {
     // Goal: a second without an interval shows no measurement rather than an idle CPU.
     // Method: name the first observation, which has no predecessor.
     let (payload, selection) = fixture();
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     let activity = history.activity(&selection["trends"][0]).unwrap().unwrap();
 
@@ -229,7 +268,11 @@ fn activity_gives_nothing_for_a_page_that_lacks_some_logical_cpus() {
             .map(|cpu| json!({"cpu":cpu,"busy_percent":[null,1.0]}))
             .collect::<Vec<_>>()
     );
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert!(history.activity(&selection["selected"]).unwrap().is_none());
 }
@@ -239,7 +282,11 @@ fn activity_gives_nothing_for_an_observation_outside_the_history() {
     // Goal: a hover outside the window falls back to the worker, never to a neighbor's cores.
     // Method: name a publication the history does not hold.
     let (payload, selection) = fixture();
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
     let mut outside = selection["selected"].clone();
     outside["publication"] = json!(3);
 
@@ -255,7 +302,11 @@ fn activity_gives_nothing_for_an_observation_without_a_cpu_reading() {
     payload["observations"][1]["previous_observation"] = Value::Null;
     payload["observations"][1]["interval_available"] = json!(false);
     payload["cpus"][0]["busy_percent"] = json!([null, null]);
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     assert!(history.activity(&selection["trends"][0]).unwrap().is_none());
 }
@@ -265,7 +316,11 @@ fn keyboard_inspection_preserves_exact_observations_and_clamps_at_the_context_bo
     // Goal: arrows navigate observations and CPU rows without changing recording selection.
     // Method: step from the selected cell to the first observation, then clamp one more left.
     let (payload, selection) = fixture();
-    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let history = CPUHistory::decode(
+        payload,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    )
+    .unwrap();
 
     let first = history.step(
         None,
@@ -299,6 +354,7 @@ fn decodes_the_maximum_cpu_page_with_bounded_retained_memory_and_geometry() {
     // Goal: the full protocol bound remains affordable without shortening its history window.
     // Method: decode 32 rows of 4096 observations, measure owned storage and hit its last interval.
     let (payload, selection) = maximum_fixture();
+    let selection = crate::live_store_fixtures::selection_of_json(&selection);
     let started = std::time::Instant::now();
 
     let history = CPUHistory::decode(payload, &selection).unwrap();
@@ -396,7 +452,8 @@ macro_rules! rejects_payload {
             let (mut $payload, $selection) = fixture();
             $change
 
-            let result = CPUHistory::decode($payload, &$selection);
+            let selection = crate::live_store_fixtures::selection_of_json(&$selection);
+            let result = CPUHistory::decode($payload, &selection);
 
             assert!(result.is_err());
         }

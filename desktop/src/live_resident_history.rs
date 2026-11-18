@@ -84,7 +84,7 @@ struct Other {
 }
 
 impl ResidentHistory {
-    pub fn prepare(value: &Value, selection: &Value) -> Self {
+    pub fn prepare(value: &Value, selection: &viewer::Selection) -> Self {
         match History::decode(value, selection) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),
@@ -218,7 +218,7 @@ impl ResidentHistory {
 }
 
 impl History {
-    fn decode(value: &Value, selection: &Value) -> Result<Self, String> {
+    fn decode(value: &Value, selection: &viewer::Selection) -> Result<Self, String> {
         if integer(&value["context_seconds"])? != 900 {
             return Err("Resident App context must contain 900 seconds".into());
         }

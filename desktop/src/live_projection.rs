@@ -36,16 +36,17 @@ const GIBIBYTE: f32 = 1_073_741_824.0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 #[must_use]
-pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
+pub fn inspection_identity(selection: &viewer::Selection, second: u64) -> Option<Value> {
     if selection["second"].as_u64() == Some(second) {
         if !selection["selected"].is_null() {
             return Some(selection["selected"].clone());
         }
     }
-    let recent = selection["trends"]
-        .as_array()?
+    let recent = selection
+        .trends()?
         .iter()
         .take(OBSERVATIONS_MAX)
+        .map(viewer::TrendPoint::point)
         .rfind(|point| wall_second_of(point) == Some(second));
     if recent.is_some() {
         return recent.map(observation_identity);
@@ -56,7 +57,7 @@ pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
 
 /// The older reading that stands for `second`, since the older tail keeps one reading in every
 /// stretch of seconds.
-fn older_reading(selection: &Value, second: u64) -> Option<&Value> {
+fn older_reading(selection: &viewer::Selection, second: u64) -> Option<&Value> {
     selection["earlier_trends"]
         .as_array()?
         .get(older_index(selection, second)?)
@@ -76,7 +77,7 @@ pub fn reading_value(
     }
     let points = &JoinedPoints {
         older: &[],
-        recent: std::slice::from_ref(point),
+        recent: RecentPoints::Readings(std::slice::from_ref(point)),
     };
     let specifications = specifications(route, points)?;
     let reading = specifications
@@ -94,7 +95,7 @@ pub fn reading_value(
 
 /// The index among the older readings of the one that stands for `second`.
 #[must_use]
-pub fn older_index(selection: &Value, second: u64) -> Option<usize> {
+pub fn older_index(selection: &viewer::Selection, second: u64) -> Option<usize> {
     let stride = selection["earlier_stride_seconds"].as_u64()?;
     selection["earlier_trends"]
         .as_array()?
@@ -108,7 +109,7 @@ pub fn older_index(selection: &Value, second: u64) -> Option<usize> {
 /// How many older readings sit before the recent ones in every chart, so an index among the
 /// recent readings plus this count is the index in a chart.
 #[must_use]
-pub fn older_count(selection: &Value) -> usize {
+pub fn older_count(selection: &viewer::Selection) -> usize {
     selection["earlier_trends"]
         .as_array()
         .map_or(0, |older| older.len().min(OBSERVATIONS_MAX))
@@ -117,7 +118,7 @@ pub fn older_count(selection: &Value) -> usize {
 /// The second `second` is inspected as: the second its observation was made, which differs
 /// from `second` only inside an older stretch that one reading stands for.
 #[must_use]
-pub fn inspection_second(selection: &Value, second: u64) -> u64 {
+pub fn inspection_second(selection: &viewer::Selection, second: u64) -> u64 {
     inspection_identity(selection, second)
         .and_then(|identity| wall_second_of(&identity))
         .unwrap_or(second)
@@ -127,7 +128,7 @@ pub fn inspection_second(selection: &Value, second: u64) -> u64 {
 /// shows another reading than `second` does, or a gap, since every second of an older stretch
 /// shows the one reading that stands for it.
 #[must_use]
-pub fn stepped_second(selection: &Value, second: u64, delta: i64) -> u64 {
+pub fn stepped_second(selection: &viewer::Selection, second: u64, delta: i64) -> u64 {
     let shown = inspection_second(selection, second);
     let mut next = second;
     // A stretch spans the viewer's stride, so a step that far always leaves it.
@@ -144,7 +145,7 @@ pub fn stepped_second(selection: &Value, second: u64, delta: i64) -> u64 {
 /// Whether the selection holds `second`, as a reading or a gap, so the page shows that second
 /// without a read: the seconds its charts hold, on both sides of the selected second.
 #[must_use]
-pub fn holds_second(selection: &Value, second: u64) -> bool {
+pub fn holds_second(selection: &viewer::Selection, second: u64) -> bool {
     let Some(last) = context_last_second(selection) else {
         return false;
     };
@@ -156,7 +157,7 @@ pub fn holds_second(selection: &Value, second: u64) -> bool {
 /// The last second the selection's charts hold, which runs past the selected second where the
 /// recording holds later seconds.
 #[must_use]
-pub fn context_last_second(selection: &Value) -> Option<u64> {
+pub fn context_last_second(selection: &viewer::Selection) -> Option<u64> {
     selection["context_last_second"].as_u64()
 }
 
@@ -206,14 +207,68 @@ const OBSERVATION_FIELDS: [&str; 7] = [
 /// chart page more than any one of its charts.
 struct JoinedPoints<'a> {
     older: &'a [Value],
-    recent: &'a [Value],
+    recent: RecentPoints<'a>,
+}
+
+/// The readings a chart draws after the older tail: the selection's chart points, or readings
+/// that stay JSON, an App's history or the one summary `reading_value` reads.
+#[derive(Clone, Copy)]
+enum RecentPoints<'a> {
+    Trends(&'a viewer::Trends),
+    Readings(&'a [Value]),
+}
+
+impl<'a> RecentPoints<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Trends(trends) => trends.len(),
+            Self::Readings(readings) => readings.len(),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    fn point(self, index: usize) -> &'a Value {
+        match self {
+            Self::Trends(trends) => trends[index].point(),
+            Self::Readings(readings) => &readings[index],
+        }
+    }
+
+    /// The segment of the reading at `index`, which a chart point holds beside it and a JSON
+    /// reading holds as its `"segment"` field.
+    fn segment(self, index: usize) -> Result<u64, String> {
+        match self {
+            Self::Trends(trends) => trends[index]
+                .segment()
+                .ok_or_else(|| "Missing live chart integer".to_owned()),
+            Self::Readings(readings) => integer(&readings[index]["segment"]),
+        }
+    }
+
+    fn last(self) -> Option<&'a Value> {
+        match self {
+            Self::Trends(trends) => trends.last().map(viewer::TrendPoint::point),
+            Self::Readings(readings) => readings.last(),
+        }
+    }
 }
 
 impl<'a> JoinedPoints<'a> {
     fn point(&self, index: usize) -> &'a Value {
         match index.checked_sub(self.older.len()) {
-            Some(recent) => &self.recent[recent],
+            Some(recent) => self.recent.point(recent),
             None => &self.older[index],
+        }
+    }
+
+    /// The segment of the point at `index`.
+    fn segment(&self, index: usize) -> Result<u64, String> {
+        match index.checked_sub(self.older.len()) {
+            Some(recent) => self.recent.segment(recent),
+            None => integer(&self.older[index]["segment"]),
         }
     }
 
@@ -230,7 +285,11 @@ impl<'a> JoinedPoints<'a> {
     }
 
     fn iter(&self) -> impl Iterator<Item = &'a Value> + use<'a> {
-        self.older.iter().chain(self.recent)
+        let recent = self.recent;
+
+        self.older
+            .iter()
+            .chain((0..recent.len()).map(move |index| recent.point(index)))
     }
 
     fn last(&self) -> Option<&'a Value> {
@@ -240,20 +299,30 @@ impl<'a> JoinedPoints<'a> {
 
 pub fn panels(
     route: &str,
-    selection: &Value,
+    selection: &viewer::Selection,
     history: Option<&Value>,
 ) -> Result<Vec<Rc<Panel>>, String> {
-    let source = if route == "apps" {
+    let (recent, selected, scope) = if route == "apps" {
         let Some(history) = history else {
             return Ok(Vec::new());
         };
-        history
+        let Some(points) = history["points"].as_array() else {
+            return Ok(Vec::new());
+        };
+        (
+            RecentPoints::Readings(points),
+            &history["selected"],
+            &history["scope"],
+        )
     } else {
-        selection
-    };
-    let key = if route == "apps" { "points" } else { "trends" };
-    let Some(recent) = source[key].as_array() else {
-        return Ok(Vec::new());
+        let Some(trends) = selection.trends() else {
+            return Ok(Vec::new());
+        };
+        (
+            RecentPoints::Trends(trends),
+            &selection["selected"],
+            &selection["scope"],
+        )
     };
     if recent.is_empty() {
         // A reading with no trend points still draws its page's charts, with nothing in them,
@@ -273,8 +342,8 @@ pub fn panels(
         return Err("Live chart exceeds 4096 observations".to_owned());
     }
     let domain = Domain::read(selection, earlier.is_some())?;
-    let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
-    let process = source["scope"] == "selected_named_process_group";
+    let coordinates = coordinates(points, &domain, route == "apps", selected)?;
+    let process = scope == "selected_named_process_group";
     let limit = panels_limit(route, process);
     let mut result = Vec::with_capacity(limit);
     let specifications = if process {
@@ -317,7 +386,7 @@ pub fn empty_panels(route: &str) -> Result<Vec<Rc<Panel>>, String> {
     };
     let points = &JoinedPoints {
         older: &[],
-        recent: &[],
+        recent: RecentPoints::Readings(&[]),
     };
     let specifications = specifications(route, points)?;
     let mut result = Vec::with_capacity(specifications.len());
@@ -453,7 +522,7 @@ struct Reading {
 impl Domain {
     /// The seconds the charts hold: the full-detail ones, or the loaded hour and its lead-in
     /// when the selection carries an older tail.
-    fn read(selection: &Value, longer: bool) -> Result<Self, String> {
+    fn read(selection: &viewer::Selection, longer: bool) -> Result<Self, String> {
         let last = integer(&selection["context_last_second"])?;
         let older_stride = if longer {
             Some(integer(&selection["earlier_stride_seconds"])?)
@@ -530,7 +599,7 @@ fn coordinates(
         let key = (
             identity(&stamp["run"])?,
             identity(&stamp["boot"])?,
-            integer(&point["segment"])?,
+            points.segment(index)?,
         );
         let next = u64::try_from(identities.len()).map_err(|error| error.to_string())?;
         segments.push(*identities.entry(key).or_insert(next));

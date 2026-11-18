@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use gpui::{Context, IntoElement, div, prelude::*};
-use serde_json::Value;
 
 use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
@@ -20,7 +19,7 @@ impl LiveDashboard {
     ) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let summary = super::matching_summary(selection);
         let uptime = self.shown_reading(
             summary["uptime_seconds"]

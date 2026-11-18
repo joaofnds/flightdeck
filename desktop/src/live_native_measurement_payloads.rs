@@ -8,7 +8,7 @@ const OBSERVATIONS_MAX: usize = 4096;
 const IDENTITY_FIELDS: [&str; 5] = ["run", "boot", "publication", "run_tick", "wall_ns"];
 
 pub(crate) struct ContextComparison<'a> {
-    pub(crate) points: &'a Value,
+    pub(crate) points: Option<&'a viewer::Trends>,
     pub(crate) observations: &'a Value,
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<()
         }
     }
     if expected["context_mode"] == "kept" {
-        if snapshot.selection.get("trends").is_some() {
+        if snapshot.selection.trends().is_some() {
             return Err("Hover unexpectedly returned a new context".into());
         }
         if expected.get("observations") != Some(&Value::Null) {
@@ -51,22 +51,23 @@ pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<()
         return Ok(());
     }
     validate_context(&ContextComparison {
-        points: &snapshot.selection["trends"],
+        points: snapshot.selection.trends(),
         observations: &expected["observations"],
     })
 }
 
 pub(crate) fn validate_context(comparison: &ContextComparison<'_>) -> Result<(), String> {
     let observations = context_shape(comparison.observations)?;
-    let points = comparison
-        .points
-        .as_array()
-        .ok_or("Missing measured context")?;
+    let points = comparison.points.ok_or("Missing measured context")?;
     if points.len() != observations.len() {
         return Err("Measured context length differs from the frozen input".into());
     }
 
-    for (point, observation) in points.iter().zip(observations) {
+    for (point, observation) in points
+        .iter()
+        .map(viewer::TrendPoint::point)
+        .zip(observations)
+    {
         for field in IDENTITY_FIELDS {
             if point[field] != observation[field] {
                 return Err(format!(
@@ -173,10 +174,8 @@ fn rank_window(snapshot: &Snapshot) -> Result<Value, String> {
         return Ok(Value::Null);
     };
 
-    let points = snapshot.selection["trends"]
-        .as_array()
-        .ok_or("Missing rank context")?;
-    if points.len() > OBSERVATIONS_MAX {
+    let trends = snapshot.selection.trends().ok_or("Missing rank context")?;
+    if trends.len() > OBSERVATIONS_MAX {
         return Err("Measured rank context exceeds the observation bound".into());
     }
 
@@ -189,7 +188,7 @@ fn rank_window(snapshot: &Snapshot) -> Result<Value, String> {
         .ok_or("Invalid rank context end")?;
     let mut available = 0_u32;
     let mut observations = 0_u32;
-    for point in points {
+    for point in trends.iter().map(viewer::TrendPoint::point) {
         let wall = point["wall_ns"]
             .as_u64()
             .ok_or("Missing rank observation clock")?;

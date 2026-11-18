@@ -100,18 +100,19 @@ impl InputDriver {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let levels = json!([{"name": "Super", "logical_cpus": 6},
                 {"name": "Performance", "logical_cpus": 12}]);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["performance_levels"] =
-                levels.clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["performance_levels"] =
-                levels.clone();
-            snapshot.selection.legacy_mut().unwrap()["summary"]["performance_levels"] = levels;
-            snapshot.selection.legacy_mut().unwrap()["context_seconds"] = json!(900);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["run_tick"] = json!(1);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["run_tick"] = json!(2);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(67);
-            let previous = snapshot.selection["trends"][0].clone();
-            let selected = snapshot.selection["trends"][1].clone();
+            let selection = snapshot.selection.legacy_mut().unwrap();
+            selection.trends_edit(|points| {
+                points[0]["performance_levels"] = levels.clone();
+                points[1]["performance_levels"] = levels.clone();
+                points[0]["run_tick"] = json!(1);
+                points[1]["run_tick"] = json!(2);
+                points[0]["cpu_percent"] = json!(13);
+                points[1]["cpu_percent"] = json!(67);
+            });
+            selection["summary"]["performance_levels"] = levels;
+            selection["context_seconds"] = json!(900);
+            let previous = snapshot.selection.trends_json()[0].clone();
+            let selected = snapshot.selection.trends_json()[1].clone();
             snapshot.selection.legacy_mut().unwrap()["selected"] = selected.clone();
             snapshot.cpu_detail = Some(crate::live_source::Presentation::Legacy(
                 crate::live_cpu::CPUActivity::decode(

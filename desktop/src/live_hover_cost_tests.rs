@@ -54,10 +54,10 @@ fn snapshot() -> Snapshot {
     Snapshot {
         generation: 1,
         catalog: Value::Null,
-        selection: crate::live_source::Presentation::Legacy(
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
             json!({"second":1900,"context_last_second":1900,"selected":identity(900),
             "trends":points}),
-        ),
+        )),
         apps: None,
         detail: None,
         history: None,

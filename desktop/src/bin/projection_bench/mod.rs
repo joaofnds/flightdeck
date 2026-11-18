@@ -124,7 +124,12 @@ mod tests {
             "selected":{"publication":1,"run":run,"boot":boot},
             "trends":[{"wall_ns":1_000_000_000_000_u64,"publication":1,
                 "run":run,"boot":boot,"segment":0,"gpu_active_percent":37.5}]});
-        let panels = crate::live_projection::panels("overview", &selection, None).unwrap();
+        let panels = crate::live_projection::panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None,
+        )
+        .unwrap();
 
         let transcript = bits(&panels);
 

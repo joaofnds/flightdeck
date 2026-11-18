@@ -39,7 +39,7 @@ fn main() -> ExitCode {
 }
 
 struct Selection {
-    value: Value,
+    value: viewer::Selection,
     scalar_points: u32,
     expected: Value,
 }
@@ -70,9 +70,21 @@ impl Selection {
                     "Trend point requires unsigned publication",
                 ));
             }
+
+            // The viewer writes a segment as an unsigned integer, and the split refuses any
+            // other, so a file holding one is refused here as outside input.
+            if point
+                .get("segment")
+                .is_some_and(|segment| segment.as_u64().is_none())
+            {
+                return Err(io::Error::other(
+                    "Trend point requires an unsigned integer segment",
+                ));
+            }
         }
 
         let scalar_points = u32::try_from(points.len()).map_err(io::Error::other)?;
+        let value = viewer::Selection::from_json(value);
         let panels = live_projection::panels(route, &value, None).map_err(io::Error::other)?;
         let expected = projection_bench::bits(&panels);
 
@@ -240,4 +252,37 @@ fn write(path: &Path, value: &Value) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.write_all(b"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::Selection;
+
+    /// A selection of one chart point whose segment is `segment`.
+    fn selection_with_segment(segment: &Value) -> Value {
+        let run = "00000000000000010000000000000002";
+        let boot = "00000000000000030000000000000004";
+
+        json!({"second": 1000, "context_last_second": 1000,
+            "selected": {"publication": 1, "run": run, "boot": boot},
+            "trends": [{"wall_ns": 1_000_000_000_000_u64, "publication": 1, "run": run,
+                "boot": boot, "segment": segment, "gpu_active_percent": 37.5}]})
+    }
+
+    #[test]
+    fn a_selection_whose_segment_is_not_an_unsigned_integer_is_refused() {
+        // Goal: a file named on the command line is outside input, so a chart point whose
+        // segment the viewer would never write is refused with an error, not split. Method:
+        // parse a selection whose one segment is an unsigned integer, then text, negative and
+        // fractional.
+        assert!(Selection::parse(selection_with_segment(&json!(0)), "overview").is_ok());
+
+        for segment in [json!("0"), json!(-1), json!(0.5)] {
+            let result = Selection::parse(selection_with_segment(&segment), "overview");
+
+            assert!(result.is_err(), "segment {segment} was accepted");
+        }
+    }
 }

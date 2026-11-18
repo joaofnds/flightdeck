@@ -185,7 +185,7 @@ fn a_followed_chart_of_the_most_disks_presents_every_charted_second() {
 
     let selection = context.selection(&Arc::new(Cancellation::default()), 0);
 
-    let trends = selection.unwrap()["trends"].as_array().unwrap().len();
+    let trends = selection.unwrap().trends().unwrap().len();
     assert_eq!(u64::try_from(trends).unwrap(), CHARTED_SECONDS);
 }
 

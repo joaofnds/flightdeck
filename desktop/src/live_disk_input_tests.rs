@@ -199,16 +199,28 @@ impl InputDriver {
                 AppAttributionHistory, Metric, tests::disk_fixture,
             };
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["storage"] = json!({
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| {
+                    points[0]["storage"] = json!({
                 "state":"complete",
                 "read_bps":3_000_000.0,"write_bps":1_500_000.0,
                 "devices":resource_devices(ResourceEpoch::Historical)});
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["storage"] = json!({
+                });
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| {
+                    points[1]["storage"] = json!({
                 "state":"complete",
                 "read_bps":8_000_000.0,"write_bps":4_000_000.0,
                 "devices":resource_devices(ResourceEpoch::Current)});
+                });
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             let history =
                 AppAttributionHistory::prepare(Metric::Disk, &disk_fixture(), &snapshot.selection);
             assert!(history.panel().is_some(), "{}", history.coverage(None));

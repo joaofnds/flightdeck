@@ -194,12 +194,20 @@ impl CPUHoverDriver {
             &selected,
         )
         .unwrap();
-        let history = Arc::new(CPUHistory::decode(payload, &selection).unwrap());
+        let history = Arc::new(
+            CPUHistory::decode(
+                payload,
+                &crate::live_store_fixtures::selection_of_json(&selection),
+            )
+            .unwrap(),
+        );
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.accept(Box::new(Snapshot {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
-                selection: crate::live_source::Presentation::Legacy(selection),
+                selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+                    selection,
+                )),
                 apps: None,
                 detail: None,
                 history: None,

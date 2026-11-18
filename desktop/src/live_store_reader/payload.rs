@@ -20,7 +20,7 @@ pub(super) fn snapshot(
 ) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
     let selection = if super::super::route_shows_no_reading(&command.request.route) {
-        Presentation::Legacy(Value::Null)
+        Presentation::Legacy(viewer::Selection::default())
     } else {
         Presentation::Store(
             context

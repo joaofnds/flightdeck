@@ -19,7 +19,7 @@ fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     let worker = AppAttributionHistory::prepare(
         Metric::Cpu,
         &worker_history(&seconds),
-        &selection(&[], &seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
     );
     let (view, cohorts) = charted(&seconds);
 
@@ -38,7 +38,7 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
     let worker = AppAttributionHistory::prepare(
         Metric::Cpu,
         &worker_history(&seconds),
-        &selection(&[], &seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
     );
     let (view, cohorts) = charted(&seconds);
 
@@ -57,7 +57,7 @@ fn says_its_leaders_lead_over_the_range_shown() {
     let worker = AppAttributionHistory::prepare(
         Metric::Cpu,
         &worker_history(&seconds),
-        &selection(&[], &seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
     );
     let (view, cohorts) = charted(&seconds);
 

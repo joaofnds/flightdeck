@@ -7,14 +7,20 @@ fn context_admission_metadata_preserves_the_same_resident_readings() {
     // Goal: canonical context accounting replaces cache telemetry without hiding a chart.
     // Method: change only the storage metadata of a valid legacy response and compare amounts.
     let mut value = fixture();
-    let legacy = ResidentHistory::prepare(&value, &selection());
+    let legacy = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     value["coverage"]
         .as_object_mut()
         .unwrap()
         .remove("cache_bytes");
     value["coverage"]["context_metadata_bytes"] = json!(512);
 
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(
         history.amount(1, Some(1)),
@@ -29,7 +35,10 @@ fn context_admission_metadata_preserves_the_same_resident_readings() {
 fn a_chart_of_resident_memory_says_its_points_are_means() {
     // Goal: a reader of the chart of resident memory learns its statistic, as on any chart by App.
     // Method: read the help of the chart.
-    let history = ResidentHistory::prepare(&fixture(), &selection());
+    let history = ResidentHistory::prepare(
+        &fixture(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     let panel = history.panel().unwrap();
 
@@ -50,7 +59,10 @@ fn history_without_cache_or_context_accounting_is_unavailable() {
         .unwrap()
         .remove("cache_bytes");
 
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -66,7 +78,10 @@ fn history_with_malformed_context_accounting_is_unavailable() {
         .remove("cache_bytes");
     value["coverage"]["context_metadata_bytes"] = json!("invalid");
 
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -77,7 +92,10 @@ fn resident_amounts_preserve_exact_bytes_while_readouts_and_plot_use_gib() {
     // reads in binary units as the prototype's legend does.
     // Method: prepare one App above 2^53 bytes and read its amount, readout and plot value.
     let value = fixture();
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(history.amount(1, Some(1)), Some(9_007_199_254_740_993));
     assert_eq!(history.reading(1, Some(1)), "8,388,608 GiB");
     let panel = history.panel().unwrap();
@@ -98,7 +116,10 @@ fn resident_history_holds_the_readings_after_the_selected_second() {
     let selection = json!({"selected":{"run":[1,2],"boot":[3,4],"publication":1},
         "second":999,"context_last_second":1000});
 
-    let history = ResidentHistory::prepare(&value, &selection);
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert_eq!(history.amount(1, Some(1)), Some(9_007_199_254_740_993));
     let window = history.panel().unwrap().window.unwrap();
@@ -114,16 +135,22 @@ fn resident_history_places_a_lead_in_reading_at_the_left_edge() {
     let mut value = fixture();
     value["points"][0]["observation"]["wall_ns"] = json!(41 * NS);
 
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     let panel = history.panel().unwrap();
     assert_eq!(panel.window.unwrap().first, 41);
     assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
     value["points"][0]["observation"]["wall_ns"] = json!(40 * NS);
     assert!(
-        ResidentHistory::prepare(&value, &selection())
-            .panel()
-            .is_none()
+        ResidentHistory::prepare(
+            &value,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        )
+        .panel()
+        .is_none()
     );
 }
 
@@ -132,7 +159,10 @@ fn resident_partial_zero_overflow_and_missing_measures_remain_distinct() {
     // Change one real captured measure between all availability cases and inspect exact text.
     let mut value = fixture();
     value["points"][1]["apps"][0] = measure(0, 1, 2, false);
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(
         history.reading(1, Some(1)),
         "0 B known subtotal · 1 measured · 2 unavailable"
@@ -140,7 +170,10 @@ fn resident_partial_zero_overflow_and_missing_measures_remain_distinct() {
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.0));
 
     value["points"][1]["apps"][0] = measure(100, 1, 0, true);
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(
         history.reading(1, Some(1)),
         "Unavailable · byte sum overflow"
@@ -148,7 +181,10 @@ fn resident_partial_zero_overflow_and_missing_measures_remain_distinct() {
     assert_eq!(history.panel().unwrap().lines[1].values[1], None);
 
     value["points"][1]["apps"][0] = Value::Null;
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(history.reading(1, Some(1)), "Unavailable");
 }
 
@@ -158,18 +194,27 @@ fn empty_other_is_zero_only_when_source_and_membership_are_complete() {
     let mut value = fixture();
     value["points"][1]["other"] = json!({"app_count":0,
         "resident_bytes":measure(0, 0, 0, false)});
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(history.reading(0, Some(1)), "0 B");
     assert_eq!(history.panel().unwrap().lines[0].values[1], Some(0.0));
 
     for field in ["ungrouped_members", "usage_refused", "usage_gone"] {
         let mut incomplete = value.clone();
         incomplete["points"][1][field] = json!(1);
-        let history = ResidentHistory::prepare(&incomplete, &selection());
+        let history = ResidentHistory::prepare(
+            &incomplete,
+            &crate::live_store_fixtures::selection_of_json(&selection()),
+        );
         assert_eq!(history.panel().unwrap().lines[0].values[1], None);
     }
     value["points"][1]["membership_complete"] = json!(false);
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(history.panel().unwrap().lines[0].values[1], None);
 }
 
@@ -189,7 +234,10 @@ fn absent_sources_optional_clocks_and_exact_siblings_do_not_borrow_values() {
     }
     value["points"][0]["apps"][0] = Value::Null;
     value["points"][0]["observation"]["wall_ns"] = Value::Null;
-    let history = ResidentHistory::prepare(&value, &selection());
+    let history = ResidentHistory::prepare(
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert_eq!(history.panel().unwrap().lines[1].values[0], None);
     assert!(history.coverage(Some(0)).contains("source unavailable"));
     let target = Target::exact(
@@ -215,17 +263,23 @@ fn decoder_refuses_wrong_selection_duplicate_keys_and_coverage_bounds() {
     let mut wrong_selection = selection();
     wrong_selection["selected"]["publication"] = json!(3);
     assert!(
-        ResidentHistory::prepare(&fixture(), &wrong_selection)
-            .panel()
-            .is_none()
+        ResidentHistory::prepare(
+            &fixture(),
+            &crate::live_store_fixtures::selection_of_json(&wrong_selection)
+        )
+        .panel()
+        .is_none()
     );
     let mut duplicate = fixture();
     let entry = duplicate["cohort"][0].clone();
     duplicate["cohort"].as_array_mut().unwrap().push(entry);
     assert!(
-        ResidentHistory::prepare(&duplicate, &selection())
-            .panel()
-            .is_none()
+        ResidentHistory::prepare(
+            &duplicate,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        )
+        .panel()
+        .is_none()
     );
 
     for (field, bound) in [
@@ -236,9 +290,12 @@ fn decoder_refuses_wrong_selection_duplicate_keys_and_coverage_bounds() {
         let mut value = fixture();
         value["coverage"][field] = json!(bound + 1);
         assert!(
-            ResidentHistory::prepare(&value, &selection())
-                .panel()
-                .is_none()
+            ResidentHistory::prepare(
+                &value,
+                &crate::live_store_fixtures::selection_of_json(&selection())
+            )
+            .panel()
+            .is_none()
         );
     }
 }
@@ -257,14 +314,20 @@ fn decoder_refuses_more_than_4096_distinct_observations() {
     value["selected"] = points[1]["observation"].clone();
     value["points"] = json!(points[..POINTS_MAX]);
     assert!(matches!(
-        ResidentHistory::prepare(&value, &selection()),
+        ResidentHistory::prepare(
+            &value,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        ),
         ResidentHistory::Ready(_)
     ));
 
     value["points"] = json!(points);
 
     assert!(matches!(
-        ResidentHistory::prepare(&value, &selection()),
+        ResidentHistory::prepare(
+            &value,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        ),
         ResidentHistory::Unavailable(_)
     ));
 }
@@ -286,7 +349,10 @@ fn decoder_refuses_more_than_eight_distinct_leaders() {
         point["apps"] = json!(vec![measure(42, 1, 0, false); COHORT_MAX]);
     }
     assert!(matches!(
-        ResidentHistory::prepare(&value, &selection()),
+        ResidentHistory::prepare(
+            &value,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        ),
         ResidentHistory::Ready(_)
     ));
 
@@ -296,7 +362,10 @@ fn decoder_refuses_more_than_eight_distinct_leaders() {
     }
 
     assert!(matches!(
-        ResidentHistory::prepare(&value, &selection()),
+        ResidentHistory::prepare(
+            &value,
+            &crate::live_store_fixtures::selection_of_json(&selection())
+        ),
         ResidentHistory::Unavailable(_)
     ));
 }
@@ -313,7 +382,7 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
     let snapshot = Box::new(crate::live_source::Snapshot {
         generation: 1,
         catalog: Value::Null,
-        selection: crate::live_source::Presentation::Legacy(selected),
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(selected)),
         apps: None,
         detail: None,
         history: Some(crate::live_source::Presentation::Legacy(

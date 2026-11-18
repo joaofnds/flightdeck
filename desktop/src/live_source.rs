@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::live_source_mode::SourceMode;
 use serde_json::Value;
 use viewer::live_app_response::KeyKind;
-use viewer::{Cancellation, LiveSession};
+use viewer::{Cancellation, LiveSession, Selection};
 
 #[path = "live_store_reader.rs"]
 mod store_reader;
@@ -125,7 +125,7 @@ pub fn app_key_from_json(app: &Value) -> Result<AppKey, String> {
 pub struct Snapshot {
     pub generation: u64,
     pub catalog: Value,
-    pub selection: Presentation<Value>,
+    pub selection: Presentation<Selection>,
     pub apps: Option<Presentation<Value>>,
     pub detail: Option<Presentation<Value>>,
     pub history: Option<Presentation<Value>>,
@@ -1061,7 +1061,12 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
-    let mut selection = reader_selection(session, &command.request, command.context, listing)?;
+    let mut selection = Selection::from_json(reader_selection(
+        session,
+        &command.request,
+        command.context,
+        listing,
+    )?);
     let tail_pending = reader_earlier(session, &command.request, tail_at_once, &mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     if early {
@@ -1310,14 +1315,14 @@ fn reader_route_has_histories(route: &str) -> bool {
 }
 
 /// A snapshot of the catalog and selection, before the route's payload is read.
-fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box<Snapshot> {
+fn reader_snapshot_new(generation: u64, catalog: Value, selection: Selection) -> Box<Snapshot> {
     reader_snapshot_owned(generation, catalog, Presentation::Legacy(selection))
 }
 
 fn reader_snapshot_owned(
     generation: u64,
     catalog: Value,
-    selection: Presentation<Value>,
+    selection: Presentation<Selection>,
 ) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation,
@@ -1367,7 +1372,8 @@ fn reader_computer(
         }
         _ => reader_summary_only(reader_latest(session)?),
     };
-    let snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    let snapshot =
+        reader_snapshot_new(command.generation, catalog, Selection::from_json(selection));
     reader_snapshot_record(reader, command, &snapshot, Histories::Read);
     Ok(Some(snapshot))
 }
@@ -1468,7 +1474,7 @@ fn reader_earlier(
     session: &mut LiveSession,
     request: &Request,
     tail_at_once: bool,
-    selection: &mut Value,
+    selection: &mut Selection,
 ) -> bool {
     if reader_earlier_skips(request) {
         return false;
@@ -1476,7 +1482,7 @@ fn reader_earlier(
     let Some(last) = crate::live_projection::context_last_second(selection) else {
         return false;
     };
-    let Some(fields) = selection.as_object_mut() else {
+    let Some(mut fields) = selection.fields_mut() else {
         return false;
     };
     let tail = if tail_at_once {
@@ -1672,7 +1678,7 @@ fn reader_payload_histories(session: &LiveSession, request: &Request, snapshot: 
 
 fn reader_app_attribution_history(
     session: &LiveSession,
-    selection: &Value,
+    selection: &viewer::Selection,
     metric: crate::live_app_attribution_history::Metric,
 ) -> Arc<Presentation<crate::live_app_attribution_history::AppAttributionHistory>> {
     reader_app_attribution_result(
@@ -1684,7 +1690,7 @@ fn reader_app_attribution_history(
 
 fn reader_app_attribution_result(
     result: persistence::Result<Value>,
-    selection: &Value,
+    selection: &viewer::Selection,
     metric: crate::live_app_attribution_history::Metric,
 ) -> Arc<Presentation<crate::live_app_attribution_history::AppAttributionHistory>> {
     use crate::live_app_attribution_history::AppAttributionHistory;

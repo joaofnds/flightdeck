@@ -18,7 +18,9 @@ pub fn readings(trends: &[MachineSecond]) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: 0,
         catalog: json!({"first_second": 9_000, "last_second": 10_000}),
-        selection: crate::live_source::Presentation::Legacy(selection),
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+            selection,
+        )),
         apps: None,
         detail: None,
         history: None,

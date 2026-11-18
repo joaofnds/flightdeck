@@ -215,7 +215,7 @@ impl LiveDashboard {
             }
             let selection = self
                 .reading_snapshot()
-                .map_or(&Value::Null, |snapshot| &snapshot.selection);
+                .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
             let summary = crate::live_views::matching_summary(selection);
             return crate::live_views::pressure(&summary["pressure"]).to_owned();
         }
@@ -1127,11 +1127,12 @@ fn target_index(
             .take(crate::data::LIVE_SAMPLE_LIMIT)
             .rposition(|point| target.matches(point.get("observation").unwrap_or(point)));
     }
-    let recent = snapshot.selection["trends"]
-        .as_array()?
+    let recent = snapshot
+        .selection
+        .trends()?
         .iter()
         .take(crate::data::LIVE_SAMPLE_LIMIT)
-        .rposition(|point| target.matches(point));
+        .rposition(|trend| target.matches(trend.point()));
     if let Some(index) = recent {
         return Some(index + crate::live_projection::older_count(&snapshot.selection));
     }
@@ -1466,10 +1467,12 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
             .take(crate::data::LIVE_SAMPLE_LIMIT)
             .rposition(at_second);
     }
-    let recent = snapshot.selection["trends"]
-        .as_array()?
+    let recent = snapshot
+        .selection
+        .trends()?
         .iter()
         .take(crate::data::LIVE_SAMPLE_LIMIT)
+        .map(viewer::TrendPoint::point)
         .rposition(at_second);
     if let Some(index) = recent {
         return Some(index + crate::live_projection::older_count(&snapshot.selection));
@@ -1552,12 +1555,12 @@ mod tests {
         Snapshot {
             generation: 1,
             catalog: Value::Null,
-            selection: crate::live_source::Presentation::Legacy(
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
                 json!({"second":1000,"context_last_second":1000,"trends":[
                 {"wall_ns":998_100_000_000_u64},
                 {"wall_ns":1_000_100_000_000_u64},
                 {"wall_ns":1_000_200_000_000_u64}]}),
-            ),
+            )),
             apps: None,
             detail: None,
             history: None,
@@ -1638,10 +1641,10 @@ mod tests {
         };
         let mut snapshot = snapshot();
         snapshot.selection = crate::live_source::Presentation::Legacy(
-            json!({"second": 5000, "context_last_second": 5000,
+            viewer::Selection::from_json(json!({"second": 5000, "context_last_second": 5000,
             "earlier_stride_seconds": 10,
             "earlier_trends": [point(2000, 1), point(2010, 2)],
-            "trends": [point(4101, 3), point(5000, 4)]}),
+            "trends": [point(4101, 3), point(5000, 4)]})),
         );
         snapshot
     }

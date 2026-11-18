@@ -75,7 +75,7 @@ const _: () = {
 };
 
 impl CPUHistory {
-    pub fn decode(value: Value, selection: &Value) -> Result<Self, String> {
+    pub fn decode(value: Value, selection: &viewer::Selection) -> Result<Self, String> {
         validation::preflight(&value)?;
         let mut wire: Box<CPUHistoryWire> =
             serde_json::from_value(value).map_err(|error| error.to_string())?;

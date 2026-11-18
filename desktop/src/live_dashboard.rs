@@ -100,8 +100,8 @@ pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
 /// left a second time before its page's next reading holds no points but still waits for them.
 fn switch_route_drop_points(snapshot: &mut Snapshot) {
     snapshot.selection.edit(|selection| {
-        if let Some(fields) = selection.as_object_mut() {
-            drop(fields.remove("trends"));
+        drop(selection.take_trends());
+        if let Some(mut fields) = selection.fields_mut() {
             drop(fields.remove("earlier_trends"));
         }
     });
@@ -737,7 +737,7 @@ impl LiveDashboard {
                     "curve_builds":self.plots.curve_builds(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
                     "scalar_points":self.snapshot.as_ref()
-                        .and_then(|s| s.selection["trends"].as_array()).map(Vec::len),
+                        .and_then(|s| s.selection.trends()).map(viewer::Trends::len),
                     "cpu_history":self.snapshot.as_ref()
                         .and_then(|snapshot| snapshot.cpu_history.as_ref())
                         .map(|history| serde_json::json!({"rows":history.cpus().len(),
@@ -1858,10 +1858,10 @@ mod selection_tests {
         dashboard.snapshot = Some(Box::new(Snapshot {
             generation: dashboard.generation,
             catalog: json!({"first_second":1000,"last_second":1002}),
-            selection: crate::live_source::Presentation::Legacy(
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
                 json!({"second":1000,"context_last_second":1000,"selected":{"publication":1},
                 "summary":{"memory_total_bytes":4096},"trends":[]}),
-            ),
+            )),
             apps: None,
             detail: None,
             history: None,
@@ -2011,11 +2011,13 @@ mod selection_tests {
         // page, then look at the reading kept for the page left.
         let mut dashboard = dashboard();
         dashboard.accept(charted_readings());
+        let shown = &dashboard.snapshot.as_ref().unwrap().selection;
+        assert_ne!(shown.trends().map_or(0, viewer::Trends::len), 0);
 
         dashboard.switch_route("cpu");
 
         let kept = &dashboard.visited["overview"].snapshot.selection;
-        assert_eq!(kept.get("trends"), None);
+        assert_eq!(kept.trends(), None);
         assert_eq!(kept.get("earlier_trends"), None);
     }
 
@@ -2054,21 +2056,14 @@ mod selection_tests {
         // look at the reading kept for Overview.
         let mut dashboard = dashboard();
         dashboard.accept(crate::live_source::tests::rankings::stored_overview_reading());
-        assert!(
-            dashboard
-                .snapshot
-                .as_ref()
-                .unwrap()
-                .selection
-                .get("trends")
-                .is_some()
-        );
+        let shown = &dashboard.snapshot.as_ref().unwrap().selection;
+        assert_ne!(shown.trends().map_or(0, viewer::Trends::len), 0);
 
         dashboard.switch_route("cpu");
 
         let kept = &dashboard.visited["overview"].snapshot.selection;
         assert!(matches!(kept, crate::live_source::Presentation::Store(_)));
-        assert_eq!(kept.get("trends"), None);
+        assert_eq!(kept.trends(), None);
         assert_eq!(kept.get("earlier_trends"), None);
     }
 
@@ -2083,7 +2078,7 @@ mod selection_tests {
         dashboard.switch_route("overview");
 
         let selection = &dashboard.snapshot.as_ref().unwrap().selection;
-        assert!(selection.get("trends").is_some());
+        assert_ne!(selection.trends().map_or(0, viewer::Trends::len), 0);
         assert!(selection.get("earlier_trends").is_some());
     }
 
@@ -2180,10 +2175,10 @@ mod selection_tests {
         dashboard.request.second = Some(1001);
         dashboard.submit();
         missing.generation = dashboard.generation;
-        missing.selection = crate::live_source::Presentation::Legacy(
+        missing.selection = crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
             json!({"second":1001,"context_last_second":1001,"selected":null,
             "summary":null,"trends":[]}),
-        );
+        ));
 
         assert!(dashboard.receive(Update::Ready(missing)));
 

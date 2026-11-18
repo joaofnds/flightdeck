@@ -67,7 +67,9 @@ fn a_kept_unread_sibling_waits_for_complete_before_formatting_its_apps() {
     // Goal: an unread sibling is a continuation rather than a generic missing-ranks failure.
     // Method: inspect publication one from the immutable Primary after its request is superseded.
     let (mut harness, primary, hold) = primary_sealed(Some(1063));
-    let identity = primary.selection["trends"]
+    let identity = primary
+        .selection
+        .trends_json()
         .as_array()
         .unwrap()
         .iter()
@@ -349,7 +351,9 @@ fn an_inspected_overview_reading_needs_no_store_caught_up() {
     let mut harness = Harness::new();
     harness.worker.request(request("overview")).unwrap();
     let shown = harness.ready();
-    let older = shown.selection["trends"]
+    let older = shown
+        .selection
+        .trends_json()
         .as_array()
         .unwrap()
         .iter()
@@ -445,7 +449,7 @@ fn a_store_worker_delivers_the_computer_summary_without_chart_points() {
         snapshot.selection["summary"]["memory_total_bytes"].as_u64(),
         Some(9_007_199_254_740_993)
     );
-    assert_eq!(snapshot.selection.get("trends"), None);
+    assert_eq!(snapshot.selection.trends(), None);
     harness.assert_source_free();
 }
 
@@ -628,7 +632,7 @@ mod the_top_apps_of_each_second {
             let snapshot = harness.ready();
             if snapshot.selection["selected"]["publication"] == publication {
                 let oldest =
-                    crate::live_rankings::observation_key(&snapshot.selection["trends"][0]);
+                    crate::live_rankings::observation_key(&snapshot.selection.trends_json()[0]);
 
                 return (
                     Arc::clone(snapshot.app_ranks.as_ref().unwrap()),

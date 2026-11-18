@@ -750,7 +750,7 @@ fn reveal(key: &str, dashboard: &Entity<LiveDashboard>, cx: &mut App) -> Result<
 fn state(dashboard: &LiveDashboard, window: &Window, cx: &App) -> Value {
     let selection = dashboard
         .reading_snapshot()
-        .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
     let cards: Vec<Value> = dashboard
         .summary_cards()
         .iter()

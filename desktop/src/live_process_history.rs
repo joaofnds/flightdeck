@@ -27,7 +27,7 @@ pub const PANEL_PREFIX: &str = "live-process-group-";
 pub const DISK_PANEL: &str = "live-process-group-disk";
 
 impl ProcessHistory {
-    pub fn prepare(payload: Value, request: &Request, selection: &Value) -> Self {
+    pub fn prepare(payload: Value, request: &Request, selection: &viewer::Selection) -> Self {
         match prepare_validate(&payload, request, selection) {
             Ok((app, executable)) => Self::Ready {
                 app,
@@ -41,7 +41,7 @@ impl ProcessHistory {
     pub fn prepare_all(
         payload: Box<viewer::app_process_groups_history::AppProcessGroupsHistory>,
         request: &Request,
-        selection: &Value,
+        selection: &viewer::Selection,
     ) -> Self {
         groups::prepare(payload, request, selection).unwrap_or_else(Self::Unavailable)
     }
@@ -79,7 +79,7 @@ impl ProcessHistory {
         }
     }
 
-    pub fn panels(&self, selection: &Value) -> Result<Vec<Rc<Panel>>, String> {
+    pub fn panels(&self, selection: &viewer::Selection) -> Result<Vec<Rc<Panel>>, String> {
         if let Self::All { payload, .. } = self {
             let last = crate::live_projection::context_last_second(selection)
                 .ok_or("Process groups selection has no context end")?;
@@ -121,7 +121,7 @@ impl ProcessHistory {
 fn prepare_validate(
     payload: &Value,
     request: &Request,
-    selection: &Value,
+    selection: &viewer::Selection,
 ) -> Result<(AppKey, String), String> {
     if request.route != "apps" {
         return Err("Process history requires the selected App".into());

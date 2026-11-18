@@ -9,9 +9,9 @@ use serde_json::{Map, Value, json};
 use super::native::Origin;
 use super::response::{JSON_BYTES_MAX, json_charge};
 use super::{ByteReservation, QueryContext, QuerySecond, Response};
-use crate::Cancellation;
 use crate::live_app_response::Observation;
 use crate::session::ContextRange;
+use crate::{Cancellation, Selection};
 
 /// Room for the selection's summary point and the alternatives at its second, which also holds
 /// the chart's next point while it is built, before it is charged.
@@ -101,11 +101,27 @@ impl QueryContext {
         &self,
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> Result<Response<Selection>> {
         self.selection_for(&self.selected().observation, false, cancellation, epoch)
     }
 
+    /// The selection of `observation`, built and bounded as one JSON value and then split, so
+    /// the bound and the bytes charged cover its chart points. A selection that keeps the
+    /// context the window holds has no chart points.
     pub fn selection_for(
+        &self,
+        observation: &Observation,
+        keep_context: bool,
+        cancellation: &Arc<Cancellation>,
+        epoch: u64,
+    ) -> Result<Response<Selection>> {
+        let response = self.selection_for_json(observation, keep_context, cancellation, epoch)?;
+
+        Ok(response.map(Selection::from_json))
+    }
+
+    /// The selection of `observation` as one JSON value, which `selection_for` splits.
+    fn selection_for_json(
         &self,
         observation: &Observation,
         keep_context: bool,

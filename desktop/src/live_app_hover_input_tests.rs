@@ -753,10 +753,10 @@ impl AppEpoch {
         Box::new(Snapshot {
             generation,
             catalog: json!({"path":"/fixture/app-hover","first_second":999,"last_second":1000}),
-            selection: crate::live_source::Presentation::Legacy(
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
                 json!({"second":second,"context_last_second":second,"selected":selected,
                 "summary":null,"trends":[system_point(999,1),system_point(1000,2)]}),
-            ),
+            )),
             apps: Some(crate::live_source::Presentation::Legacy(
                 json!({"selected":selected,"apps":[app],"ungrouped_members":0,
                 "page":{"offset":0,"total":1,"next_offset":null}}),

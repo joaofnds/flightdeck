@@ -692,7 +692,9 @@ impl VisibilityHarness {
         let page = Box::new(Snapshot {
             generation: self.generation(),
             catalog: Value::Null,
-            selection: crate::live_source::Presentation::Legacy(json!({})),
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+                json!({}),
+            )),
             apps: None,
             detail: None,
             history: None,

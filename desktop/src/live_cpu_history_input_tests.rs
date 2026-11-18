@@ -252,7 +252,10 @@ fn a_hover_on_the_history_of_a_page_opened_again_shows_the_reading_the_reader_an
 
     harness.driver.answer_hover(hovered_observation_selection());
 
-    let expected = crate::live_views::summary::cards("cpu", &hovered_observation_selection());
+    let expected = crate::live_views::summary::cards(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&hovered_observation_selection()),
+    );
     assert_eq!(
         harness.driver.readout_texts(),
         crate::live_store_page_fixtures::texts(&expected)
@@ -504,12 +507,20 @@ impl CPUHistoryDriver {
 
     /// Hands the page the reader's answer to its request, the readings of `fixture`.
     fn accept_history(&mut self, fixture: CPUHistoryFixture) {
-        let history = Arc::new(CPUHistory::decode(fixture.payload, &fixture.selection).unwrap());
+        let history = Arc::new(
+            CPUHistory::decode(
+                fixture.payload,
+                &crate::live_store_fixtures::selection_of_json(&fixture.selection),
+            )
+            .unwrap(),
+        );
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.accept(Box::new(Snapshot {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
-                selection: crate::live_source::Presentation::Legacy(fixture.selection),
+                selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+                    fixture.selection,
+                )),
                 apps: None,
                 detail: None,
                 history: None,
@@ -787,7 +798,9 @@ impl CPUHistoryDriver {
             let reply = Box::new(Snapshot {
                 generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
-                selection: crate::live_source::Presentation::Legacy(selection),
+                selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+                    selection,
+                )),
                 apps: None,
                 detail: None,
                 history: None,

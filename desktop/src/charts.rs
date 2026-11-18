@@ -1708,11 +1708,21 @@ mod live_tests {
             upper: 0,
         };
 
-        let network = crate::live_projection::panels("network", &selection, None).unwrap();
+        let network = crate::live_projection::panels(
+            "network",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None,
+        )
+        .unwrap();
         let (minimum, maximum) = domain(&network[0], inspection, &[]);
         assert!((minimum + 2.0).abs() < f32::EPSILON);
         assert!((maximum - 3.0).abs() < f32::EPSILON);
-        let energy = crate::live_projection::panels("energy", &selection, None).unwrap();
+        let energy = crate::live_projection::panels(
+            "energy",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None,
+        )
+        .unwrap();
         let (minimum, maximum) = domain(&energy[0], inspection, &[]);
         assert!(minimum.abs() < f32::EPSILON);
         assert!((maximum - 10.0).abs() < f32::EPSILON);

@@ -1264,16 +1264,20 @@ impl InputDriver {
     fn seed_distinct_overview_timestamps(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let mut historical = snapshot.selection["trends"][0].clone();
+            let mut historical = snapshot.selection.trends_json()[0].clone();
             historical["cpu_percent"] = json!(13);
             historical["pressure"] = json!(2);
             historical["swap_used_bytes"] = json!(3_221_225_472_u64);
-            let mut current = snapshot.selection["trends"][1].clone();
+            let mut current = snapshot.selection.trends_json()[1].clone();
             current["cpu_percent"] = json!(87);
             current["pressure"] = json!(0);
             current["swap_used_bytes"] = json!(7_516_192_768_u64);
             snapshot.selection.legacy_mut().unwrap()["summary"] = current.clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([historical, current]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([historical, current]));
 
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -1287,7 +1291,7 @@ impl InputDriver {
     fn seed_repeated_second(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let mut previous = snapshot.selection["trends"][0].clone();
+            let mut previous = snapshot.selection.trends_json()[0].clone();
             previous["wall_ns"] = json!(999_100_000_000_u64);
             previous["publication"] = json!(2);
             previous["power_watts"] = json!(10);
@@ -1297,12 +1301,15 @@ impl InputDriver {
             latest["publication"] = json!(3);
             latest["power_watts"] = json!(90);
             latest["soc_celsius"] = json!(60);
-            let mut selected = snapshot.selection["trends"][1].clone();
+            let mut selected = snapshot.selection.trends_json()[1].clone();
             selected["publication"] = json!(4);
             selected["soc_celsius"] = json!(40);
             snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(4);
-            snapshot.selection.legacy_mut().unwrap()["trends"] =
-                json!([previous, latest, selected]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([previous, latest, selected]));
 
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
             assert!(dashboard.take_update(Update::Ready(snapshot)));
@@ -1322,15 +1329,19 @@ impl InputDriver {
     fn seed_selection_before_held_seconds(&mut self, context_last: u64) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let selected = snapshot.selection["trends"][0].clone();
-            let mut later = snapshot.selection["trends"][1].clone();
+            let selected = snapshot.selection.trends_json()[0].clone();
+            let mut later = snapshot.selection.trends_json()[1].clone();
             later["power_watts"] = json!(90);
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
             snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(context_last);
             snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] =
                 selected["publication"].clone();
             snapshot.selection.legacy_mut().unwrap()["summary"] = selected.clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([selected, later]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([selected, later]));
 
             dashboard.request.second = Some(999);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
@@ -1685,8 +1696,12 @@ impl InputDriver {
     /// summary reads `power_watts`, the way a tick does.
     fn reply_with_power(&mut self, second: u64, power_watts: u64) {
         self.reply_with_selection(second, 1000, |selection| {
-            selection["trends"][0]["power_watts"] = json!(power_watts);
-            selection["summary"] = selection["trends"][0].clone();
+            let mut summary = Value::Null;
+            selection.trends_edit(|points| {
+                points[0]["power_watts"] = json!(power_watts);
+                summary = points[0].clone();
+            });
+            selection["summary"] = summary;
         });
     }
 
@@ -1702,16 +1717,20 @@ impl InputDriver {
         &mut self,
         second: u64,
         context_last: u64,
-        edit: impl FnOnce(&mut Value),
+        edit: impl FnOnce(&mut viewer::Selection),
     ) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.worker.commands_sent());
-            let identity = snapshot.selection["trends"][0].clone();
+            let identity = snapshot.selection.trends().unwrap()[0].json();
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(second);
             snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(context_last);
             snapshot.selection.legacy_mut().unwrap()["selected"] = json!({"run":identity["run"],
                 "boot":identity["boot"],"publication":identity["publication"]});
-            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([identity]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([identity]));
             edit(snapshot.selection.legacy_mut().unwrap());
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             cx.notify();
@@ -1798,7 +1817,7 @@ impl InputDriver {
             dashboard
                 .snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.selection.clone())
+                .map(|snapshot| snapshot.selection.json())
         })
     }
 
@@ -1851,10 +1870,10 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation,
         catalog: json!({"first_second":900,"last_second":1100}),
-        selection: crate::live_source::Presentation::Legacy(
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
             json!({"second":1000,"context_last_second":1000,"selected":identity,
             "trends":[previous, selected]}),
-        ),
+        )),
         apps: None,
         detail: None,
         history: None,

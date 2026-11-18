@@ -76,7 +76,7 @@ fn a_cancelled_kept_primary_refresh_cannot_replace_a_new_selection() {
     let selected = primary.selection["selected"].clone();
     let mut inspection = request("memory");
     inspection.second = Some(1000);
-    inspection.identity = Some(primary.selection["trends"][0].clone());
+    inspection.identity = Some(primary.selection.trends_json()[0].clone());
     adapter.submit(inspection, crate::live_source::Context::Keep);
 
     assert!(adapter.read().is_none());

@@ -161,7 +161,10 @@ fn a_view_newer_than_the_readings_fills_the_overviews_readouts() {
 
     dashboard.take_view(newer_view());
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(10_005, 0))),
+    );
     assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
 }
 
@@ -505,7 +508,12 @@ mod when_the_worker_has_not_read_the_page_yet {
 
         dashboard.take_view(newer_view());
 
-        let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
+        let expected = summary::cards(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(
+                10_005, 0,
+            ))),
+        );
         assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
     }
 
@@ -1196,13 +1204,19 @@ mod when_a_hover_shows_an_earlier_second {
         // take a View that ends at 10,005.
         let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let mut hover = preview(&dashboard);
-        hover.reading.selection =
-            crate::live_source::Presentation::Legacy(summary_selection(&reading_at(9_999, 0)));
+        hover.reading.selection = crate::live_source::Presentation::Legacy(
+            viewer::Selection::from_json(summary_selection(&reading_at(9_999, 0))),
+        );
         dashboard.preview = Some(hover);
 
         dashboard.take_view(newer_view());
 
-        let expected = summary::cards("overview", &summary_selection(&reading_at(9_999, 0)));
+        let expected = summary::cards(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(
+                9_999, 0,
+            ))),
+        );
         assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
     }
 
@@ -1213,8 +1227,9 @@ mod when_a_hover_shows_an_earlier_second {
         // a View that ends at 10,005, whose CPU was 2.5% busy.
         let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let mut hover = preview(&dashboard);
-        hover.reading.selection =
-            crate::live_source::Presentation::Legacy(summary_selection(&reading_at(9_999, 0)));
+        hover.reading.selection = crate::live_source::Presentation::Legacy(
+            viewer::Selection::from_json(summary_selection(&reading_at(9_999, 0))),
+        );
         dashboard.preview = Some(hover);
 
         dashboard.take_view(newer_view());

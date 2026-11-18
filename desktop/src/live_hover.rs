@@ -250,14 +250,16 @@ fn resident_cpu_detail(
 
 /// The readings of `target` the committed snapshot already holds.
 fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
-    let summary = resident_summary(snapshot, target).clone();
+    let summary = resident_summary(snapshot, target);
     let selected = target.identity.clone().unwrap_or(Value::Null);
     Box::new(Snapshot {
         generation: snapshot.generation,
         catalog: snapshot.catalog.clone(),
-        selection: crate::live_source::Presentation::Legacy(json!({"second":target.second,
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
+            json!({"second":target.second,
             "context_last_second":snapshot.selection["context_last_second"],"selected":selected,
-            "summary":summary,"alternatives":[],"trends":[]})),
+            "summary":summary,"alternatives":[],"trends":[]}),
+        )),
         apps: None,
         detail: None,
         history: None,
@@ -405,18 +407,21 @@ fn resident_rankings(
     }
 }
 
-fn resident_summary<'a>(snapshot: &'a Snapshot, target: &Target) -> &'a Value {
+fn resident_summary(snapshot: &Snapshot, target: &Target) -> Value {
     if target.matches(&snapshot.selection["selected"]) {
-        return &snapshot.selection["summary"];
+        return snapshot.selection["summary"].clone();
     }
 
-    snapshot.selection["trends"]
-        .as_array()
-        .and_then(|points| {
-            points
+    // The viewer writes a summary with its segment, so a summary taken from a chart point gets
+    // its segment back.
+    snapshot
+        .selection
+        .trends()
+        .and_then(|trends| {
+            trends
                 .iter()
                 .take(4096)
-                .rfind(|point| target.matches(point))
+                .rfind(|trend| target.matches(trend.point()))
         })
-        .unwrap_or(&Value::Null)
+        .map_or(Value::Null, viewer::TrendPoint::json)
 }

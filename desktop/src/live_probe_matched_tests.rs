@@ -64,7 +64,7 @@ fn follows_matched_replay_through_the_real_worker_mailbox() {
 
 fn commands(probe: &mut Probe, route: &str, expected: &Value) {
     let mut input = std::io::stdin().lock();
-    let mut context = Value::Null;
+    let mut context = None;
     for _command in 0..COMMANDS_MAX {
         println!("{}", json!({"event": "await_command"}));
         std::io::stdout().flush().unwrap();
@@ -96,7 +96,7 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
         }
         let generation = if words[0] == "hover" {
             payloads::validate_context(&payloads::ContextComparison {
-                points: &context,
+                points: context.as_ref(),
                 observations: &step["kept_observations"],
             })
             .unwrap();
@@ -113,11 +113,11 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
         };
         let snapshot = wait(probe, generation, route, step);
         if words[0] != "hover" {
-            context = snapshot.selection["trends"].clone();
+            context = snapshot.selection.trends().cloned();
         }
         emit_complete(
             &snapshot,
-            &context,
+            context.as_ref(),
             &CommandReport {
                 name: words[0],
                 route,
@@ -129,13 +129,18 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
     panic!("matched command count bound reached");
 }
 
-fn emit_complete(snapshot: &Snapshot, context: &Value, report: &CommandReport<'_>) {
+fn emit_complete(
+    snapshot: &Snapshot,
+    context: Option<&viewer::Trends>,
+    report: &CommandReport<'_>,
+) {
     println!(
         "{}",
         json!({"event": "complete", "step": report.index,
         "command": report.name, "generation": snapshot.generation,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
-        "context_values": snapshot.selection["trends"], "kept_context_values": context,
+        "context_values": snapshot.selection.trends().map(viewer::Trends::json),
+        "kept_context_values": context.map(viewer::Trends::json),
         "payloads": payloads::validate(snapshot, report.route, report.expected).unwrap()})
     );
 }

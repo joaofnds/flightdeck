@@ -11,7 +11,10 @@ fn battery_cards_preserve_signed_flow_false_and_exact_cycles() {
         "health_percent": 105.0, "cycle_count": 9_007_199_254_740_993_u64
     }}));
 
-    let cards = cards("battery", &selection);
+    let cards = cards(
+        "battery",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert_eq!(
         readings(&cards),
@@ -33,9 +36,15 @@ fn memory_in_use_adds_app_wired_and_compressed_and_refuses_a_partial_total() {
         "memory_purgeable_bytes": 1_073_741_824_u64, "memory_wired_bytes": 2_147_483_648_u64,
         "memory_compressed_bytes": 1_073_741_824_u64, "memory_total_bytes": 25_769_803_776_u64});
 
-    let whole = cards("memory", &selection(&quantities));
+    let whole = cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection(&quantities)),
+    );
     quantities["memory_wired_bytes"] = Value::Null;
-    let partial = cards("memory", &selection(&quantities));
+    let partial = cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection(&quantities)),
+    );
 
     assert_eq!(whole[1].reading, "8 GiB");
     assert_eq!(whole[1].note, "Of 24 GiB installed");
@@ -52,7 +61,10 @@ fn a_sibling_or_retimed_observation_cannot_lend_its_cards() {
     retimed["summary"]["wall_ns"] = json!(1_000_000_000_001_u64);
 
     for selection in [sibling, retimed] {
-        let cards = cards("battery", &selection);
+        let cards = cards(
+            "battery",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+        );
         assert!(cards.iter().all(|card| card.reading == "Unavailable"));
         assert!(cards.iter().all(|card| card.color == crate::charts::MUTED));
     }
@@ -65,9 +77,18 @@ fn the_overview_cpu_and_gpu_cards_lead_with_temperature_and_keep_utilization_bel
     let selection = selection(&json!({"cpu_celsius": 71.5, "gpu_celsius": 63.25,
         "cpu_percent": 25.0, "gpu_active_percent": 40.0}));
 
-    let overview = cards("overview", &selection);
-    let cpu_page = cards("cpu", &selection);
-    let gpu_page = cards("gpu", &selection);
+    let overview = cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
+    let cpu_page = cards(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
+    let gpu_page = cards(
+        "gpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert_eq!(
         readings(&overview[..2]),
@@ -86,7 +107,10 @@ fn an_overview_card_without_a_die_temperature_stays_unavailable_and_keeps_its_lo
     let selection = selection(&json!({"soc_celsius": 58.1, "cpu_celsius": null,
         "cpu_percent": 25.0, "gpu_active_percent": 40.0}));
 
-    let overview = cards("overview", &selection);
+    let overview = cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert_eq!(overview[0].reading, "Unavailable");
     assert_eq!(overview[0].color, crate::charts::MUTED);

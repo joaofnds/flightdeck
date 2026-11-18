@@ -37,7 +37,7 @@ pub(super) fn record_route(route: &str) {
     let snapshot = &presentation.snapshot;
     harness.teardown();
     let report = json!({"schemaVersion": 1, "route": route, "request_complete": true,
-        "selected": snapshot.selection["selected"], "selection": snapshot.selection,
+        "selected": snapshot.selection["selected"], "selection": snapshot.selection.json(),
         "apps": snapshot.apps, "detail": snapshot.detail,
         "history": snapshot.history, "cpu_detail": snapshot.cpu_detail,
         "source_payloads": payloads, "source_availability": source_availability,
@@ -142,7 +142,7 @@ pub(super) fn record_selections(harness: &Harness, snapshots: [&Snapshot; 4]) {
         &json!({"schemaVersion": 1,
         "input_root": harness.root,
         "snapshots": snapshots.map(|snapshot| json!({
-            "selection": snapshot.selection, "apps": snapshot.apps,
+            "selection": snapshot.selection.json(), "apps": snapshot.apps,
             "detail": snapshot.detail, "history": snapshot.history,
             "availability": payloads::report(snapshot)
                 .unwrap(), "ranks_and_parts": window_values(snapshot),
@@ -189,8 +189,8 @@ pub(super) fn record_semantics(
     view: &viewer::store::View,
 ) {
     let report = json!({"schemaVersion": 1, "case": case,
-        "selection": snapshot.selection, "apps": snapshot.apps, "detail": snapshot.detail,
-        "store_machine": format!("{:?}", view.seconds),
+        "selection": snapshot.selection.json(), "apps": snapshot.apps,
+        "detail": snapshot.detail, "store_machine": format!("{:?}", view.seconds),
         "store_apps": format!("{:?}", view.apps),
         "input_root": harness.root, "input_owned": harness.input.is_some(),
         "ring": harness.input.as_ref().map(|input| &input.ring),
@@ -252,13 +252,15 @@ fn preserves_full_integer_precision_in_structured_source_work() {
 }
 
 pub(super) fn window_values(snapshot: &Snapshot) -> Value {
-    let points = snapshot.selection["trends"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice);
-    assert!(points.len() <= 4096);
+    let trends = snapshot
+        .selection
+        .trends()
+        .map_or(&[][..], viewer::Trends::as_slice);
+    assert!(trends.len() <= 4096);
     json!(
-        points
+        trends
             .iter()
+            .map(viewer::TrendPoint::point)
             .map(|point| {
                 let key = viewer::ObservationKey {
                     run: collector::recording::parse_identity(point["run"].as_str().unwrap())

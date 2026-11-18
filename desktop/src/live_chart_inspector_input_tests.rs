@@ -102,19 +102,22 @@ impl InputDriver {
     fn seed_chart_sample_gaps(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = super::accepted_snapshot(dashboard.generation);
-            let mut missing = snapshot.selection["trends"][0].clone();
+            let mut missing = snapshot.selection.trends_json()[0].clone();
             missing["wall_ns"] = json!(998_000_000_000_u64);
             missing["publication"] = json!(1);
             missing["power_watts"] = serde_json::Value::Null;
-            let mut previous = snapshot.selection["trends"][0].clone();
+            let mut previous = snapshot.selection.trends_json()[0].clone();
             previous["publication"] = json!(2);
             previous["power_watts"] = json!(90);
             previous["gpu_watts"] = json!(100);
-            let mut selected = snapshot.selection["trends"][1].clone();
+            let mut selected = snapshot.selection.trends_json()[1].clone();
             selected["publication"] = json!(3);
             snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(3);
-            snapshot.selection.legacy_mut().unwrap()["trends"] =
-                json!([missing, previous, selected]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([missing, previous, selected]));
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

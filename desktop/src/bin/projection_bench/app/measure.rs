@@ -9,7 +9,7 @@ use crate::projection_bench::{Counter, bits};
 
 pub(super) fn run(envelope: &super::Envelope, iterations: u32, output: &Path) -> io::Result<()> {
     assert!((1..=100).contains(&iterations));
-    let expected = preflight(envelope)?;
+    let (expected, selection) = preflight(envelope)?;
     let value = envelope.value();
     let timebase = Timebase::read()?;
     let pid = i32::try_from(std::process::id()).map_err(io::Error::other)?;
@@ -19,8 +19,7 @@ pub(super) fn run(envelope: &super::Envelope, iterations: u32, output: &Path) ->
         let cpu_before = cpu_ns(timebase, pid)?;
         let started = Instant::now();
         let counter = Counter::start();
-        let panels =
-            crate::live_projection::panels("apps", &value["selection"], Some(&value["history"]));
+        let panels = crate::live_projection::panels("apps", &selection, Some(&value["history"]));
         let counts = counter.finish();
         let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).map_err(io::Error::other)?;
         let cpu_after = cpu_ns(timebase, pid)?;
@@ -51,18 +50,19 @@ pub(super) fn run(envelope: &super::Envelope, iterations: u32, output: &Path) ->
     Ok(())
 }
 
-pub(super) fn preflight(envelope: &super::Envelope) -> io::Result<Value> {
+/// The panel bits of `envelope`'s projection, and the selection it projected, which `run` times.
+pub(super) fn preflight(envelope: &super::Envelope) -> io::Result<(Value, viewer::Selection)> {
     let value = envelope.value();
-    let panels =
-        crate::live_projection::panels("apps", &value["selection"], Some(&value["history"]))
-            .map_err(io::Error::other)?;
+    let selection = viewer::Selection::from_json(value["selection"].clone());
+    let panels = crate::live_projection::panels("apps", &selection, Some(&value["history"]))
+        .map_err(io::Error::other)?;
     if panels.len() != 6 {
         return Err(io::Error::other(
             "App projection requires all six App panels",
         ));
     }
 
-    Ok(bits(&panels))
+    Ok((bits(&panels), selection))
 }
 
 fn cpu_ns(timebase: Timebase, pid: i32) -> io::Result<u64> {

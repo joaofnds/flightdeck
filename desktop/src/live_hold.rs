@@ -365,7 +365,7 @@ fn hold_resident_unread() -> crate::live_source::Snapshot {
     crate::live_source::Snapshot {
         generation: 0,
         catalog: serde_json::Value::Null,
-        selection: crate::live_source::Presentation::Legacy(serde_json::Value::Null),
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::default()),
         apps: None,
         detail: None,
         history: None,

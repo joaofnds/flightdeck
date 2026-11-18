@@ -190,20 +190,58 @@ impl InputDriver {
     fn seed_summary_readings(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(10);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["gpu_active_percent"] = json!(20);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["pressure"] = json!(0);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(25);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["gpu_active_percent"] = json!(40);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_celsius"] = json!(71.5);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["gpu_celsius"] = json!(63.25);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["pressure"] = json!(1);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["performance_levels"] = json!([
-                {"name": "Super", "logical_cpus": 6},
-                {"name": "Performance", "logical_cpus": 12},
-            ]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[0]["cpu_percent"] = json!(10));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[0]["gpu_active_percent"] = json!(20));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[0]["pressure"] = json!(0));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["cpu_percent"] = json!(25));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["gpu_active_percent"] = json!(40));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["cpu_celsius"] = json!(71.5));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["gpu_celsius"] = json!(63.25));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["pressure"] = json!(1));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| {
+                    points[1]["performance_levels"] = json!([
+                        {"name": "Super", "logical_cpus": 6},
+                        {"name": "Performance", "logical_cpus": 12},
+                    ]);
+                });
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

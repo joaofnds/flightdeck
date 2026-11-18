@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use num_traits::ToPrimitive;
-use serde_json::Value;
 use viewer::app_process_groups_history::{
     AppProcessGroupsHistory, ProcessGroup, ProcessGroupMetric,
 };
@@ -13,7 +12,7 @@ use crate::live_source::{AppKey, Request, identity_validate};
 pub fn prepare(
     payload: Box<AppProcessGroupsHistory>,
     request: &Request,
-    selection: &Value,
+    selection: &viewer::Selection,
 ) -> Result<super::ProcessHistory, String> {
     if request.route != "apps" {
         return Err("Process groups require the Apps route".into());

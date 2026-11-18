@@ -376,7 +376,7 @@ fn a_nonfinite_publication_holds_back_no_successor() {
         &sequence.harness,
         &json!({"accepted": accepted.apps, "accepted_detail": accepted.detail,
             "inspected": inspected.apps, "inspected_detail": inspected.detail, "input": input,
-            "selection": accepted.selection, "store_machine": format!("{:?}", third.seconds),
+            "selection": accepted.selection.json(), "store_machine": format!("{:?}", third.seconds),
             "store_apps": format!("{:?}", third.apps)}),
     );
     sequence.cleanup();
@@ -532,13 +532,14 @@ fn an_exact_successor_of_a_nonfinite_publication_reads_after_it_is_overwritten()
     output::record_sequence_case(
         "refusal-overrun-exact-c",
         &sequence.harness,
-        &json!({"input": input, "accepted": accepted.selection,
+        &json!({"input": input, "accepted": accepted.selection.json(),
             "ordinary_recovery_events": recovered_events.iter().map(output::event)
                 .collect::<Vec<_>>(),
-            "latest": {"selection": latest.selection, "apps": latest.apps, "detail": latest.detail},
-            "selected": {"selection": selected.selection, "apps": selected.apps,
+            "latest": {"selection": latest.selection.json(), "apps": latest.apps,
+                "detail": latest.detail},
+            "selected": {"selection": selected.selection.json(), "apps": selected.apps,
                 "detail": selected.detail},
-            "inspected": {"selection": inspected.selection, "apps": inspected.apps,
+            "inspected": {"selection": inspected.selection.json(), "apps": inspected.apps,
                 "detail": inspected.detail},
             "store_c_machine": format!("{:?}", third.seconds),
             "store_c_apps": format!("{:?}", third.apps)}),
@@ -591,7 +592,7 @@ fn withholds_app_rates_across_a_physically_spaced_run_tick_gap() {
     output::record_sequence_case(
         "spaced-run-tick-gap",
         &sequence.harness,
-        &json!({"input": input, "selection": successor.selection, "apps": successor.apps,
+        &json!({"input": input, "selection": successor.selection.json(), "apps": successor.apps,
             "detail": successor.detail, "exited_detail": exited.detail,
             "store_machine": format!("{:?}", second.seconds),
             "store_apps": format!("{:?}", second.apps)}),

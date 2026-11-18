@@ -104,7 +104,7 @@ impl Presentation {
 /// "CPU · Brave Browser", so the totals read apart from the process group charts above them.
 /// Refuses a selection whose context ends before its second, since the charts are laid out
 /// around the selected second within that context.
-fn prepare_context(selection: &serde_json::Value) -> Result<(), String> {
+fn prepare_context(selection: &viewer::Selection) -> Result<(), String> {
     let Some(last) = crate::live_projection::context_last_second(selection) else {
         return Ok(());
     };

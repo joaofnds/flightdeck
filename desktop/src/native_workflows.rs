@@ -498,12 +498,16 @@ impl LiveDashboard {
     pub fn inspect_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let seconds = self
             .context_snapshot()
-            .and_then(|snapshot| snapshot.selection["trends"].as_array())
-            .map_or_else(Vec::new, |points| {
-                points
+            .and_then(|snapshot| snapshot.selection.trends())
+            .map_or_else(Vec::new, |trends| {
+                trends
                     .iter()
                     .take(4096)
-                    .filter_map(|point| point["wall_ns"].as_u64().map(|wall| wall / 1_000_000_000))
+                    .filter_map(|trend| {
+                        trend.point()["wall_ns"]
+                            .as_u64()
+                            .map(|wall| wall / 1_000_000_000)
+                    })
                     .collect()
             });
         match crate::native_text::inspection_second(text, &seconds) {

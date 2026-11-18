@@ -12,7 +12,7 @@ pub(super) fn configure(reader: &mut SnapshotReader, root: &Path, expected: &Val
         "hover" => {
             let (snapshot, _) = read_complete(reader, root);
             super::payloads::validate_context(&super::payloads::ContextComparison {
-                points: &snapshot.selection["trends"],
+                points: snapshot.selection.trends(),
                 observations: &expected["kept_observations"],
             })
             .unwrap();
@@ -41,9 +41,9 @@ fn keeps_the_followed_context_while_reading_an_exact_older_hover_identity() {
     let mut reader = SnapshotReader::new();
     reader.command.request.route = "network".into();
     let (latest, _) = read_complete(&mut reader, &fixture.root);
-    let expected = serde_json::json!({"selected": latest.selection["trends"][0],
+    let expected = serde_json::json!({"selected": latest.selection.trends_json()[0],
         "context_mode": "kept", "observations": null,
-        "kept_observations": latest.selection["trends"]});
+        "kept_observations": latest.selection.trends_json()});
     drop(reader);
     let mut reader = SnapshotReader::new();
     reader.command.request.route = "network".into();

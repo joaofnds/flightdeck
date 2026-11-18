@@ -675,7 +675,11 @@ impl InputDriver {
     fn deliver_live_reading(&mut self, metric: Metric) -> bool {
         let received = self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attributed_snapshot(dashboard.generation, metric);
-            snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(21);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[0]["cpu_percent"] = json!(21));
             let received = dashboard.preview_receive(Update::Ready(snapshot));
             cx.notify();
             received
@@ -695,7 +699,7 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 preview.target.identity.clone().unwrap();
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][0].clone();
+                snapshot.selection.trends_json()[0].clone();
             snapshot.rankings = Some(std::sync::Arc::new(
                 crate::live_source::Presentation::Shared(route_ranked_payload(
                     &snapshot,
@@ -805,9 +809,18 @@ fn attributed_snapshot(generation: u64, metric: Metric) -> Box<Snapshot> {
 
 fn attribution_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = route_ranked_snapshot(generation);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(87);
-    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["cpu_percent"] = json!(13));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["cpu_percent"] = json!(87));
+    snapshot.selection.legacy_mut().unwrap()["summary"] =
+        snapshot.selection.trends_json()[1].clone();
 
     snapshot
 }

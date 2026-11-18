@@ -165,16 +165,17 @@ impl InputDriver {
     fn seed_memory_band(&mut self, width: f32) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            for (index, point) in snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .iter_mut()
-                .enumerate()
-            {
-                memory_band_point(point, index);
-            }
+                .trends_edit(|points| {
+                    for (index, point) in points.as_array_mut().unwrap().iter_mut().enumerate() {
+                        memory_band_point(point, index);
+                    }
+                });
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

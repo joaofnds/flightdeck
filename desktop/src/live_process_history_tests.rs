@@ -6,9 +6,15 @@ use crate::live_source::{AppKey, Request};
 #[test]
 fn process_history_projects_eight_distinct_captured_group_panels() {
     // The adapter changes identity and scope while preserving the captured App-history quantities.
-    let history = ProcessHistory::prepare(payload(), &request(), &selection());
+    let history = ProcessHistory::prepare(
+        payload(),
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
-    let panels = history.panels(&selection()).unwrap();
+    let panels = history
+        .panels(&crate::live_store_fixtures::selection_of_json(&selection()))
+        .unwrap();
 
     assert_eq!(
         panels
@@ -44,9 +50,18 @@ fn process_history_rejects_a_different_app_payload() {
     let mut value = payload();
     value["app_key"]["bytes_hex"] = json!("42");
 
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
-    assert!(history.panels(&selection()).unwrap().is_empty());
+    assert!(
+        history
+            .panels(&crate::live_store_fixtures::selection_of_json(&selection()))
+            .unwrap()
+            .is_empty()
+    );
     assert!(history.payload().is_none());
 }
 
@@ -56,10 +71,19 @@ fn process_history_rejects_a_different_selected_stamp() {
     let mut value = payload();
     value["selected"]["stamp"]["publication"] = json!(3);
 
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.payload().is_none());
-    assert!(history.panels(&selection()).unwrap().is_empty());
+    assert!(
+        history
+            .panels(&crate::live_store_fixtures::selection_of_json(&selection()))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -68,7 +92,11 @@ fn process_history_rejects_a_different_executable_byte_key() {
     let mut value = payload();
     value["executable_name"]["bytes_hex"] = json!("62");
 
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.payload().is_none());
 }
@@ -79,7 +107,11 @@ fn process_history_rejects_all_group_scope_in_a_named_response() {
     let mut value = payload();
     value["scope"] = json!("all_process_groups");
 
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.payload().is_none());
 }
@@ -91,9 +123,15 @@ fn process_history_keeps_missing_metrics_and_observation_gaps() {
     value["points"][0]["cpu_percent_one_core"] = Value::Null;
     value["points"][0]["disk_read_bps"] = Value::Null;
     value["points"][1]["segment"] = json!(1);
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
-    let panels = history.panels(&selection()).unwrap();
+    let panels = history
+        .panels(&crate::live_store_fixtures::selection_of_json(&selection()))
+        .unwrap();
 
     assert_eq!(panels[0].lines[0].values, [None, Some(240.0)]);
     assert_eq!(panels[3].lines[0].values, [None, Some(2.0)]);
@@ -110,7 +148,11 @@ fn process_history_rejects_more_than_4096_observations_before_projection() {
     let mut value = payload();
     value["points"] = json!(vec![value["points"][0].clone(); 4097]);
 
-    let history = ProcessHistory::prepare(value, &request(), &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.payload().is_none());
 }
@@ -123,7 +165,11 @@ fn process_history_preserves_non_utf8_name_bytes() {
     let mut request = request();
     request.executable = Some("hex:ff".into());
 
-    let history = ProcessHistory::prepare(value, &request, &selection());
+    let history = ProcessHistory::prepare(
+        value,
+        &request,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.payload().is_some());
     assert!(history.matches(&request));
@@ -162,9 +208,15 @@ fn all_groups_place_the_readings_after_the_selected_second_inside_their_charts()
     request.executable = None;
     let selection = json!({"second":999,"context_last_second":1000,
         "selected":history.selected.json()});
-    let history = ProcessHistory::prepare_all(history, &request, &selection);
+    let history = ProcessHistory::prepare_all(
+        history,
+        &request,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
-    let panels = history.panels(&selection).unwrap();
+    let panels = history
+        .panels(&crate::live_store_fixtures::selection_of_json(&selection))
+        .unwrap();
 
     assert!(!panels.is_empty());
     for panel in panels {
@@ -192,13 +244,19 @@ fn all_groups_place_a_lead_in_reading_at_the_left_edge() {
         let selection = json!({"second":1000,"context_last_second":1000,
             "selected":history.selected.json()});
         (
-            ProcessHistory::prepare_all(history, &request, &selection),
+            ProcessHistory::prepare_all(
+                history,
+                &request,
+                &crate::live_store_fixtures::selection_of_json(&selection),
+            ),
             selection,
         )
     };
     let (history, selection) = starting_at(41);
 
-    let panels = history.panels(&selection).unwrap();
+    let panels = history
+        .panels(&crate::live_store_fixtures::selection_of_json(&selection))
+        .unwrap();
 
     assert!(!panels.is_empty());
     for panel in panels {
@@ -206,7 +264,11 @@ fn all_groups_place_a_lead_in_reading_at_the_left_edge() {
         assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
     }
     let (early, selection) = starting_at(40);
-    assert!(early.panels(&selection).is_err());
+    assert!(
+        early
+            .panels(&crate::live_store_fixtures::selection_of_json(&selection))
+            .is_err()
+    );
 }
 
 pub(crate) fn request() -> Request {

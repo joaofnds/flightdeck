@@ -303,7 +303,7 @@ impl BatchResultFixture {
 }
 
 struct PreservedReadings {
-    selection: serde_json::Value,
+    selection: viewer::Selection,
     resident: Arc<crate::live_source::Presentation<crate::live_resident_history::ResidentHistory>>,
     rankings: Arc<crate::live_source::Presentation<crate::live_rankings::Rankings>>,
 }
@@ -311,7 +311,7 @@ struct PreservedReadings {
 impl From<&crate::live_source::Snapshot> for Box<PreservedReadings> {
     fn from(snapshot: &crate::live_source::Snapshot) -> Self {
         Box::new(PreservedReadings {
-            selection: snapshot.selection.clone(),
+            selection: (*snapshot.selection).clone(),
             resident: Arc::clone(snapshot.resident_history.as_ref().unwrap()),
             rankings: Arc::clone(snapshot.rankings.as_ref().unwrap()),
         })
@@ -320,7 +320,7 @@ impl From<&crate::live_source::Snapshot> for Box<PreservedReadings> {
 
 impl PreservedReadings {
     fn assert_unchanged(&self, snapshot: &crate::live_source::Snapshot) {
-        assert_eq!(snapshot.selection, self.selection);
+        assert_eq!(*snapshot.selection, self.selection);
         assert!(Arc::ptr_eq(
             snapshot.resident_history.as_ref().unwrap(),
             &self.resident

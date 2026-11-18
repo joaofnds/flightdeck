@@ -466,10 +466,10 @@ fn snapshot() -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: 1,
         catalog: json!({}),
-        selection: crate::live_source::Presentation::Legacy(
+        selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
             json!({"second":1000,"context_last_second":1000,"selected":{"publication":7},
             "summary":{"cpu_percent":12.5}}),
-        ),
+        )),
         apps: None,
         detail: None,
         history: None,

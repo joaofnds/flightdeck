@@ -26,7 +26,7 @@ fn a_native_selection_matches_the_saved_minute_after_its_source_is_gone() {
     let mut actual = context
         .selection(&Arc::new(Cancellation::default()), 0)
         .unwrap()
-        .clone();
+        .json();
 
     let context_error = actual.as_object_mut().unwrap().remove("context_error");
     losses_comparable(&mut actual);
@@ -88,6 +88,44 @@ fn an_apps_page_lists_every_app_one_second_holds() {
         response["apps"].as_array().unwrap().len()
     );
     assert_eq!(response["page"]["next_offset"], Value::Null);
+}
+
+#[test]
+fn a_split_selection_flattens_to_the_json_the_store_builds() {
+    // Goal: splitting the Store's selection into fields and chart points changes nothing it
+    // presents, the bytes it is charged included.
+    // Method: read a followed context of three seconds and its summary alone both as one JSON
+    // value and split, then flatten the split ones.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.publish_with_system_rows(102);
+    let context = retained(&fixture);
+    let observation = context.selected().observation;
+    let cancellation = Arc::new(Cancellation::default());
+
+    let whole = context
+        .selection_for_json(&observation, false, &cancellation, 0)
+        .unwrap();
+    let split = context
+        .selection_for(&observation, false, &cancellation, 0)
+        .unwrap();
+    let summary_whole = context
+        .selection_for_json(&observation, true, &cancellation, 0)
+        .unwrap();
+    let summary_split = context
+        .selection_for(&observation, true, &cancellation, 0)
+        .unwrap();
+
+    assert_eq!(
+        split.trends().unwrap().len(),
+        whole["trends"].as_array().unwrap().len()
+    );
+    assert_eq!(split.json(), *whole);
+    assert_eq!(split.bytes(), whole.bytes());
+    assert_eq!(summary_split.trends(), None);
+    assert_eq!(summary_split.json(), *summary_whole);
+    assert_eq!(summary_split.bytes(), summary_whole.bytes());
 }
 
 #[test]

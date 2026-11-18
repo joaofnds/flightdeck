@@ -21,7 +21,7 @@ fn cpu_reference_is_independent_unstacked_and_excluded_from_captured_totals() {
     let history = AppAttributionHistory::prepare(
         Metric::Cpu,
         &tests::fixture(Metric::Cpu),
-        &scalar_selection(),
+        &crate::live_store_fixtures::selection_of_json(&scalar_selection()),
     );
 
     let panel = history.panel().unwrap();
@@ -51,7 +51,7 @@ fn gpu_reference_is_the_gpus_own_busy_share_over_each_apps_gpu_time() {
     let history = AppAttributionHistory::prepare(
         Metric::Gpu,
         &tests::fixture(Metric::Gpu),
-        &scalar_selection(),
+        &crate::live_store_fixtures::selection_of_json(&scalar_selection()),
     );
 
     let panel = history.panel().unwrap();
@@ -71,7 +71,11 @@ fn disk_reference_keeps_whole_device_scope_and_exact_app_bytes() {
     let mut apps = tests::disk_fixture();
     apps["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(9_007_199_254_740_993_u64);
     apps["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &apps, &scalar_selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &apps,
+        &crate::live_store_fixtures::selection_of_json(&scalar_selection()),
+    );
 
     let panel = history.panel().unwrap();
 
@@ -102,7 +106,11 @@ fn references_use_exact_same_second_identity_across_runs_and_boots() {
     apps["points"][0]["observation"]["wall_ns"] = json!("1000000000000");
     apps["points"][0]["observation"]["stamp"]["boot"] = json!(["2", "4"]);
     selected["trends"][0]["wall_ns"] = json!(1_000_000_000_000_u64);
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &apps, &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &apps,
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
     let earlier = Target::exact(1000, &json!({"run":[1,2],"boot":[2,4],"publication":1})).unwrap();
 
     let index = history.index(Some(&earlier));
@@ -118,7 +126,11 @@ fn a_missing_scalar_observation_never_borrows_its_neighbor() {
     // The App source can remain available while its independent machine source is absent.
     let mut selected = scalar_selection();
     selected["trends"].as_array_mut().unwrap().remove(0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &tests::disk_fixture(), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &tests::disk_fixture(),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.reading(1, Some(0)), "500 kB/s");
     assert_eq!(history.amount(2, Some(0)), None);
@@ -130,7 +142,11 @@ fn incomplete_device_scans_remain_explicitly_unavailable() {
     // Per-device known rates cannot become an All disk I/O subtotal.
     let mut selected = scalar_selection();
     selected["trends"][0]["storage"]["state"] = json!("partial");
-    let history = AppAttributionHistory::prepare(Metric::Disk, &tests::disk_fixture(), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &tests::disk_fixture(),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(
         history.reading(2, Some(0)),
@@ -145,7 +161,11 @@ fn a_missing_device_direction_never_becomes_a_zero() {
     // Complete device enumeration does not make an unavailable write interval measured.
     let mut selected = scalar_selection();
     selected["trends"][1]["storage"]["write_bps"] = Value::Null;
-    let history = AppAttributionHistory::prepare(Metric::Disk, &tests::disk_fixture(), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &tests::disk_fixture(),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.amount(2, Some(1)), None);
     assert_eq!(
@@ -160,7 +180,7 @@ fn process_power_gets_no_fabricated_machine_comparison() {
     let history = AppAttributionHistory::prepare(
         Metric::Power,
         &tests::fixture(Metric::Power),
-        &scalar_selection(),
+        &crate::live_store_fixtures::selection_of_json(&scalar_selection()),
     );
 
     assert_eq!(history.panel().unwrap().lines.len(), 2);
@@ -172,7 +192,11 @@ fn an_app_named_like_the_reference_keeps_an_independent_legend_identity() {
     // Name-keyed legend visibility must still distinguish a real App from the machine line.
     let mut apps = tests::fixture(Metric::Cpu);
     apps["cohort"][0]["key"]["display"] = json!("All CPU");
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &apps, &scalar_selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &apps,
+        &crate::live_store_fixtures::selection_of_json(&scalar_selection()),
+    );
 
     let panel = history.panel().unwrap();
 
@@ -186,8 +210,11 @@ fn normalized_cpu_without_recorded_core_rates_remains_unavailable() {
     let mut selected = scalar_selection();
     selected["trends"][1]["cpu_percent_one_core"] = Value::Null;
     selected["trends"][1]["logical_cpu_count"] = json!(18);
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.amount(2, Some(1)), None);
     assert_eq!(
@@ -203,8 +230,11 @@ fn duplicate_scalar_identities_make_only_the_machine_context_unavailable() {
     let mut selected = scalar_selection();
     let duplicate = selected["trends"][1].clone();
     selected["trends"].as_array_mut().unwrap().push(duplicate);
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.amount(2, Some(1)), None);
     assert_eq!(
@@ -219,8 +249,11 @@ fn a_same_identity_with_different_nanoseconds_cannot_lend_its_reference() {
     // Matching run/boot/publication is insufficient when the recorded instant differs.
     let mut selected = scalar_selection();
     selected["trends"][0]["wall_ns"] = json!(999_000_000_001_u64);
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.amount(2, Some(0)), None);
     assert_eq!(history.amount(2, Some(1)), Some(450.0));
@@ -232,8 +265,11 @@ fn a_malformed_scalar_identity_refuses_only_the_machine_context() {
     // A scalar source that cannot establish its identity must not erase valid App history.
     let mut selected = scalar_selection();
     selected["trends"][0]["run"] = Value::Null;
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(
         history.reading(2, Some(1)),
@@ -246,8 +282,11 @@ fn a_malformed_scalar_identity_refuses_only_the_machine_context() {
 fn an_oversized_scalar_context_cannot_expand_the_reference_index() {
     // Reject the first point beyond the existing context bound before building its index.
     let selected = scalar_context_with_count(crate::data::LIVE_SAMPLE_LIMIT + 1);
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(history.amount(2, Some(0)), None);
     assert_eq!(history.amount(2, Some(1)), None);
@@ -262,8 +301,11 @@ fn an_oversized_scalar_context_cannot_expand_the_reference_index() {
 fn an_exact_limit_scalar_context_keeps_both_matching_references() {
     // Unique identities reach the bound without duplicate rejection masking its behavior.
     let selected = scalar_context_with_count(crate::data::LIVE_SAMPLE_LIMIT);
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &tests::fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &tests::fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert_eq!(
         history.panel().unwrap().lines[2].values,
@@ -299,7 +341,11 @@ macro_rules! reference_identity_case {
             apps["points"][0]["observation"]["wall_ns"] = json!("1000000000000");
             selected["trends"][0]["wall_ns"] = json!(1_000_000_000_000_u64);
             selected["trends"][0][$field] = $wrong;
-            let history = AppAttributionHistory::prepare(Metric::Cpu, &apps, &selected);
+            let history = AppAttributionHistory::prepare(
+                Metric::Cpu,
+                &apps,
+                &crate::live_store_fixtures::selection_of_json(&selected),
+            );
 
             assert_eq!(history.amount(2, Some(0)), None);
             assert_eq!(history.amount(2, Some(1)), Some(450.0));

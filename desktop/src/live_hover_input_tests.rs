@@ -481,7 +481,11 @@ impl HoverDriver {
     fn inspect_same_second_memory_sibling(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["wall_ns"] = json!(1000 * NS);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["wall_ns"] = json!(1000 * NS));
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             let target =
@@ -526,8 +530,11 @@ impl HoverDriver {
     fn remove_historical_free_memory(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_free_bytes"] =
-                Value::Null;
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["memory_free_bytes"] = Value::Null);
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -811,11 +818,11 @@ impl Epoch {
             generation,
             catalog: json!({"path":"/fixture/whole-page-hover",
                 "first_second":998,"last_second":1000}),
-            selection: crate::live_source::Presentation::Legacy(
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
                 json!({"second":self.second(),"context_last_second":self.second(),
                 "selected":self.observation(),"summary":summary,"context_seconds":900,
                 "trends":points}),
-            ),
+            )),
             apps: None,
             detail: None,
             history: None,

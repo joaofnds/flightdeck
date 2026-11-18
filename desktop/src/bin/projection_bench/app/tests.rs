@@ -16,9 +16,12 @@ fn preserves_all_six_app_panels_and_recorded_gaps() {
         .unwrap()
         .value;
 
-    let panels =
-        crate::live_projection::panels("apps", &decoded["selection"], Some(&decoded["history"]))
-            .unwrap();
+    let panels = crate::live_projection::panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&decoded["selection"]),
+        Some(&decoded["history"]),
+    )
+    .unwrap();
     let bits = crate::projection_bench::bits(&panels);
 
     assert_eq!(decoded, envelope);
@@ -50,6 +53,24 @@ macro_rules! rejects_envelope {
         }
     };
 }
+
+rejects_envelope!(
+    rejects_a_chart_point_whose_segment_is_text,
+    "/selection/trends/0/segment",
+    json!("0")
+);
+
+rejects_envelope!(
+    rejects_a_chart_point_whose_segment_is_negative,
+    "/selection/trends/0/segment",
+    json!(-1)
+);
+
+rejects_envelope!(
+    rejects_a_chart_point_whose_segment_is_fractional,
+    "/selection/trends/0/segment",
+    json!(0.5)
+);
 
 rejects_envelope!(
     rejects_history_for_a_different_selected_observation,

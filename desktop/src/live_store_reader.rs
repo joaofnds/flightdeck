@@ -12,7 +12,6 @@ pub(super) mod tests;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde_json::Value;
 use viewer::LiveSession;
 use viewer::store::{
     QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReadiness, QueryRequest,
@@ -619,7 +618,7 @@ pub(super) fn read_earlier_selection(
     command: &Command,
     shared: &Shared,
     tail_at_once: bool,
-    selection: &mut Value,
+    selection: &mut viewer::Selection,
 ) -> bool {
     let scope =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::History);
@@ -649,7 +648,7 @@ pub(super) fn read_earlier_selection(
     let pending = match session {
         Ok(session) => super::reader_earlier(session, &command.request, tail_at_once, selection),
         Err(message) => {
-            if let Some(fields) = selection.as_object_mut() {
+            if let Some(mut fields) = selection.fields_mut() {
                 fields.insert("earlier_error".into(), message.into());
             }
 

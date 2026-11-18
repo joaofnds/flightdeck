@@ -67,15 +67,17 @@ fn recording_peaking_in_its_older_tail() -> Box<Snapshot> {
     selection["earlier_trends"] = serde_json::json!(older);
     selection["summary"] = selection["selected"].clone();
     selection["summary"]["cpu_percent"] = serde_json::json!(33.0);
-    for trend in selection["trends"].as_array_mut().unwrap() {
-        trend["cpu_percent"] = serde_json::json!(33.0);
-    }
+    selection.trends_edit(|points| {
+        for trend in points.as_array_mut().unwrap() {
+            trend["cpu_percent"] = serde_json::json!(33.0);
+        }
+    });
 
     reply
 }
 
 /// Makes `selection` the reader's answer for `OLDER_PEAK`, whose reading read 95% CPU.
-fn older_peak_selection(selection: &mut serde_json::Value) {
+fn older_peak_selection(selection: &mut viewer::Selection) {
     let reading = serde_json::json!({
         "run": identity_text(collector::ring::Identity([1, 2])).to_string(),
         "boot": identity_text(collector::ring::Identity([3, 4])).to_string(),
@@ -87,7 +89,7 @@ fn older_peak_selection(selection: &mut serde_json::Value) {
     selection["second"] = serde_json::json!(OLDER_PEAK);
     selection["selected"] = reading.clone();
     selection["summary"] = reading.clone();
-    selection["trends"] = serde_json::json!([reading]);
+    selection.trends_edit(|points| *points = serde_json::json!([reading]));
 }
 
 #[gpui::test]
@@ -338,7 +340,10 @@ fn a_page_opened_while_a_second_is_held_shows_the_held_second_s_readings_from_it
     harness.driver.answer_page_read_holding(HELD);
 
     assert_eq!(harness.driver.shown_reading_second(), Some(HELD));
-    let expected = summary::cards("memory", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -398,7 +403,10 @@ fn overview_opened_while_a_second_is_held_draws_the_held_second_from_the_kept_vi
     harness.driver.navigate("overview");
 
     assert_eq!(harness.driver.view_window(), Some(DRAWN));
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     assert_eq!(
         harness.driver.cpu_by_app_lines(),
@@ -426,7 +434,10 @@ fn leaving_overviews_chart_after_a_click_shows_the_held_second_on_the_readouts(
         .leave_plot("live-cpu-apps-plot", PlotExit::Top);
     harness.driver.context.run_until_parked();
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     assert_eq!(harness.driver.ranked_second(), HELD);
     assert_eq!(harness.driver.cpu_shown_second(), Some(HELD));
@@ -652,7 +663,10 @@ fn a_click_on_overview_before_the_first_reading_holds_the_second_over_the_view(
     harness.driver.click_second_on("live-cpu-apps-plot", HELD);
 
     assert_eq!(harness.driver.view_window(), Some(DRAWN));
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -750,7 +764,10 @@ fn a_click_after_letting_go_before_the_first_reading_shows_the_held_second_once_
 
     harness.driver.reply_to_page_reading_holding(HELD);
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -1221,7 +1238,13 @@ fn letting_go_on_overview_shows_the_newest_second_the_view_drew(cx: &mut TestApp
             span: 3_600
         })
     );
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HOUR_NEWEST, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(
+            HOUR_NEWEST,
+            0,
+        ))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     assert_eq!(
         harness.driver.cpu_by_app_lines(),
@@ -1468,7 +1491,10 @@ fn a_hover_after_letting_go_on_overview_leaves_the_readouts_to_the_reader(cx: &m
         .driver
         .hover_second_on("live-cpu-plot", HOUR_NEWEST - 1_000);
 
-    let expected = summary::cards("overview", &serde_json::Value::Null);
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&serde_json::Value::Null),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -1533,7 +1559,10 @@ fn hiding_and_showing_the_window_over_a_complete_hold_keeps_the_held_page_and_re
 
     assert_eq!(harness.driver.reader_asked_second(), None);
     assert_eq!(harness.driver.view_window(), Some(DRAWN));
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     assert_eq!(
         harness.driver.cpu_by_app_lines(),
@@ -1590,7 +1619,10 @@ fn closing_and_opening_the_window_over_a_complete_hold_keeps_the_held_page_and_r
 
     assert_eq!(harness.driver.reader_asked_second(), None);
     assert_eq!(harness.driver.view_window(), Some(DRAWN));
-    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     assert_eq!(
         harness.driver.cpu_by_app_lines(),
@@ -2846,7 +2878,10 @@ fn a_hover_on_a_page_opened_again_shows_the_hovered_second_once_its_reading_arri
 
     assert_eq!(harness.driver.shown_reading_second(), Some(HOUR_NEWEST - 1));
     let hovered = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
-    let expected = summary::cards("memory", &hovered);
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&hovered),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -2868,7 +2903,10 @@ fn a_click_on_a_page_opened_again_before_its_reading_shows_no_reading_of_another
         .driver
         .click_second_on("live-memory-plot", HOUR_NEWEST - 1);
 
-    let expected = summary::cards("memory", &serde_json::Value::Null);
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&serde_json::Value::Null),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -2891,7 +2929,10 @@ fn a_click_on_a_page_opened_again_shows_the_clicked_second_once_the_page_is_read
     harness.driver.show_memory_reading();
 
     let clicked = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
-    let expected = summary::cards("memory", &clicked);
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&clicked),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -2962,7 +3003,10 @@ fn a_peak_picked_on_a_page_opened_again_shows_its_reading_once_the_page_is_read(
         .driver
         .show_memory_reading_peaking_before_its_newest();
 
-    let expected = summary::cards("memory", &summary_selection(&memory_peak()));
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&memory_peak())),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -3049,7 +3093,10 @@ fn an_arrow_step_on_a_page_opened_again_shows_the_second_before_once_its_reading
 
     assert_eq!(harness.driver.shown_reading_second(), Some(HOUR_NEWEST - 1));
     let stepped = summary_selection(&reading_at(HOUR_NEWEST - 1, 0));
-    let expected = summary::cards("memory", &stepped);
+    let expected = summary::cards(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&stepped),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }

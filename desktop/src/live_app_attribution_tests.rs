@@ -6,7 +6,11 @@ use crate::live_hover::Target;
 #[test]
 fn cpu_rates_preserve_multicore_values_and_captured_positions() {
     // Decode captured intervals through the public model and inspect the renderer's panel.
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     let panel = history.panel().unwrap();
 
     assert_eq!(panel.id, "live-cpu-apps");
@@ -22,7 +26,11 @@ fn cpu_rates_preserve_multicore_values_and_captured_positions() {
 fn a_chart_by_app_says_its_points_are_means_and_where_a_short_lived_app_is_found() {
     // Goal: a reader who finds no line for an App that ran for a short peak learns why, and where
     // that App is named. Method: read the help of a chart by App.
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     let panel = history.panel().unwrap();
 
@@ -48,7 +56,11 @@ fn rates_hold_the_readings_after_the_selected_second() {
     let selection = json!({"second":999,"context_last_second":1000,
         "selected":{"run":[1,2],"boot":[3,4],"publication":1}});
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection),
+    );
 
     assert_eq!(history.reading(1, Some(1)), "240%");
     let window = history.panel().unwrap().window.unwrap();
@@ -64,21 +76,32 @@ fn rates_place_a_lead_in_reading_at_the_left_edge() {
     let mut value = fixture(Metric::Cpu);
     value["points"][0]["observation"]["wall_ns"] = json!("41000000000");
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     let panel = history.panel().unwrap();
     assert_eq!(panel.window.unwrap().first, 41);
     assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
     value["points"][0]["observation"]["wall_ns"] = json!("40000000000");
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     assert!(history.panel().is_none());
 }
 
 #[test]
 fn power_rates_preserve_fractional_watts() {
     // Keep the captured process interval's fractional power separate from machine power.
-    let history =
-        AppAttributionHistory::prepare(Metric::Power, &fixture(Metric::Power), &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Power,
+        &fixture(Metric::Power),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.reading(1, Some(0)), "1.2 W");
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(2.5));
@@ -92,7 +115,11 @@ fn measured_zero_and_partial_rates_retain_their_coverage() {
     value["points"][0]["apps"][0]["cpu_percent_one_core"] = json!(0.0);
     value["points"][0]["apps"][0]["cpu_ns"]["known"] = json!(0);
     value["points"][1]["apps"][0]["cpu_ns"]["unavailable_members"] = json!(2);
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[0], Some(0.0));
     assert_eq!(history.reading(1, Some(0)), "0%");
@@ -110,7 +137,11 @@ fn unmeasured_members_remain_unavailable_instead_of_zero() {
     value["points"][1]["apps"][0]["energy_watts"] = Value::Null;
     value["points"][1]["apps"][0]["energy_nj"]["measured_members"] = json!(0);
     value["points"][1]["apps"][0]["energy_nj"]["unavailable_members"] = json!(1);
-    let history = AppAttributionHistory::prepare(Metric::Power, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Power,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], None);
     assert_eq!(history.reading(1, Some(1)), "Unavailable · 1 unavailable");
@@ -126,7 +157,11 @@ fn missing_source_and_app_slots_remain_gaps() {
         "apps":[null],"other":null});
     value["points"][1]["apps"][0] = Value::Null;
     value["points"][1]["segment"] = json!("2");
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values, vec![None, None]);
     assert_eq!(history.panel().unwrap().segments, Some(vec![1, 2]));
@@ -141,7 +176,11 @@ fn empty_other_is_a_measured_zero_only_with_complete_capture() {
     value["points"][1]["other"] = json!({"app_count":0,"cpu_ns":{
         "known":0,"measured_members":0,"unavailable_members":0,"overflowed":false},
         "cpu_percent_one_core":0.0,"membership_complete":true});
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.reading(0, Some(1)), "0%");
     assert_eq!(history.panel().unwrap().lines[0].values[1], Some(0.0));
@@ -153,7 +192,11 @@ fn same_second_siblings_and_boot_changes_keep_their_exact_identity() {
     let mut value = fixture(Metric::Cpu);
     value["points"][0]["observation"]["wall_ns"] = json!("1000000000000");
     value["points"][0]["observation"]["stamp"]["boot"] = json!(["2", "4"]);
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     let earlier = Target::exact(1000, &json!({"run":[1,2],"boot":[2,4],"publication":1})).unwrap();
     let selected = Target::exact(1000, &selection()["selected"]).unwrap();
 
@@ -173,9 +216,13 @@ fn duplicate_basenames_use_full_app_keys_for_independent_labels() {
         let app = point["apps"][0].clone();
         point["apps"].as_array_mut().unwrap().push(app);
     }
-    let panel = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection())
-        .panel()
-        .unwrap();
+    let panel = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    )
+    .panel()
+    .unwrap();
 
     assert_eq!(panel.lines[1].name, "/A/Foo");
     assert_eq!(panel.lines[2].name, "/B/Foo");
@@ -184,8 +231,11 @@ fn duplicate_basenames_use_full_app_keys_for_independent_labels() {
 #[test]
 fn different_metric_is_a_local_unavailable_history() {
     // A valid Power envelope cannot silently become a CPU chart.
-    let history =
-        AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Power), &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &fixture(Metric::Power),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -196,7 +246,11 @@ fn wrong_selected_identity_is_a_local_unavailable_history() {
     let mut selected = selection();
     selected["selected"]["publication"] = json!(3);
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &selected);
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &fixture(Metric::Cpu),
+        &crate::live_store_fixtures::selection_of_json(&selected),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -207,7 +261,11 @@ fn oversized_point_envelope_is_refused_before_projection() {
     let mut value = fixture(Metric::Cpu);
     value["points"] = json!(vec![value["points"][0].clone(); 4097]);
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -218,7 +276,11 @@ fn oversized_source_cache_metadata_is_refused() {
     let mut value = fixture(Metric::Cpu);
     value["coverage"]["cache_bytes"] = json!(75_497_473);
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -298,7 +360,11 @@ fn another_recordings_points_are_refused() {
     let mut value = fixture(Metric::Cpu);
     value["points"][0]["observation"]["recording"] = json!(["9", "10"]);
 
-    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert!(history.panel().is_none());
 }
@@ -306,7 +372,11 @@ fn another_recordings_points_are_refused() {
 #[test]
 fn disk_attribution_scales_rates_without_changing_the_captured_interval_bytes() {
     // A two-second interval carries three million exact bytes and a distinct MB/s value.
-    let history = AppAttributionHistory::prepare(Metric::Disk, &disk_fixture(), &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &disk_fixture(),
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
     let panel = history.panel().unwrap();
 
     assert_eq!(panel.id, "live-disk-apps");
@@ -323,7 +393,11 @@ fn disk_attribution_preserves_bytes_above_float_integer_precision() {
     let mut value = disk_fixture();
     value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(9_007_199_254_740_993_u64);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(
         history.captured_amount(1, Some(1)),
@@ -338,7 +412,11 @@ fn disk_attribution_keeps_a_measured_zero_drawable() {
     let mut value = disk_fixture();
     value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(0);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(0.0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.0));
     assert_eq!(history.reading(1, Some(1)), "0 B/s");
@@ -352,7 +430,11 @@ fn disk_attribution_labels_jointly_measured_partial_subtotals() {
     value["points"][1]["usage_refused"] = json!(1);
     value["points"][1]["other"]["disk_io_bytes"] = Value::Null;
     value["points"][1]["other"]["disk_io_bps"] = Value::Null;
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(
         history.reading(1, Some(1)),
@@ -369,7 +451,11 @@ fn disk_attribution_unmeasured_members_do_not_borrow_a_directional_rate() {
     value["points"][1]["apps"][0]["disk_io_bytes"]["measured_members"] = json!(0);
     value["points"][1]["apps"][0]["disk_io_bytes"]["unavailable_members"] = json!(1);
     value["points"][1]["apps"][0]["disk_read_bps"] = json!(9_000_000.0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], None);
     assert_eq!(history.captured_amount(1, Some(1)), None);
@@ -382,7 +468,11 @@ fn disk_attribution_overflow_remains_unavailable() {
     let mut value = disk_fixture();
     value["points"][1]["apps"][0]["disk_io_bps"] = Value::Null;
     value["points"][1]["apps"][0]["disk_io_bytes"]["overflowed"] = json!(true);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], None);
     assert_eq!(history.captured_amount(1, Some(1)), None);
@@ -400,7 +490,11 @@ fn disk_attribution_missing_source_remains_an_observation_gap() {
         "elapsed_ns":null,"source_available":false,"membership_complete":null,
         "ungrouped_members":null,"usage_refused":null,"usage_gone":null,
         "apps":[null],"other":null});
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[0], None);
     assert_eq!(history.reading(1, Some(0)), "Unavailable");
@@ -435,7 +529,11 @@ fn disk_attribution_small_nonzero_rates_keep_human_units() {
     let mut value = disk_fixture();
     value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(20);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(10.0);
-    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+    let history = AppAttributionHistory::prepare(
+        Metric::Disk,
+        &value,
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+    );
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.000_01));
     assert_eq!(history.reading(1, Some(1)), "10 B/s");

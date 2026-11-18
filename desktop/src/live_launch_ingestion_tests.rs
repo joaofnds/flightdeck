@@ -689,7 +689,7 @@ fn preserves_pinned_hover_and_resumed_outputs_beside_the_live_store() {
         hovered.selection["selected"]["wall_ns"],
         selected.selection["selected"]["wall_ns"]
     );
-    assert!(hovered.selection.get("trends").is_none());
+    assert!(hovered.selection.trends().is_none());
     assert_eq!(resumed.selection["selected"], latest.selection["selected"]);
     assert_eq!(view.seconds.last().unwrap().publication, 2);
     output::record_selections(&harness, [&latest, &selected, &hovered, &resumed]);

@@ -13,7 +13,12 @@ fn storage_projects_source_rates_in_display_units_without_negating_write_readout
         "read_errors_per_second": 0.0, "write_errors_per_second": null, "devices": []
     }}));
 
-    let projected = panels("storage", &selection, None).unwrap();
+    let projected = panels(
+        "storage",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 5);
     assert_eq!(projected[0].unit, "MB/s");
@@ -35,7 +40,12 @@ fn battery_projects_charge_signed_flow_and_binary_charging_history() {
         "charge_percent": 67.0, "power_watts": -4.5, "charging": false
     }}));
 
-    let projected = panels("battery", &selection, None).unwrap();
+    let projected = panels(
+        "battery",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 3);
     assert_eq!(projected[0].unit, "%");
@@ -67,7 +77,12 @@ fn overview_includes_measured_physical_disk_throughput() {
     // Method: project a measured device total through the normal Overview API.
     let selection = selection(&json!({"storage": {"read_bps": 3_000_000, "write_bps": 0}}));
 
-    let projected = panels("overview", &selection, None).unwrap();
+    let projected = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 9);
     let disk = projected
@@ -88,7 +103,12 @@ fn charging_history_keeps_the_exact_selected_alternative_and_unobserved_seconds_
     sibling["battery"]["charging"] = json!(true);
     selection["trends"].as_array_mut().unwrap().push(sibling);
 
-    let projected = panels("battery", &selection, None).unwrap();
+    let projected = panels(
+        "battery",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 3);
     assert_eq!(projected[2].lines[0].values[958], None);
@@ -102,8 +122,18 @@ fn legacy_sources_keep_storage_and_battery_readings_unavailable() {
     // Method: project a real observation with neither optional resource payload.
     let selection = selection(&json!({}));
 
-    let storage = panels("storage", &selection, None).unwrap();
-    let battery = panels("battery", &selection, None).unwrap();
+    let storage = panels(
+        "storage",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
+    let battery = panels(
+        "battery",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(storage.len(), 5);
     assert_eq!(battery.len(), 3);
@@ -135,7 +165,12 @@ fn battery_histories_retain_wall_spacing_and_run_breaks() {
         .unwrap()
         .insert(0, before);
 
-    let projected = panels("battery", &selection, None).unwrap();
+    let projected = panels(
+        "battery",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 3);
     assert_eq!(projected[0].segments.as_ref().unwrap(), &[0, 1]);

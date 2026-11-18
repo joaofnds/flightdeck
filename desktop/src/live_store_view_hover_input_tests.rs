@@ -29,7 +29,10 @@ fn hovering_a_second_only_the_view_holds_shows_its_readouts(cx: &mut TestAppCont
 
     harness.driver.hover_held_second(10_003);
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(10_003, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(10_003, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -157,7 +160,10 @@ fn hovering_a_retained_older_sample_uses_its_machine_and_app_readings(cx: &mut T
 
     assert_eq!(harness.driver.hover_reads(), 0);
     harness.driver.assert_top_apps(&top_apps(&older), 8_200);
-    let expected = summary::cards("overview", &summary_selection(&older));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&older)),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -178,7 +184,10 @@ fn a_refused_older_sample_keeps_its_reading_and_reports_unavailable_apps(cx: &mu
     assert!(harness.driver.reading_is_visible(
         "App totals unavailable: the complete payload exceeds its byte budget"
     ));
-    let expected = summary::cards("overview", &summary_selection(&older));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&older)),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -240,7 +249,10 @@ fn hovering_the_older_tail_shows_the_reading_standing_for_its_stretch(cx: &mut T
 
     harness.driver.hover_held_second(8_005);
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(8_000, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(8_000, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -418,7 +430,10 @@ fn hovering_the_older_part_of_the_hour_shows_the_readouts_of_the_second_standing
 
     harness.driver.hover_held_second(9_005);
 
-    let expected = summary::cards("overview", &summary_selection(&reading_at(9_000, 0)));
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(9_000, 0))),
+    );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }

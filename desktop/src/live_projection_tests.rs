@@ -7,14 +7,27 @@ fn clicking_the_selected_second_keeps_its_chosen_publication() {
     // Same-second alternatives must retain the selected identity after a chart click.
     let selection = selection();
     assert_eq!(
-        inspection_identity(&selection, 1000),
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            1000
+        ),
         Some(selection["selected"].clone())
     );
     assert_eq!(
-        inspection_identity(&selection, 550).unwrap()["publication"],
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            550
+        )
+        .unwrap()["publication"],
         2
     );
-    assert!(inspection_identity(&selection, 999).is_none());
+    assert!(
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            999
+        )
+        .is_none()
+    );
 }
 
 fn selection() -> Value {
@@ -39,10 +52,37 @@ fn selection() -> Value {
 }
 
 #[test]
+fn a_chart_point_without_a_segment_is_refused() {
+    // Goal: a chart point with no segment is refused rather than drawn in some segment, since
+    // the segment decides which points a line joins. Method: project a selection whose middle
+    // point has lost its segment.
+    let mut value = selection();
+    drop(
+        value["trends"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("segment"),
+    );
+
+    let result = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&value),
+        None,
+    );
+
+    assert_eq!(result.unwrap_err(), "Missing live chart integer");
+}
+
+#[test]
 fn positions_use_wall_time_and_segments_include_run_identity() {
     // Goal: sparse ticks keep real spacing and never connect across collector runs.
     // Method: project fractional, widely spaced observations sharing a segment number.
-    let panels = panels("cpu", &selection(), None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     let positions = panels[0].positions.as_ref().unwrap();
     // The charts hold the 900-second context and the minute of lead-in before it.
     assert!((positions[0] - 60.5 / 960.0).abs() < 0.000_001);
@@ -57,7 +97,12 @@ fn positions_use_wall_time_and_segments_include_run_identity() {
 fn sends_are_mirrored_without_negating_readouts_or_errors() {
     // Goal: directional traffic follows mirrored plots while values stay positive.
     // Method: compare traffic, packets and error line metadata and byte conversion.
-    let panels = panels("network", &selection(), None).unwrap();
+    let panels = panels(
+        "network",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     assert_eq!(panels.len(), 4);
     assert_eq!(panels[0].unit, "MB/s");
     assert_eq!(panels[0].lines[0].values[1], Some(2.0));
@@ -72,7 +117,12 @@ fn sends_are_mirrored_without_negating_readouts_or_errors() {
 #[test]
 fn overview_network_combines_positive_readouts_and_mirrors_only_send_geometry() {
     // Project the primary network panel with measured traffic between unavailable observations.
-    let projected = panels("overview", &selection(), None).unwrap();
+    let projected = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     let network = &projected[5];
 
     assert_eq!(network.id, "live-network");
@@ -90,7 +140,12 @@ fn overview_stacks_captured_memory_categories_below_an_independent_installed_gui
     // Project measured capacity, zero and missing values without adding capacity to the stack.
     let selection = memory_composition_selection();
 
-    let overview = panels("overview", &selection, None).unwrap();
+    let overview = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(overview.len(), 9);
     assert_memory_composition(&overview[2]);
@@ -101,7 +156,12 @@ fn memory_stacks_captured_categories_below_an_independent_installed_guide() {
     // Project the Memory route with the same category and capacity contract as Overview.
     let selection = memory_composition_selection();
 
-    let memory = panels("memory", &selection, None).unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(memory.len(), 6);
     assert_memory_composition(&memory[0]);
@@ -168,7 +228,12 @@ fn memory_keeps_all_page_rates_and_unavailable_intervals() {
     reset["memory_decompressions_per_second"] = Value::Null;
     selection["trends"].as_array_mut().unwrap().push(reset);
 
-    let memory = panels("memory", &selection, None).unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let paging = memory
         .iter()
         .find(|panel| panel.id == "live-paging")
@@ -191,7 +256,12 @@ fn energy_power_panels_preserve_independent_sources_and_missing_intervals() {
     selection["trends"][1]["gpu_watts"] = Value::Null;
     selection["trends"][2]["gpu_watts"] = json!(2.5);
 
-    let energy = panels("energy", &selection, None).unwrap();
+    let energy = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(
         energy
@@ -236,7 +306,12 @@ fn energy_breakdown_keeps_measured_zero_and_negative_remainders_without_clamping
         point["gpu_watts"] = json!(gpu);
     }
 
-    let projected = panels("energy", &selection, None).unwrap();
+    let projected = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let power = projected
         .iter()
         .find(|panel| panel.id == "live-power-breakdown")
@@ -269,7 +344,12 @@ fn energy_breakdown_requires_both_sources_for_the_remainder_and_keeps_gpu_indepe
     selection["trends"][0]["gpu_watts"] = json!(2.0);
     selection["trends"][2]["power_watts"] = json!(4.0);
 
-    let projected = panels("energy", &selection, None).unwrap();
+    let projected = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let power = projected
         .iter()
         .find(|panel| panel.id == "live-power-breakdown")
@@ -286,7 +366,11 @@ fn energy_breakdown_rejects_a_nonfinite_derived_remainder() {
     selection["trends"][1]["power_watts"] = json!(3.0e38);
     selection["trends"][1]["gpu_watts"] = json!(-3.0e38);
 
-    match panels("energy", &selection, None) {
+    match panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    ) {
         Err(error) => assert!(error.contains("power remainder")),
         Ok(_) => panic!("The derived power remainder must reject overflow"),
     }
@@ -298,7 +382,12 @@ fn overview_includes_gpu_activity_history_with_independent_missing_observations(
     let mut selection = selection();
     selection["trends"][1]["gpu_active_percent"] = json!(37.5);
 
-    let overview = panels("overview", &selection, None).unwrap();
+    let overview = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let activity = overview
         .iter()
@@ -322,7 +411,12 @@ fn overview_pressure_history_keeps_normal_warning_critical_and_missing_seconds()
     expected[509] = Some(1.0);
     expected[959] = Some(2.0);
 
-    let overview = panels("overview", &selection, None).unwrap();
+    let overview = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let pressure = overview
         .iter()
         .find(|panel| panel.id == "live-memory-pressure")
@@ -349,7 +443,12 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
     let mut expected = vec![None; 960];
     expected[959] = Some(1.0);
 
-    let overview = panels("overview", &selection, None).unwrap();
+    let overview = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let pressure = overview
         .iter()
         .find(|panel| panel.id == "live-memory-pressure")
@@ -358,7 +457,10 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
     assert_eq!(pressure.lines[0].values, expected);
     assert_eq!(pressure.selected_index, Some(959));
     assert_eq!(
-        inspection_identity(&selection, 1000),
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            1000
+        ),
         Some(selection["selected"].clone())
     );
 }
@@ -367,17 +469,34 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
 fn empty_or_unavailable_observations_never_fabricate_cpu_activity() {
     // Goal: no-data and unavailable-counter states remain distinguishable from zero.
     // Method: project empty and null-only payloads, then reject an oversized context.
-    let empty = panels("cpu", &json!({"trends": []}), None).unwrap();
+    let empty = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&json!({"trends": []})),
+        None,
+    )
+    .unwrap();
     assert!(!empty.is_empty());
     for line in empty.iter().flat_map(|panel| &panel.lines) {
         assert!(line.values.iter().all(Option::is_none));
     }
     let mut selection = selection();
     selection["trends"][1]["cpu_percent"] = Value::Null;
-    let cpu = panels("cpu", &selection, None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     assert!(cpu[0].lines[0].values.iter().all(Option::is_none));
     selection["trends"] = json!(vec![selection["trends"][0].clone(); OBSERVATIONS_MAX + 1]);
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -406,7 +525,12 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
          "footprint_bytes": {"known": 0, "measured_members": 0,
             "unavailable_members": 3, "overflowed": false}, "energy_watts": 0.25}
     ]});
-    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+    let apps = panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        Some(&history),
+    )
+    .unwrap();
     let titles: Vec<&str> = apps.iter().map(|panel| panel.title.as_str()).collect();
     assert_eq!(
         titles,
@@ -434,7 +558,12 @@ fn missing_selected_second_keeps_context_but_has_no_current_readout() {
     let mut selection = selection();
     selection["selected"] = Value::Null;
     selection["summary"] = Value::Null;
-    let cpu = panels("cpu", &selection, None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     assert_eq!(cpu[0].lines[0].values, [None, Some(25.0), None]);
     assert_eq!(cpu[0].selected_index, None);
     assert_eq!(
@@ -449,10 +578,24 @@ fn invalid_clocks_and_nonfinite_values_are_reported_instead_of_plotted() {
     // Method: move an observation beyond the domain, then substitute a nonfinite string reading.
     let mut selection = selection();
     selection["trends"][0]["wall_ns"] = json!(40_000_000_000_u64);
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
     selection["trends"][0]["wall_ns"] = json!(101_000_000_000_u64);
     selection["trends"][0]["cpu_percent"] = json!("NaN");
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -462,10 +605,20 @@ fn cursor_identifies_the_exact_selected_alternative_instead_of_the_latest_point(
     let mut selection = selection();
     selection["trends"][1]["wall_ns"] = json!(1_000_500_000_000_u64);
     selection["selected"] = selection["trends"][1].clone();
-    let cpu = panels("cpu", &selection, None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     assert_eq!(cpu[0].selected_index, Some(1));
     selection["selected"]["publication"] = json!(9);
-    let cpu = panels("cpu", &selection, None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     assert_eq!(cpu[0].selected_index, None);
 }
 
@@ -481,7 +634,12 @@ fn app_cursor_matches_decimal_stamp_identity_to_its_selected_observation() {
         {"observation": first, "segment": "1", "cpu_percent_one_core": 10},
         {"observation": second, "segment": "1", "cpu_percent_one_core": 20}
     ]});
-    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+    let apps = panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        Some(&history),
+    )
+    .unwrap();
     assert_eq!(apps[0].selected_index, Some(0));
 }
 
@@ -495,7 +653,12 @@ fn uppercase_hexadecimal_identities_match_selected_points() {
     selection["trends"][2]["run"] = json!("ffffffffffffffffabcdef0123456789");
     selection["selected"]["run"] = json!("FFFFFFFFFFFFFFFFABCDEF0123456789");
 
-    let cpu = panels("cpu", &selection, None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(cpu[0].selected_index, Some(2));
     assert_eq!(cpu[0].segments.as_ref().unwrap(), &[0, 1, 1]);
@@ -514,7 +677,12 @@ fn unsigned_decimal_identities_preserve_distinct_segments() {
         {"observation": first, "segment": "1", "cpu_percent_one_core": 10},
         {"observation": second, "segment": "1", "cpu_percent_one_core": 20}]});
 
-    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+    let apps = panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        Some(&history),
+    )
+    .unwrap();
 
     assert_eq!(apps[0].selected_index, Some(0));
     assert_eq!(apps[0].segments.as_ref().unwrap(), &[0, 1]);
@@ -532,7 +700,12 @@ fn mixed_identity_encodings_keep_the_selected_point_and_segment() {
         "points": [{"observation": observation, "segment": "1",
             "cpu_percent_one_core": -0.0}]});
 
-    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+    let apps = panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        Some(&history),
+    )
+    .unwrap();
 
     assert_eq!(apps[0].selected_index, Some(0));
     assert_eq!(apps[0].segments.as_ref().unwrap(), &[0]);
@@ -549,7 +722,14 @@ fn negative_run_identity_words_reject_the_projection() {
     let mut selection = selection();
     selection["trends"][1]["run"] = json!(["-1", "2"]);
 
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -559,7 +739,14 @@ fn overflowing_boot_identity_words_reject_the_projection() {
     let mut selection = selection();
     selection["trends"][1]["boot"] = json!(["18446744073709551616", "2"]);
 
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -569,7 +756,14 @@ fn non_ascii_run_identities_reject_the_projection() {
     let mut selection = selection();
     selection["trends"][1]["run"] = json!("000000000000000é000000000000000");
 
-    assert!(panels("cpu", &selection, None).is_err());
+    assert!(
+        panels(
+            "cpu",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -582,7 +776,12 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
     selection["trends"][2]["fan_rpm"] = json!([1200.0]);
     selection["trends"][1]["soc_celsius"] = json!(42.5);
 
-    let energy = panels("energy", &selection, None).unwrap();
+    let energy = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(energy.len(), 7);
     let temperature = energy
@@ -608,7 +807,12 @@ fn energy_draws_fan_channels_in_the_prototypes_classic_palette() {
     let mut selection = selection();
     selection["trends"][0]["fan_rpm"] = json!([1000.0, 1100.0, 1200.0]);
 
-    let energy = panels("energy", &selection, None).unwrap();
+    let energy = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let fans = energy.iter().find(|panel| panel.id == "live-fans").unwrap();
     let colors: Vec<_> = fans.lines.iter().map(|line| line.color.as_str()).collect();
@@ -635,11 +839,21 @@ fn storage_draws_disk_reads_in_the_prototypes_yellow() {
     // Goal: the Storage page and the selected App's Disk I/O use the prototype's yellow, which
     // is lighter than its classic palette's yellow.
     // Method: project the Storage route and the Apps route, and read each line's color back.
-    let storage = panels("storage", &selection(), None).unwrap();
+    let storage = panels(
+        "storage",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     let observation = json!({"wall_ns": "1000750000000", "stamp": {
         "run": ["1", "2"], "boot": ["3", "4"], "publication": "3"}});
     let history = json!({"points": [{"observation": observation, "segment": "1"}]});
-    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+    let apps = panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        Some(&history),
+    )
+    .unwrap();
 
     assert_eq!(
         line_color(&storage, "live-storage-throughput", "Read"),
@@ -661,7 +875,12 @@ fn storage_draws_disk_reads_in_the_prototypes_yellow() {
 fn energy_draws_system_area_maxima_in_the_prototypes_colors() {
     // Goal: the System area maxima chart colors its sensors as the prototype does.
     // Method: project the Energy route and read each line's color back by name.
-    let energy = panels("energy", &selection(), None).unwrap();
+    let energy = panels(
+        "energy",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     let id = "live-area-maxima";
 
     assert_eq!(line_color(&energy, id, "Source SoC group max"), "#5794f2");
@@ -677,9 +896,24 @@ fn reference_lines_are_drawn_in_the_prototypes_text_color() {
     // Goal: the capacity and total lines that the prototype draws in its text color are drawn
     // in it, not in a near grey.
     // Method: project the pages that carry them and read each line's color back.
-    let cpu = panels("cpu", &selection(), None).unwrap();
-    let memory = panels("memory", &selection(), None).unwrap();
-    let gpu = panels("gpu", &selection(), None).unwrap();
+    let cpu = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
+    let gpu = panels(
+        "gpu",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(line_color(&cpu, "live-load-average", "Cores"), "#ccccdc");
     assert_eq!(
@@ -702,7 +936,14 @@ fn energy_rejects_fan_arrays_beyond_the_recording_bound() {
     let mut selection = selection();
     selection["trends"][1]["fan_rpm"] = json!(vec![0; 11]);
 
-    assert!(panels("energy", &selection, None).is_err());
+    assert!(
+        panels(
+            "energy",
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -714,7 +955,12 @@ fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
     selection["trends"][1]["swap_in_bytes_per_second"] = json!(1_000_000);
     selection["trends"][1]["swap_out_bytes_per_second"] = json!(2_000_000);
 
-    let memory = panels("memory", &selection, None).unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let swap = memory
         .iter()
         .find(|panel| panel.id == "live-swap-flow")
@@ -736,7 +982,12 @@ fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
 fn memory_draws_memory_in_use_and_page_ins_as_the_prototype_names_them() {
     // Goal: the Memory page's charts carry the prototype's titles and solid series lines.
     // Method: project the memory route and read each chart's title and series.
-    let memory = panels("memory", &selection(), None).unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection()),
+        None,
+    )
+    .unwrap();
     let find = |id: &str| memory.iter().find(|panel| panel.id == id).unwrap();
 
     let composition = find("live-memory");
@@ -760,7 +1011,12 @@ fn pressure_timeline_uses_exact_selected_alternatives_and_blanks_unknown_states(
     selection["trends"][2]["pressure"] = json!(2);
     selection["selected"] = selection["trends"][1].clone();
 
-    let memory = panels("memory", &selection, None).unwrap();
+    let memory = panels(
+        "memory",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let pressure = memory
         .iter()
         .find(|panel| panel.id == "live-memory-pressure")
@@ -795,7 +1051,11 @@ fn inspecting_another_repeated_second_selects_its_latest_observation() {
     selection["trends"][1]["wall_ns"] = json!(999_100_000_000_u64);
     selection["trends"][2]["wall_ns"] = json!(999_750_000_000_u64);
 
-    let identity = inspection_identity(&selection, 999).unwrap();
+    let identity = inspection_identity(
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        999,
+    )
+    .unwrap();
 
     assert_eq!(identity["publication"], 3);
 }
@@ -812,7 +1072,12 @@ fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
     point["open_files"] = json!(12_000);
     point["open_files_percent"] = json!(3.0);
 
-    let panels = panels("cpu", &selection, None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let load = panels
         .iter()
@@ -839,7 +1104,12 @@ fn cpu_temperature_charts_the_recorded_core_sensor_only_where_read() {
     let mut selection = selection();
     selection["trends"][1]["cpu_celsius"] = json!(61.5);
 
-    let panels = panels("cpu", &selection, None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let temperature = panels
         .iter()
@@ -857,7 +1127,12 @@ fn gpu_temperature_charts_the_recorded_gpu_sensor_only_where_read() {
     let mut selection = selection();
     selection["trends"][1]["gpu_celsius"] = json!(48.5);
 
-    let panels = panels("gpu", &selection, None).unwrap();
+    let panels = panels(
+        "gpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let temperature = panels
         .iter()
@@ -877,7 +1152,12 @@ fn open_files_share_axis_marks_the_same_heights_as_the_count_axis() {
     let point = &mut selection["trends"][1];
     point["open_files"] = json!(10_000);
     point["open_files_percent"] = json!(2.5);
-    let panels = panels("cpu", &selection, None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
     let files = panels
         .iter()
         .find(|panel| panel.id == OPEN_FILES_ID)
@@ -903,7 +1183,12 @@ fn overview_projects_the_thermal_state_the_energy_page_draws() {
     let mut selection = selection();
     selection["trends"][1]["thermal_pressure"] = json!(1);
 
-    let panels = panels("overview", &selection, None).unwrap();
+    let panels = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let thermal = panels
         .iter()
@@ -926,7 +1211,12 @@ fn cpu_frequency_charts_each_level_where_measured() {
         {"name": "Performance", "logical_cpus": 12},
     ]);
 
-    let panels = panels("cpu", &selection, None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let frequency = panels
         .iter()
@@ -952,7 +1242,12 @@ fn gpu_memory_charts_in_use_and_dashed_allocation_in_gibibytes() {
     selection["trends"][1]["gpu_memory_in_use_bytes"] = json!(1_u64 << 30);
     selection["trends"][1]["gpu_memory_allocated_bytes"] = json!(6_u64 << 30);
 
-    let panels = panels("gpu", &selection, None).unwrap();
+    let panels = panels(
+        "gpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     let memory = panels
         .iter()
@@ -1011,7 +1306,11 @@ fn an_inspected_second_names_its_observation_without_carrying_its_readings() {
     selection["selected"] = Value::Null;
     selection["trends"][1]["per_core_percent"] = json!(vec![12.345_678_f64; 1000]);
 
-    let identity = inspection_identity(&selection, 550).unwrap();
+    let identity = inspection_identity(
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        550,
+    )
+    .unwrap();
 
     assert_eq!(identity["publication"], 2);
     assert_eq!(identity["wall_ns"], 550_000_000_000_u64);
@@ -1041,7 +1340,12 @@ fn long_selection() -> Value {
 fn an_older_tail_widens_the_chart_to_the_whole_loaded_hour() {
     // Goal: charts hold the hour the viewer loaded, so a 30 or 60 minute range has readings.
     // Method: project a selection with an older tail and read the window and the positions.
-    let panels = panels("cpu", &long_selection(), None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&long_selection()),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(
         panels[0].window,
@@ -1070,7 +1374,12 @@ fn a_selection_without_an_older_tail_keeps_the_default_history() {
     let mut selection = long_selection();
     selection.as_object_mut().unwrap().remove("earlier_trends");
 
-    let panels = panels("cpu", &selection, None).unwrap();
+    let panels = panels(
+        "cpu",
+        &crate::live_store_fixtures::selection_of_json(&selection),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(
         panels[0].window,
@@ -1086,7 +1395,12 @@ fn a_selection_without_an_older_tail_keeps_the_default_history() {
 fn an_older_reading_fills_the_seconds_it_stands_for_on_a_timeline() {
     // Goal: a state timeline has no blank stripes between the thinned older readings.
     // Method: project pressure over the tail and read the cells each older reading covers.
-    let overview = panels("overview", &long_selection(), None).unwrap();
+    let overview = panels(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&long_selection()),
+        None,
+    )
+    .unwrap();
     let pressure = overview
         .iter()
         .find(|panel| panel.id == "live-memory-pressure")
@@ -1109,15 +1423,35 @@ fn a_second_between_thinned_readings_inspects_the_reading_that_stands_for_it() {
     let selection = long_selection();
 
     assert_eq!(
-        inspection_identity(&selection, 2013).unwrap()["publication"],
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2013
+        )
+        .unwrap()["publication"],
         2
     );
     assert_eq!(
-        inspection_identity(&selection, 2000).unwrap()["publication"],
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2000
+        )
+        .unwrap()["publication"],
         1
     );
-    assert!(inspection_identity(&selection, 2020).is_none());
-    assert!(inspection_identity(&selection, 3000).is_none());
+    assert!(
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2020
+        )
+        .is_none()
+    );
+    assert!(
+        inspection_identity(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            3000
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -1127,9 +1461,27 @@ fn an_older_second_is_inspected_as_the_second_of_its_reading() {
     // stretch, in the recent context and outside both.
     let selection = long_selection();
 
-    assert_eq!(inspection_second(&selection, 2013), 2010);
-    assert_eq!(inspection_second(&selection, 4101), 4101);
-    assert_eq!(inspection_second(&selection, 3000), 3000);
+    assert_eq!(
+        inspection_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2013
+        ),
+        2010
+    );
+    assert_eq!(
+        inspection_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            4101
+        ),
+        4101
+    );
+    assert_eq!(
+        inspection_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            3000
+        ),
+        3000
+    );
 }
 
 #[test]
@@ -1140,13 +1492,34 @@ fn a_selection_holds_the_seconds_its_charts_hold() {
     let recent = json!({"second": 5000,"context_last_second": 5000, "trends": []});
     let longer = long_selection();
 
-    assert!(!holds_second(&recent, 4040));
-    assert!(holds_second(&recent, 4041));
-    assert!(holds_second(&recent, 5000));
-    assert!(!holds_second(&recent, 5001));
-    assert!(!holds_second(&longer, 1340));
-    assert!(holds_second(&longer, 1341));
-    assert!(!holds_second(&longer, 5001));
+    assert!(!holds_second(
+        &crate::live_store_fixtures::selection_of_json(&recent),
+        4040
+    ));
+    assert!(holds_second(
+        &crate::live_store_fixtures::selection_of_json(&recent),
+        4041
+    ));
+    assert!(holds_second(
+        &crate::live_store_fixtures::selection_of_json(&recent),
+        5000
+    ));
+    assert!(!holds_second(
+        &crate::live_store_fixtures::selection_of_json(&recent),
+        5001
+    ));
+    assert!(!holds_second(
+        &crate::live_store_fixtures::selection_of_json(&longer),
+        1340
+    ));
+    assert!(holds_second(
+        &crate::live_store_fixtures::selection_of_json(&longer),
+        1341
+    ));
+    assert!(!holds_second(
+        &crate::live_store_fixtures::selection_of_json(&longer),
+        5001
+    ));
 }
 
 #[test]
@@ -1157,11 +1530,46 @@ fn a_step_leaves_the_older_stretch_it_shows() {
     // its last stretch into the gap after it, and from a recent reading.
     let selection = long_selection();
 
-    assert_eq!(stepped_second(&selection, 2000, 1), 2010);
-    assert_eq!(stepped_second(&selection, 2010, -1), 2009);
-    assert_eq!(stepped_second(&selection, 2010, 1), 2020);
-    assert_eq!(stepped_second(&selection, 4101, 1), 4102);
-    assert_eq!(stepped_second(&selection, 4101, -1), 4100);
+    assert_eq!(
+        stepped_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2000,
+            1
+        ),
+        2010
+    );
+    assert_eq!(
+        stepped_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2010,
+            -1
+        ),
+        2009
+    );
+    assert_eq!(
+        stepped_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            2010,
+            1
+        ),
+        2020
+    );
+    assert_eq!(
+        stepped_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            4101,
+            1
+        ),
+        4102
+    );
+    assert_eq!(
+        stepped_second(
+            &crate::live_store_fixtures::selection_of_json(&selection),
+            4101,
+            -1
+        ),
+        4100
+    );
 }
 
 #[test]

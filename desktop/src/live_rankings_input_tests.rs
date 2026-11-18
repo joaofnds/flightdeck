@@ -922,7 +922,7 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 preview.target.identity.clone().unwrap();
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][0].clone();
+                snapshot.selection.trends_json()[0].clone();
             snapshot.selection.legacy_mut().unwrap()["summary"]["cpu_percent"] = json!(13);
             snapshot.rankings = Some(std::sync::Arc::new(
                 crate::live_source::Presentation::Shared(Arc::new(
@@ -957,12 +957,13 @@ impl InputDriver {
     fn add_later_ranked_sibling(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = dashboard.snapshot.as_mut().unwrap();
-            let mut sibling = snapshot.selection["trends"][1].clone();
+            let mut sibling = snapshot.selection.trends_json()[1].clone();
             sibling["publication"] = json!(3);
-            snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .push(sibling);
+                .trends_edit(|points| points.as_array_mut().unwrap().push(sibling));
             cx.notify();
         });
         self.context.run_until_parked();
@@ -995,12 +996,13 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 dashboard.request.identity.clone().unwrap();
-            snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .truncate(1);
+                .trends_edit(|points| points.as_array_mut().unwrap().truncate(1));
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][0].clone();
+                snapshot.selection.trends_json()[0].clone();
             snapshot.rankings = Some(std::sync::Arc::new(
                 crate::live_source::Presentation::Shared(ranked_payload(
                     &snapshot,
@@ -1046,9 +1048,18 @@ impl InputDriver {
 /// The Overview's readings of its committed second, ranked, at 87% CPU after 13%.
 fn ranked_overview(generation: u64) -> Box<Snapshot> {
     let mut snapshot = accepted_snapshot(generation);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(87);
-    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["cpu_percent"] = json!(13));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["cpu_percent"] = json!(87));
+    snapshot.selection.legacy_mut().unwrap()["summary"] =
+        snapshot.selection.trends_json()[1].clone();
     snapshot.rankings = Some(std::sync::Arc::new(
         crate::live_source::Presentation::Shared(ranked_payload(&snapshot, "Current", "41", 80)),
     ));
@@ -1105,11 +1116,12 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 preview.target.identity.clone().unwrap();
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][0].clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+                snapshot.selection.trends_json()[0].clone();
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .truncate(1);
+                .trends_edit(|points| points.as_array_mut().unwrap().truncate(1));
             assert_eq!(
                 snapshot.selection["summary"],
                 preview.reading.selection["summary"]
@@ -1129,19 +1141,48 @@ impl InputDriver {
 
 fn route_ranked_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = accepted_snapshot(generation);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_active_bytes"] =
-        json!(2_147_483_648_u64);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_anonymous_bytes"] =
-        json!(2_147_483_648_u64);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_purgeable_bytes"] = json!(0);
-    snapshot.selection.legacy_mut().unwrap()["trends"][0]["power_watts"] = json!(3.0);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_active_bytes"] =
-        json!(6_442_450_944_u64);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_anonymous_bytes"] =
-        json!(6_442_450_944_u64);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_purgeable_bytes"] = json!(0);
-    snapshot.selection.legacy_mut().unwrap()["trends"][1]["power_watts"] = json!(9.0);
-    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["memory_active_bytes"] = json!(2_147_483_648_u64));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["memory_anonymous_bytes"] = json!(2_147_483_648_u64));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["memory_purgeable_bytes"] = json!(0));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[0]["power_watts"] = json!(3.0));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["memory_active_bytes"] = json!(6_442_450_944_u64));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["memory_anonymous_bytes"] = json!(6_442_450_944_u64));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["memory_purgeable_bytes"] = json!(0));
+    snapshot
+        .selection
+        .legacy_mut()
+        .unwrap()
+        .trends_edit(|points| points[1]["power_watts"] = json!(9.0));
+    snapshot.selection.legacy_mut().unwrap()["summary"] =
+        snapshot.selection.trends_json()[1].clone();
 
     snapshot
 }
@@ -1179,11 +1220,12 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 dashboard.request.identity.clone().unwrap();
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][0].clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+                snapshot.selection.trends_json()[0].clone();
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .truncate(1);
+                .trends_edit(|points| points.as_array_mut().unwrap().truncate(1));
             snapshot.rankings = Some(std::sync::Arc::new(
                 crate::live_source::Presentation::Shared(route_ranked_payload(
                     &snapshot,

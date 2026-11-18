@@ -193,7 +193,7 @@ const FLOW: Specification = (
 );
 const HEALTH: Specification = ("Health", Reading::Health, "", GREEN);
 
-pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
+pub fn cards(route: &str, selection: &viewer::Selection) -> Vec<Card> {
     cards_of_summary(route, matching_summary(selection))
 }
 
@@ -407,7 +407,7 @@ pub(crate) fn memory_in_use_bytes_of(app: u64, wired: u64, compressed: u64) -> O
 
 /// The summary only where it is the selected observation's own: the same run, boot and
 /// publication, and the same wall clock, so a sibling observation never lends its readings.
-pub(crate) fn matching_summary(selection: &Value) -> &Value {
+pub(crate) fn matching_summary(selection: &viewer::Selection) -> &Value {
     let selected = &selection["selected"];
     let summary = &selection["summary"];
     for field in ["run", "boot", "publication"] {

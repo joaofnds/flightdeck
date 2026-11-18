@@ -266,7 +266,7 @@ impl LiveDashboard {
         }
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         if self.request.route == "self" {
             return crate::self_monitoring::cards(&self.self_reports);
         }
@@ -350,7 +350,7 @@ impl LiveDashboard {
     pub(crate) fn memory_quantities(&self) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let keys = [
             "memory-app",
             "memory-wired",

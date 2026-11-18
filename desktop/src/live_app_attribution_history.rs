@@ -174,7 +174,7 @@ impl Metric {
 }
 
 impl AppAttributionHistory {
-    pub fn prepare(metric: Metric, value: &Value, selection: &Value) -> Self {
+    pub fn prepare(metric: Metric, value: &Value, selection: &viewer::Selection) -> Self {
         match History::decode(metric, value, selection) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),

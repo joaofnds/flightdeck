@@ -130,8 +130,10 @@ fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
         return Err("Live soak received a negative read duration".into());
     }
     let context_last_second = workflows::context_last_second(&snapshot.selection)?;
-    let coverage =
-        workflows::history_coverage(&snapshot.selection, "trends", false, context_last_second)?;
+    let coverage = workflows::history_coverage(
+        &workflows::HistorySource::trends(&snapshot.selection),
+        context_last_second,
+    )?;
     let rankings = super::rankings_report(snapshot)?;
     let selected = &snapshot.selection["selected"];
     Ok(
@@ -369,10 +371,10 @@ mod tests {
         Snapshot {
             generation: 1,
             catalog: json!({"collector_completed": false}),
-            selection: crate::live_source::Presentation::Legacy(
+            selection: crate::live_source::Presentation::Legacy(viewer::Selection::from_json(
                 json!({"selected": selected, "context_last_second": second,
                 "trends": [selected]}),
-            ),
+            )),
             apps: None,
             detail: None,
             history: None,

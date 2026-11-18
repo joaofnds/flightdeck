@@ -325,12 +325,18 @@ impl InputDriver {
     fn seed_energy_breakdown(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["power_watts"] =
-                serde_json::json!(15);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["gpu_watts"] =
-                serde_json::json!(5);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["power_watts"] = serde_json::json!(15));
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["gpu_watts"] = serde_json::json!(5));
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -351,10 +357,13 @@ impl InputDriver {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] =
                 serde_json::json!(3);
-            snapshot.selection.legacy_mut().unwrap()["trends"][1]["publication"] =
-                serde_json::json!(3);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| points[1]["publication"] = serde_json::json!(3));
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             dashboard.accept(snapshot);
             cx.notify();
         });
@@ -390,23 +399,26 @@ impl InputDriver {
     pub(super) fn prepare_sections(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            for (index, point) in snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .iter_mut()
-                .enumerate()
-            {
-                point["fan_rpm"] = serde_json::json!([1500, 1700]);
-                point["soc_celsius"] = serde_json::json!(42);
-                if dashboard.request.route == "memory" {
-                    point["memory_free_bytes"] =
-                        serde_json::json!([2_147_483_648_u64, 4_294_967_296][index]);
-                }
-            }
+                .trends_edit(|points| {
+                    for (index, point) in points.as_array_mut().unwrap().iter_mut().enumerate() {
+                        point["fan_rpm"] = serde_json::json!([1500, 1700]);
+                        point["soc_celsius"] = serde_json::json!(42);
+                        if dashboard.request.route == "memory" {
+                            point["memory_free_bytes"] =
+                                serde_json::json!([2_147_483_648_u64, 4_294_967_296][index]);
+                        }
+                    }
+                });
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             if dashboard.request.route == "apps" {
-                let points: Vec<_> = snapshot.selection["trends"]
+                let points: Vec<_> = snapshot
+                    .selection
+                    .trends_json()
                     .as_array()
                     .unwrap()
                     .iter()

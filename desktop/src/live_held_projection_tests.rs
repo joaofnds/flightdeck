@@ -5,7 +5,7 @@ use collector::recording::identity_text;
 use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
-use super::super::{JoinedPoints, empty_panels, overview, panels};
+use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
 use super::{Observations, OverviewPoints, overview_panels, overview_point_second};
 use crate::data::Panel;
 use crate::live_store_fixtures::{levels, reading_at, selection, trend_point, view};
@@ -102,7 +102,10 @@ fn a_view_draws_the_overview_the_trend_points_of_its_seconds_draw() {
     let view = view(1, &earlier, &[older.as_slice(), &detail].concat());
     let expected = panels(
         "overview",
-        &selection(&[earlier, older].concat(), &detail),
+        &crate::live_store_fixtures::selection_of_json(&selection(
+            &[earlier, older].concat(),
+            &detail,
+        )),
         None,
     );
 
@@ -130,7 +133,11 @@ mod when_seconds_are_older_than_the_full_detail_ones {
         ];
         let view = view(1, &earlier, &live);
         let kept = [reading_at(9_020, 3), reading_at(9_030, 3)];
-        let expected = panels("overview", &selection(&kept, &live[3..]), None);
+        let expected = panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selection(&kept, &live[3..])),
+            None,
+        );
 
         let drawn = overview_panels(&view, levels().as_ref());
 
@@ -150,7 +157,11 @@ mod when_seconds_are_older_than_the_full_detail_ones {
             reading_at(10_000, 3),
         ];
         let view = view(1, &[], &live);
-        let expected = panels("overview", &selection(&live[..1], &live[2..]), None);
+        let expected = panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selection(&live[..1], &live[2..])),
+            None,
+        );
 
         let drawn = overview_panels(&view, levels().as_ref());
 
@@ -165,7 +176,11 @@ mod when_seconds_are_older_than_the_full_detail_ones {
         let earlier = [reading_at(6_340, 0), reading_at(6_345, 0)];
         let live = [reading_at(9_041, 1), reading_at(10_000, 1)];
         let view = view(1, &earlier, &live);
-        let expected = panels("overview", &selection(&earlier[1..], &live), None);
+        let expected = panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selection(&earlier[1..], &live)),
+            None,
+        );
 
         let drawn = overview_panels(&view, levels().as_ref());
 
@@ -470,7 +485,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
 
             let points = JoinedPoints {
                 older: &[],
-                recent: std::slice::from_ref(&reached),
+                recent: RecentPoints::Readings(std::slice::from_ref(&reached)),
             };
 
             let reach = points.reach(&reading, 0).unwrap();
@@ -493,7 +508,12 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([point]);
 
-        let panels = panels("energy", &selected, None).unwrap();
+        let panels = panels(
+            "energy",
+            &crate::live_store_fixtures::selection_of_json(&selected),
+            None,
+        )
+        .unwrap();
 
         let chart = panel_named(&panels, "live-power-breakdown");
         let top = chart.lines.iter().find(|line| line.name == "GPU").unwrap();
@@ -626,7 +646,12 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([point]);
 
-        let panels = panels("energy", &selected, None).unwrap();
+        let panels = panels(
+            "energy",
+            &crate::live_store_fixtures::selection_of_json(&selected),
+            None,
+        )
+        .unwrap();
 
         let panel = panel_named(&panels, crate::live_projection::THERMAL_STATE_ID);
         let cell = usize::try_from(9_020 - panel.window.unwrap().first).unwrap();
@@ -651,7 +676,12 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([point]);
 
-        let expected = panels("overview", &selected, None).unwrap();
+        let expected = panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selected),
+            None,
+        )
+        .unwrap();
 
         let expected_line = &panel_named(&expected, "live-cpu").lines[0];
         assert_eq!(peak.second(), 9_024);
@@ -711,7 +741,12 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([older]);
 
-        let drawn = panels("overview", &selected, None).unwrap();
+        let drawn = panels(
+            "overview",
+            &crate::live_store_fixtures::selection_of_json(&selected),
+            None,
+        )
+        .unwrap();
 
         let line = &panel_named(&drawn, "live-cpu").lines[0];
         let reach = line.extremes.as_ref().unwrap()[1].unwrap();

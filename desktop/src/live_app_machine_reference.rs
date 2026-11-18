@@ -161,7 +161,7 @@ impl History {
         });
     }
 
-    pub(super) fn attach_reference(&mut self, selection: &Value) {
+    pub(super) fn attach_reference(&mut self, selection: &viewer::Selection) {
         if self.reference_name().is_none() {
             return;
         }
@@ -190,18 +190,16 @@ impl History {
 }
 
 fn attach_reference_index<'a>(
-    selection: &'a Value,
+    selection: &'a viewer::Selection,
     index: &mut BTreeMap<Key, &'a Value>,
 ) -> Result<(), String> {
     assert!(index.is_empty());
-    let points = selection["trends"]
-        .as_array()
-        .ok_or("Missing scalar context")?;
-    if points.len() > crate::data::LIVE_SAMPLE_LIMIT {
+    let trends = selection.trends().ok_or("Missing scalar context")?;
+    if trends.len() > crate::data::LIVE_SAMPLE_LIMIT {
         return Err("Scalar context exceeds 4096 points".into());
     }
 
-    for point in points {
+    for point in trends.iter().map(viewer::TrendPoint::point) {
         let key = (
             identity(&point["run"])?,
             identity(&point["boot"])?,

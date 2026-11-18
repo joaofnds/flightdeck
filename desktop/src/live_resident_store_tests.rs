@@ -21,7 +21,10 @@ fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     // seconds, whose third holds no Apps and whose fourth does not follow the third, beside the
     // history the worker writes of them, and compare the two charts on the clock.
     let seconds = seconds();
-    let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let worker = ResidentHistory::prepare(
+        &worker_history(&seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
+    );
     let (view, cohorts) = charted_resident(&seconds);
 
     let drawn = ResidentHistory::from_view(&view, &cohorts).panel();
@@ -36,7 +39,10 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
     // hovering the chart the worker's history draws. Method: the seconds of the chart test, and
     // what the hover shows at each of them, the missing third included.
     let seconds = seconds();
-    let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let worker = ResidentHistory::prepare(
+        &worker_history(&seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
+    );
     let (view, cohorts) = charted_resident(&seconds);
 
     let drawn = ResidentHistory::from_view(&view, &cohorts);
@@ -51,7 +57,10 @@ fn says_its_leaders_lead_over_the_range_shown() {
     // picked, where the worker's chart chooses them over the interval it holds. Method: the help
     // of the chart drawn from the View of the chart test beside the worker's.
     let seconds = seconds();
-    let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let worker = ResidentHistory::prepare(
+        &worker_history(&seconds),
+        &crate::live_store_fixtures::selection_of_json(&selection(&[], &seconds)),
+    );
     let (view, cohorts) = charted_resident(&seconds);
 
     let drawn = ResidentHistory::from_view(&view, &cohorts).panel();

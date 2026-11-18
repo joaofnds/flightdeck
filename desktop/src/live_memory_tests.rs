@@ -21,7 +21,7 @@ fn selection() -> Value {
 fn exposes_all_selected_quantities_with_independent_missingness() {
     // Goal: the selected observation supplies every VM quantity without inventing totals.
     // Method: compare all six readouts for measured, zero and unavailable fields.
-    let rows = quantities(&selection());
+    let rows = quantities(&crate::live_store_fixtures::selection_of_json(&selection()));
 
     assert_eq!(
         rows,
@@ -54,7 +54,7 @@ fn measured_quantities_keep_each_vm_and_swap_field_distinct() {
     input["summary"]["swap_used_bytes"] = json!(11_811_160_064_u64);
     input["summary"]["swap_total_bytes"] = json!(12_884_901_888_u64);
 
-    let rows = quantities(&input);
+    let rows = quantities(&crate::live_store_fixtures::selection_of_json(&input));
 
     assert_eq!(
         rows,
@@ -83,7 +83,7 @@ fn refuses_a_summary_from_another_same_second_publication() {
     let mut selection = selection();
     selection["summary"]["publication"] = json!(10);
 
-    let rows = quantities(&selection);
+    let rows = quantities(&crate::live_store_fixtures::selection_of_json(&selection));
 
     assert_eq!(rows.len(), 6);
     assert!(rows.iter().all(|row| row.reading == "Unavailable"));
@@ -96,7 +96,7 @@ fn missing_selection_does_not_borrow_the_latest_summary() {
     let mut selection = selection();
     selection["selected"] = Value::Null;
 
-    let rows = quantities(&selection);
+    let rows = quantities(&crate::live_store_fixtures::selection_of_json(&selection));
 
     assert_eq!(rows.len(), 6);
     assert!(rows.iter().all(|row| row.reading == "Unavailable"));
@@ -109,7 +109,7 @@ fn unknown_pressure_remains_unavailable() {
     let mut selection = selection();
     selection["summary"]["pressure"] = json!(9);
 
-    let rows = quantities(&selection);
+    let rows = quantities(&crate::live_store_fixtures::selection_of_json(&selection));
 
     assert_eq!(rows.last(), Some(&row("Memory pressure", "Unavailable")));
 }

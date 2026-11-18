@@ -124,9 +124,12 @@ fn retains_selected_identity_and_all_panels_in_the_output() {
     // Method: build a transcript from the decoded synthetic contract fixture and all six panels.
     let value = super::fixture();
     let envelope = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
-    let panels =
-        crate::live_projection::panels("apps", &value["selection"], Some(&value["history"]))
-            .unwrap();
+    let panels = crate::live_projection::panels(
+        "apps",
+        &crate::live_store_fixtures::selection_of_json(&value["selection"]),
+        Some(&value["history"]),
+    )
+    .unwrap();
     let bits = crate::projection_bench::bits(&panels);
 
     let output = transcript(&Transcript {

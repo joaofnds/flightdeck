@@ -19,7 +19,11 @@ const _: () = {
 };
 
 impl History {
-    pub(super) fn decode(metric: Metric, value: &Value, selection: &Value) -> Result<Self, String> {
+    pub(super) fn decode(
+        metric: Metric,
+        value: &Value,
+        selection: &viewer::Selection,
+    ) -> Result<Self, String> {
         validate_metric(metric, value)?;
         let selected = Observation::decode(&value["selected"])?;
         crate::live_source::identity_validate(&value["selected"], &selection["selected"])?;

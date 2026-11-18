@@ -85,7 +85,7 @@ fn chart_points(reading: &Snapshot) -> usize {
     let history = reading.history.as_deref().unwrap_or(&Value::Null);
 
     [
-        &reading.selection["trends"],
+        &reading.selection.trends_json(),
         &reading.selection["earlier_trends"],
         &history["points"],
     ]

@@ -112,10 +112,10 @@ impl InputDriver {
     fn seed_schematic_battery(&mut self, historical_battery: Value) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let mut historical = snapshot.selection["trends"][0].clone();
+            let mut historical = snapshot.selection.trends_json()[0].clone();
             historical["cpu_percent"] = json!(13);
             historical["battery"] = historical_battery;
-            let mut current = snapshot.selection["trends"][1].clone();
+            let mut current = snapshot.selection.trends_json()[1].clone();
             current["cpu_percent"] = json!(87);
             current["battery"] = json!({"charge_percent":88,"power_watts":8});
             let mut sibling = current.clone();
@@ -123,8 +123,11 @@ impl InputDriver {
             sibling["wall_ns"] = json!(1_000_900_000_000_u64);
             sibling["battery"] = json!({"charge_percent":99,"power_watts":9});
             snapshot.selection.legacy_mut().unwrap()["summary"] = current.clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"] =
-                json!([historical, current, sibling]);
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([historical, current, sibling]));
             snapshot.catalog["path"] = json!("schematic-battery-input.recording");
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -176,8 +179,12 @@ impl InputDriver {
                 preview.target.identity.clone().unwrap();
             snapshot.selection.legacy_mut().unwrap()["summary"] =
                 preview.reading.selection["summary"].clone();
-            snapshot.selection.legacy_mut().unwrap()["trends"] =
-                json!([snapshot.selection["summary"]]);
+            let summary = snapshot.selection["summary"].clone();
+            snapshot
+                .selection
+                .legacy_mut()
+                .unwrap()
+                .trends_edit(|points| *points = json!([summary]));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -261,18 +268,19 @@ impl InputDriver {
         self.seed_schematic_battery(historical_battery);
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = dashboard.snapshot.as_mut().unwrap();
-            for point in snapshot.selection.legacy_mut().unwrap()["trends"]
-                .as_array_mut()
+            snapshot
+                .selection
+                .legacy_mut()
                 .unwrap()
-                .iter_mut()
-                .take(3)
-            {
-                point["gpu_active_percent"] = json!(37);
-                point["memory_total_bytes"] = json!(34_359_738_368_u64);
-                point["fan_rpm"] = json!([1500, 1600]);
-            }
+                .trends_edit(|points| {
+                    for point in points.as_array_mut().unwrap().iter_mut().take(3) {
+                        point["gpu_active_percent"] = json!(37);
+                        point["memory_total_bytes"] = json!(34_359_738_368_u64);
+                        point["fan_rpm"] = json!([1500, 1600]);
+                    }
+                });
             snapshot.selection.legacy_mut().unwrap()["summary"] =
-                snapshot.selection["trends"][1].clone();
+                snapshot.selection.trends_json()[1].clone();
             cx.notify();
         });
         self.context.run_until_parked();
