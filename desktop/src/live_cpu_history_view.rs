@@ -662,38 +662,14 @@ fn cpu_history_paint(
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
-    let row_height = row_height(history);
-    for (row, cpu) in history.cpus().iter().enumerate() {
-        let Some(row) = row.to_f32() else {
-            unreachable!("Validated CPU history has at most 32 rows");
-        };
-        // The prototype insets each cell half a pixel from its row's top and leaves 0.7 below.
-        let top = bounds.origin.y + px(row * row_height + 0.5);
-        let height = px((row_height - 0.7).max(1.0));
-        window.paint_quad(fill(
-            Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height)),
-            rgb(GRID),
-        ));
-        for interval in &history.wire.intervals {
-            if let Some(value) = cpu.busy_percent()[interval.observation_index] {
-                let first = history.fraction(interval.first_ns).to_f32();
-                let end = history.fraction(interval.end_ns).to_f32();
-                let (Some(first), Some(end)) = (first, end) else {
-                    unreachable!("Validated CPU history fractions fit f32");
-                };
-                let first = lens.to_view(first).clamp(0.0, 1.0);
-                let end = lens.to_view(end).clamp(0.0, 1.0);
-                if end <= first {
-                    continue;
-                }
-                let rectangle = Bounds::new(
-                    point(bounds.origin.x + bounds.size.width * first, top),
-                    size(bounds.size.width * (end - first), height),
-                );
-                window.paint_quad(fill(rectangle, crate::charts::utilization_color(value)));
-            }
-        }
-    }
+    cpu_history_paint_rows(history, bounds, window);
+    // GPUI finds a place in the draw order for a quad painted on its own by searching a tree of
+    // the bounds painted before it, and then adds the quad to that tree. A history holds
+    // thousands of cells, and a layer takes one place for every quad painted inside it.
+    window.paint_layer(bounds, |window| {
+        cpu_history_paint_cells(history, lens, bounds, window);
+    });
+
     let inspected = match inspection {
         Some(CPUInspection::Sample {
             observation_index, ..
@@ -711,6 +687,69 @@ fn cpu_history_paint(
         bounds,
         window,
     );
+}
+
+/// The ground of each row, which shows wherever the row has no reading.
+fn cpu_history_paint_rows(history: &CPUHistory, bounds: Bounds<Pixels>, window: &mut Window) {
+    let row_height = row_height(history);
+    for row_index in 0..history.cpus().len() {
+        let row_bounds = cpu_history_paint_row_bounds(row_height, row_index, bounds);
+        window.paint_quad(fill(row_bounds, rgb(GRID)));
+    }
+}
+
+fn cpu_history_paint_cells(
+    history: &CPUHistory,
+    lens: Lens,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    let row_height = row_height(history);
+    for (row_index, cpu) in history.cpus().iter().enumerate() {
+        let row_bounds = cpu_history_paint_row_bounds(row_height, row_index, bounds);
+        for interval in &history.wire.intervals {
+            if let Some(value) = cpu.busy_percent()[interval.observation_index] {
+                let first = history.fraction(interval.first_ns).to_f32();
+                let end = history.fraction(interval.end_ns).to_f32();
+                let (Some(first), Some(end)) = (first, end) else {
+                    unreachable!("Validated CPU history fractions fit f32");
+                };
+                let first = lens.to_view(first).clamp(0.0, 1.0);
+                let end = lens.to_view(end).clamp(0.0, 1.0);
+                if end <= first {
+                    continue;
+                }
+                let rectangle = Bounds::new(
+                    point(
+                        row_bounds.origin.x + row_bounds.size.width * first,
+                        row_bounds.origin.y,
+                    ),
+                    size(
+                        row_bounds.size.width * (end - first),
+                        row_bounds.size.height,
+                    ),
+                );
+                window.paint_quad(fill(rectangle, crate::charts::utilization_color(value)));
+            }
+        }
+    }
+}
+
+/// Where a row's cells stand, across the whole width of the plot.
+fn cpu_history_paint_row_bounds(
+    row_height: f32,
+    row_index: usize,
+    bounds: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    let Some(rows_above) = row_index.to_f32() else {
+        unreachable!("Validated CPU history has at most 32 rows");
+    };
+
+    // The prototype insets each cell half a pixel from its row's top and leaves 0.7 below.
+    let top = bounds.origin.y + px(rows_above * row_height + 0.5);
+    let height = px((row_height - 0.7).max(1.0));
+
+    Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height))
 }
 
 /// The cursor's dark edge and light core. Cells run from light green to red and the plot

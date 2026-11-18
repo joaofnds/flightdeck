@@ -260,6 +260,119 @@ fn a_hover_on_the_history_of_a_page_opened_again_shows_the_reading_the_reader_an
     harness.teardown();
 }
 
+#[gpui::test]
+fn the_cells_of_a_history_take_one_place_in_the_draw_order(cx: &mut TestAppContext) {
+    // Goal: GPUI gives the cells of the CPU history one place in its draw order, rather than
+    // searching for a place for each of the thousands a history holds.
+    // Method: draw two minutes of readings of one colour in a plot of fifteen minutes. A cell is
+    // then narrower than a pixel, and GPUI moves the edges of some neighbours onto the same
+    // pixels, so those cover one another and would take different places if each took its own.
+    // Check that some do, then read the draw order of every cell.
+    let mut harness = CPUHistoryHarness::setup(cx);
+
+    harness.driver.seed_two_minutes_of_history();
+
+    let cells = harness.driver.painted(half_busy_color());
+    assert!(
+        some_overlap(&cells),
+        "No two cells cover one another, so their draw orders show nothing."
+    );
+    let orders = cells.iter().map(|cell| cell.order);
+    assert_eq!(orders.clone().min(), orders.max());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_cells_of_a_history_draw_over_their_row_and_under_the_cursor(cx: &mut TestAppContext) {
+    // Goal: a cell covers the ground of its row and the cursor covers the cells.
+    // Method: draw two minutes of readings, then compare the draw orders of the row's ground,
+    // of the cells and of the cursor's edge wherever two of them overlap.
+    let mut harness = CPUHistoryHarness::setup(cx);
+
+    harness.driver.seed_two_minutes_of_history();
+
+    let row = harness.driver.painted(gpui::rgb(crate::charts::GRID));
+    let cells = harness.driver.painted(half_busy_color());
+    let cursor_edge = harness.driver.painted(crate::charts::alpha(
+        super::view::CURSOR_EDGE,
+        super::view::CURSOR_EDGE_OPACITY,
+    ));
+    assert_eq!(row.len(), 1);
+    assert_eq!(cursor_edge.len(), 1);
+    assert_draws_over(&cells, &row);
+    assert_draws_over(&cursor_edge, &cells);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_cells_of_each_cpu_stand_in_its_own_row(cx: &mut TestAppContext) {
+    // Goal: the cells of each logical CPU are drawn in that CPU's row and in no other.
+    // Method: draw two minutes of two CPUs, the first half busy and the second fully, so their
+    // cells differ in colour, then compare where the cells of each colour stand with the
+    // grounds of the two rows, the upper row's first.
+    let mut harness = CPUHistoryHarness::setup(cx);
+
+    harness.driver.seed_two_minutes_of_two_cpus();
+
+    let rows = harness.driver.painted(gpui::rgb(crate::charts::GRID));
+    let upper = harness.driver.painted(half_busy_color());
+    let lower = harness
+        .driver
+        .painted(crate::charts::utilization_color(100.0));
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].bounds.top() < rows[1].bounds.top());
+    assert_stand_in(&upper, &rows[0]);
+    assert_stand_in(&lower, &rows[1]);
+    harness.teardown();
+}
+
+/// The colour of a cell of `seed_two_minutes_of_history`.
+fn half_busy_color() -> gpui::Rgba {
+    crate::charts::utilization_color(HALF_BUSY_PERCENT)
+}
+
+/// Whether any two of `quads` cover a part of one another.
+fn some_overlap(quads: &[gpui::Quad]) -> bool {
+    quads.iter().enumerate().any(|(index, quad)| {
+        quads[index + 1..]
+            .iter()
+            .any(|later| quad.bounds.intersects(&later.bounds))
+    })
+}
+
+/// Every quad of `above` comes later in the draw order than each quad of `below` it overlaps,
+/// and at least one pair overlaps.
+#[track_caller]
+fn assert_draws_over(above: &[gpui::Quad], below: &[gpui::Quad]) {
+    let mut overlap_count = 0;
+    for upper in above {
+        for lower in below {
+            if upper.bounds.intersects(&lower.bounds) {
+                overlap_count += 1;
+                assert!(upper.order > lower.order, "{upper:?} over {lower:?}");
+            }
+        }
+    }
+    assert!(
+        overlap_count > 0,
+        "No quad of the one overlaps a quad of the other."
+    );
+}
+
+/// There are `cells`, and each stands between the top and the bottom of `row`.
+#[track_caller]
+fn assert_stand_in(cells: &[gpui::Quad], row: &gpui::Quad) {
+    assert!(!cells.is_empty());
+    for cell in cells {
+        assert_eq!(cell.bounds.top(), row.bounds.top(), "{cell:?} in {row:?}");
+        assert_eq!(
+            cell.bounds.bottom(),
+            row.bounds.bottom(),
+            "{cell:?} in {row:?}"
+        );
+    }
+}
+
 /// The reader's reading of publication 2, the observation drawn at 1000.9, whose CPU was 13%
 /// busy.
 fn hovered_observation_selection() -> Value {
@@ -271,6 +384,11 @@ fn hovered_observation_selection() -> Value {
     json!({"second":1001,"context_last_second":1001,"selected":observation,
         "summary":summary,"trends":[]})
 }
+
+/// The observations `seed_two_minutes_of_history` draws, one a second.
+const TWO_MINUTES_OBSERVATION_COUNT: u64 = 120;
+/// How busy the first logical CPU is in every interval between them.
+const HALF_BUSY_PERCENT: f64 = 50.0;
 
 struct CPUHistoryHarness {
     driver: CPUHistoryDriver,
@@ -418,6 +536,80 @@ impl CPUHistoryDriver {
             .read_with(&self.context, |dashboard, _| dashboard.error.clone());
         assert!(error.is_none(), "{error:?}");
         self.context.run_until_parked();
+    }
+
+    /// `seed_history`, with an observation at each of the 120 seconds up to 1001, every interval
+    /// between them 50% busy.
+    fn seed_two_minutes_of_history(&mut self) {
+        self.install_history(Self::two_minutes_fixture());
+    }
+
+    /// `seed_two_minutes_of_history`, with a second logical CPU that is 100% busy in every
+    /// interval.
+    fn seed_two_minutes_of_two_cpus(&mut self) {
+        let mut fixture = Self::two_minutes_fixture();
+        let busy_percent: Vec<Value> = fixture.payload["cpus"][0]["busy_percent"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reading| reading.as_f64().map_or(Value::Null, |_| json!(100.0)))
+            .collect();
+        fixture.payload["cpus"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"cpu":1,"busy_percent":busy_percent}));
+        fixture.payload["total"] = json!(2);
+        for observation in fixture.payload["observations"].as_array_mut().unwrap() {
+            observation["cpu_count"] = json!(2);
+        }
+        self.install_history(fixture);
+    }
+
+    fn two_minutes_fixture() -> CPUHistoryFixture {
+        let (mut payload, mut selection) = super::tests::fixture();
+        let mut observations = Vec::new();
+        let mut trends = Vec::new();
+        let mut busy_percent = Vec::new();
+        let mut previous = Value::Null;
+        for publication in 1..=TWO_MINUTES_OBSERVATION_COUNT {
+            let mut observation = payload["observation"].clone();
+            observation["publication"] = json!(publication);
+            observation["run_tick"] = json!(publication);
+            observation["wall_ns"] =
+                json!((1001 + publication - TWO_MINUTES_OBSERVATION_COUNT) * NS);
+            observations.push(json!({
+                "observation":observation,"previous_observation":previous,
+                "interval_available":publication > 1,"cpu_count":1}));
+            busy_percent.push(if publication > 1 {
+                json!(HALF_BUSY_PERCENT)
+            } else {
+                Value::Null
+            });
+            trends.push(observation.clone());
+            previous = observation;
+        }
+        payload["observation"] = previous.clone();
+        payload["observations"] = json!(observations);
+        payload["cpus"][0]["busy_percent"] = json!(busy_percent);
+        selection["selected"] = previous;
+        selection["trends"] = json!(trends);
+
+        CPUHistoryFixture { payload, selection }
+    }
+
+    /// Each quad of `color` that the frame paints over the history's cells.
+    fn painted(&mut self, color: impl Into<gpui::Background>) -> Vec<gpui::Quad> {
+        let cells = self.context.debug_bounds("cpu-history-cells").unwrap();
+        let color = color.into();
+        self.context.update(|window, _| {
+            let cells = cells.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == color)
+                .filter(|quad| quad.bounds.intersects(&cells))
+                .collect()
+        })
     }
 
     fn focus_plot(&mut self) {
