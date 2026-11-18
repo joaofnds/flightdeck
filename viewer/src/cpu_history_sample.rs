@@ -1,5 +1,5 @@
 use persistence::{Error, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::session::Observation;
 
@@ -130,12 +130,6 @@ impl Identity {
         });
 
         Ok(())
-    }
-
-    pub fn json(&self) -> Value {
-        json!({"run":self.run,"boot":self.boot,
-            "publication":self.observation.publication,"run_tick":self.observation.run_tick,
-            "wall_ns":self.observation.wall})
     }
 
     pub fn same(&self, other: &Self) -> bool {

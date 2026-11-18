@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use super::*;
 use crate::cpu_history_sample::{CounterSample, Counters};
 
@@ -33,7 +35,7 @@ fn pages_a_maximum_domain_and_maximum_observation_count_inside_the_byte_bound() 
             values: vec![Some(33.333_333_333_333_336); 1024],
         });
     }
-    let selected = context.last().unwrap().json();
+    let selected = selected_json(context.last().unwrap());
     let cache = Cache {
         range: ContextRange::ending_at(last_second(&selected)).unwrap(),
         entries,
@@ -112,7 +114,7 @@ fn response(entries: Vec<Entry>, offset: u32) -> Result<Value> {
         .iter()
         .map(|entry| entry.identity.clone())
         .collect::<Vec<_>>();
-    let selected = context.last().unwrap().json();
+    let selected = selected_json(context.last().unwrap());
     let cache = Cache {
         range: ContextRange::ending_at(last_second(&selected))?,
         entries,
@@ -203,11 +205,10 @@ fn rejects_a_domain_above_1024_before_selecting_a_page() {
 fn rejects_more_than_4096_context_observations() {
     // Goal: repeated wall seconds cannot bypass the global observation count bound.
     // Method: supply4097 context identities while keeping the source empty.
-    let selected = identity(IdentitySpec {
+    let selected = selected_json(&identity(IdentitySpec {
         publication: 2,
         wall: 1002 * NS,
-    })
-    .json();
+    }));
     let context = vec![
         identity(IdentitySpec {
             publication: 2,
@@ -364,7 +365,7 @@ fn rejects_a_cpu_history_response_above_seven_mib() {
     // Method: add oversized selected-observation metadata to an otherwise tiny valid matrix.
     let entry = entry(2, vec![Some(0.0)]);
     let context = vec![entry.identity.clone()];
-    let mut selected = context[0].json();
+    let mut selected = selected_json(&context[0]);
     selected["window_losses"] = json!("x".repeat(7 * 1024 * 1024));
     let saved = Cache {
         range: ContextRange::ending_at(last_second(&selected)).unwrap(),
@@ -393,7 +394,7 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
     let dropped = entry(2, vec![Some(50.0)]);
     let kept = entry(3, vec![Some(50.0)]);
     let context = vec![dropped.identity.clone(), kept.identity.clone()];
-    let selected = context[1].json();
+    let selected = selected_json(&context[1]);
     let saved = Cache {
         range: ContextRange::ending_at(last_second(&selected)).unwrap(),
         entries: vec![kept],
@@ -416,4 +417,8 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
 /// The second `selected`'s readings were taken in, where these contexts end.
 fn last_second(selected: &Value) -> u64 {
     selected["wall_ns"].as_u64().unwrap() / NS
+}
+
+fn selected_json(identity: &Identity) -> Value {
+    CpuHistoryIdentity::of(identity).json()
 }

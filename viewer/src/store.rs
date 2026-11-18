@@ -60,6 +60,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
+pub use crate::cpu_history::{
+    CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow,
+};
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, Missing};
 pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, Completeness, OtherReading, Resident,

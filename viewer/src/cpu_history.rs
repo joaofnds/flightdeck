@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 
 use persistence::{Error, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::cpu_history_sample::{self, Identity, Interval};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation};
+
+#[path = "cpu_history_typed.rs"]
+mod typed;
+
+pub use typed::{CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow};
 
 pub(crate) const PAGE_CPUS: usize = 32;
 pub(crate) const RESPONSE_BYTES_MAX: usize = 7 * 1024 * 1024;
@@ -145,47 +150,72 @@ pub(crate) fn context(
 }
 
 pub(crate) fn project(request: &Request<'_>) -> Result<Value> {
+    let value = project_history(request)?.json(request.selected);
+    project_bytes(&value)?;
+
+    Ok(value)
+}
+
+pub(crate) fn project_history(request: &Request<'_>) -> Result<CpuHistory> {
     let range = ContextRange::ending_at(request.context_last_second)?;
     let mut index = Index::new();
     project_index(request, &mut index)?;
     let mut merged = Vec::with_capacity(request.context.len());
     project_context(request, &index, range, &mut merged)?;
-    let selected = project_selected(request)?;
-    let total = merged[selected]
+    let selected_index = project_selected(request)?;
+    let total = merged[selected_index]
         .primary()
         .map_or(0, |entry| entry.values().len());
     let offset = usize::try_from(request.offset).map_err(|_| Error::Bound("CPU history offset"))?;
     project_offset(offset, total)?;
 
-    let observations = request
-        .context
-        .iter()
-        .zip(&merged)
-        .map(|(identity, entry)| {
-            let primary = entry.primary();
-            json!({"observation":identity.json(),
-            "previous_observation":primary.and_then(|entry| {
-                entry.previous().map(Identity::json)
-            }),
-            "interval_available":primary.is_some_and(|entry| entry.interval_available()),
-            "cpu_count":primary.map_or(0, |entry| entry.values().len())})
-        })
-        .collect::<Vec<_>>();
-    let mut cpus = Vec::with_capacity(PAGE_CPUS.min(total));
-    for cpu in offset..(offset + PAGE_CPUS).min(total) {
-        let values = merged
-            .iter()
-            .map(|entry| entry.value(cpu))
-            .collect::<Vec<_>>();
-        cpus.push(json!({"cpu":cpu,"busy_percent":values}));
-    }
-    let value = json!({"observation":request.selected,"context_seconds":900,
-        "first_ns":range.first_ns,"end_ns":range.end_ns,"offset":request.offset,"total":total,
-        "retention_limited":merged.iter().any(|entry| entry.primary().is_none()),
-        "observations":observations,"cpus":cpus});
-    project_bytes(&value)?;
+    Ok(CpuHistory {
+        selected_index,
+        first_ns: range.first_ns,
+        end_ns: range.end_ns,
+        offset: request.offset,
+        total: project_count(total)?,
+        retention_limited: merged.iter().any(|entry| entry.primary().is_none()),
+        observations: project_observations(request.context, &merged)?,
+        cpus: project_rows(&merged, offset, total)?,
+    })
+}
 
-    Ok(value)
+fn project_observations(
+    context: &[Identity],
+    merged: &[Merged<'_>],
+) -> Result<Vec<CpuHistoryObservation>> {
+    assert_eq!(context.len(), merged.len());
+    let mut observations = Vec::with_capacity(context.len());
+    for (identity, entry) in context.iter().zip(merged) {
+        let primary = entry.primary();
+        observations.push(CpuHistoryObservation {
+            identity: CpuHistoryIdentity::of(identity),
+            previous: primary.and_then(|entry| entry.previous().map(CpuHistoryIdentity::of)),
+            interval_available: primary.is_some_and(|entry| entry.interval_available()),
+            cpu_count: project_count(primary.map_or(0, |entry| entry.values().len()))?,
+        });
+    }
+
+    Ok(observations)
+}
+
+fn project_rows(merged: &[Merged<'_>], offset: usize, total: usize) -> Result<Vec<CpuHistoryRow>> {
+    let end = (offset + PAGE_CPUS).min(total);
+    let mut cpus = Vec::with_capacity(end.saturating_sub(offset));
+    for cpu in offset..end {
+        cpus.push(CpuHistoryRow {
+            cpu: project_count(cpu)?,
+            busy_percent: merged.iter().map(|entry| entry.value(cpu)).collect(),
+        });
+    }
+
+    Ok(cpus)
+}
+
+/// A count or an index of logical CPUs as the history carries it.
+fn project_count(count: usize) -> Result<u32> {
+    u32::try_from(count).map_err(|_| Error::Bound("logical CPU count"))
 }
 
 pub(crate) fn retained_work_bytes(count: usize) -> Result<usize> {
