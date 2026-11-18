@@ -23,6 +23,11 @@ use crate::live_app_response::{KeyKind, Observation, Page, RANKS_MAX, Rank, Rank
 use crate::session::ContextRange;
 use crate::{ObservationKey, WindowRanks};
 
+/// The bytes the ranks of one second take in a window at most: the value in its `Arc`, and its
+/// five rankings at their bound of rows.
+const APP_RANKS_SECOND_BYTES_MAX: usize =
+    size_of::<Ranks>() + 2 * size_of::<usize>() + 5 * (RANKS_MAX + 1) * size_of::<Rank>();
+
 /// An App's parts borrow their rows from this same admitted context, including its reservations.
 pub struct ContextParts {
     context: Arc<QueryContext>,
@@ -114,10 +119,7 @@ impl QueryContext {
             size_of::<ContextRanks<WindowRanks>>()
                 + 2 * size_of::<usize>()
                 + WindowRanks::metadata_bytes_max(count)
-                + count
-                    * (size_of::<Ranks>()
-                        + 2 * size_of::<usize>()
-                        + 5 * (RANKS_MAX + 1) * size_of::<Rank>())
+                + count * APP_RANKS_SECOND_BYTES_MAX
                 + display_bytes,
         )?;
         let scratch = self.reserve_response(super::AppsCursor::WORKING_BYTES_MAX)?;
@@ -127,10 +129,7 @@ impl QueryContext {
             + 2 * size_of::<usize>()
             + WindowRanks::metadata_bytes_max(count)
             + display_bytes
-            + window.held_values()
-                * (size_of::<Ranks>()
-                    + 2 * size_of::<usize>()
-                    + 5 * (RANKS_MAX + 1) * size_of::<Rank>());
+            + window.held_values() * APP_RANKS_SECOND_BYTES_MAX;
         reservation.shrink_to(held);
         let window = Arc::new(ContextRanks {
             budget: self.response_budget(),
