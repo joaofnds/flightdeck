@@ -80,7 +80,7 @@ pub use query::{
     QueryReadiness, QueryReply, QueryRequest, QuerySecond, QuerySelection, QuerySubmitError,
     QueryToken, QueryUnavailable, SourceGeneration,
 };
-pub use response::{ContextPart, ContextParts, ContextRanks, Response};
+pub use response::{ContextPart, ContextParts, ContextRanks, RankedSeconds, Response};
 pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
 pub(crate) use second::reading_at;
 pub use second::{

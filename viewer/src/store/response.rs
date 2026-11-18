@@ -5,10 +5,12 @@ mod groups;
 mod histories;
 mod owned;
 mod pages;
+mod ranked;
 mod trace;
 
 pub(crate) use charge::{JSON_BYTES_MAX, json_charge};
 pub use owned::Response;
+pub use ranked::RankedSeconds;
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -88,7 +90,13 @@ impl QueryContext {
     }
 
     /// The ranks of each retained observation in the 900-second context, excluding its lead-in.
-    pub fn app_ranks(self: &Arc<Self>) -> super::HistoryResult<Arc<ContextRanks<WindowRanks>>> {
+    /// A second `ranked` holds from the reading before, still in its block, is not ranked again,
+    /// and `ranked` then holds this window alone. A reading that fails leaves `ranked` as it
+    /// was.
+    pub fn app_ranks(
+        self: &Arc<Self>,
+        ranked: &mut RankedSeconds,
+    ) -> super::HistoryResult<Arc<ContextRanks<WindowRanks>>> {
         self.history_ready()?;
         let range = ContextRange::ending_at(self.context_last_second())?;
         let count = self
@@ -112,21 +120,8 @@ impl QueryContext {
                         + 5 * (RANKS_MAX + 1) * size_of::<Rank>())
                 + display_bytes,
         )?;
-        let mut window = WindowRanks::default();
-        // One cursor walks the seconds in order, so a packed block's seconds take their steps
-        // instead of each being rebuilt.
         let scratch = self.reserve_response(super::AppsCursor::WORKING_BYTES_MAX)?;
-        let mut cursor = super::AppsCursor::default();
-        assert!(self.seconds().len() <= super::SECONDS_MAX);
-        for second in self.seconds() {
-            if response_in_range(second, range) {
-                match cursor.ranks(second.apps()) {
-                    Ok(ranks) => window.insert(ranks)?,
-                    Err(_) => window.insert_missing(&second.observation)?,
-                }
-            }
-        }
-        drop(cursor);
+        let window = app_ranks_window(self.seconds(), range, ranked)?;
         drop(scratch);
         let held = size_of::<ContextRanks<WindowRanks>>()
             + 2 * size_of::<usize>()
@@ -137,12 +132,14 @@ impl QueryContext {
                     + 2 * size_of::<usize>()
                     + 5 * (RANKS_MAX + 1) * size_of::<Rank>());
         reservation.shrink_to(held);
-
-        Ok(Arc::new(ContextRanks {
+        let window = Arc::new(ContextRanks {
             budget: self.response_budget(),
             ranks: window,
             reservation,
-        }))
+        });
+        *ranked = app_ranks_ranked(self.seconds(), &window);
+
+        Ok(window)
     }
 
     /// A borrowed hover view of one App, sharing this context's existing admission lease.
@@ -303,6 +300,52 @@ impl ContextPart<'_> {
     }
 }
 
+/// The ranks of each second of `seconds` in `range`: the ones `ranked` holds for a second still
+/// in its block, and the others ranked now.
+fn app_ranks_window(
+    seconds: &[QuerySecond],
+    range: ContextRange,
+    ranked: &RankedSeconds,
+) -> Result<WindowRanks> {
+    let mut window = WindowRanks::default();
+    // One cursor walks the seconds in order, so a packed block's seconds take their steps
+    // instead of each being rebuilt.
+    let mut cursor = super::AppsCursor::default();
+    assert!(seconds.len() <= super::SECONDS_MAX);
+    for second in seconds {
+        if response_in_range(second, range) {
+            let key = ObservationKey::of(&second.observation);
+            match ranked.get(&key, second.block()) {
+                Some(ranks) => window.insert_shared(Arc::clone(ranks))?,
+                None => match cursor.ranks(second.apps()) {
+                    Ok(ranks) => window.insert(ranks)?,
+                    Err(_) => window.insert_missing(&second.observation)?,
+                },
+            }
+        }
+    }
+
+    Ok(window)
+}
+
+/// The window `window`, with the block of each second of `seconds` it holds ranks of.
+fn app_ranks_ranked(
+    seconds: &[QuerySecond],
+    window: &Arc<ContextRanks<WindowRanks>>,
+) -> RankedSeconds {
+    let mut ranked = RankedSeconds::of(window);
+    assert!(seconds.len() <= super::SECONDS_MAX);
+    for second in seconds {
+        let key = ObservationKey::of(&second.observation);
+        if window.shared(&key).is_some() {
+            ranked.place(key, second.block());
+        }
+    }
+    assert_eq!(ranked.second_count(), window.held_values());
+
+    ranked
+}
+
 fn response_in_range(second: &QuerySecond, range: ContextRange) -> bool {
     second
         .observation
@@ -329,6 +372,8 @@ mod block_merge_tests;
 mod history_tests;
 #[cfg(test)]
 mod ownership_tests;
+#[cfg(test)]
+mod ranked_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -5,7 +5,8 @@ use crate::live::window::fixture::saved_only;
 use crate::live_app_response::{KeyKind, Page};
 use crate::store::query::{CheckedCoverage, Queries};
 use crate::store::{
-    ByteBudget, Held, QueryContext, QueryOutcome, QueryRequest, QuerySelection, SourceGeneration,
+    ByteBudget, Held, QueryContext, QueryOutcome, QueryRequest, QuerySelection, RankedSeconds,
+    SourceGeneration,
 };
 use crate::{LiveSession, ObservationKey};
 
@@ -23,7 +24,7 @@ fn retained_selected_and_window_ranks_match_the_saved_live_session() {
     drop(session);
     drop(fixture);
 
-    let shown = context.app_ranks().unwrap();
+    let shown = context.app_ranks(&mut RankedSeconds::default()).unwrap();
 
     assert_eq!(&*context.selected_ranks().unwrap(), &selected);
     assert_eq!(selected.selected.stamp.publication, 2);
@@ -71,7 +72,7 @@ fn a_selected_ranking_keeps_its_names_without_retaining_the_source_context() {
     let context = native_context(&fixture);
     let budget = context.response_budget();
     let owner = Arc::downgrade(&context);
-    let window = context.app_ranks().unwrap();
+    let window = context.app_ranks(&mut RankedSeconds::default()).unwrap();
 
     let shown = window
         .selected_ranks_for(&context.selected().observation)
@@ -95,7 +96,7 @@ fn a_ranking_window_refuses_changed_clocks_even_when_the_publication_key_matches
     // Method: change only the wall clock of a retained saved observation.
     let fixture = saved_only();
     let context = saved_context(&fixture);
-    let window = context.app_ranks().unwrap();
+    let window = context.app_ranks(&mut RankedSeconds::default()).unwrap();
     let mut observation = context.selected().observation;
     observation.wall_ns = observation.wall_ns.map(|wall| wall + 1);
 
@@ -113,7 +114,7 @@ fn a_cached_ranking_retries_after_its_copy_admission_is_refused() {
     // Method: reserve the remaining bytes, refuse a hover copy, then release and retry.
     let fixture = saved_only();
     let context = saved_context(&fixture);
-    let window = context.app_ranks().unwrap();
+    let window = context.app_ranks(&mut RankedSeconds::default()).unwrap();
     let observation = context.selected().observation;
     let budget = context.response_budget();
     let blocked = budget.reserve(budget.maximum() - budget.used()).unwrap();
@@ -226,7 +227,7 @@ fn missing_middle_app_ranks_preserve_complete_sibling_observations() {
     .unwrap();
     let context = context(&fixture, held, &budget);
 
-    let ranks = context.app_ranks().unwrap();
+    let ranks = context.app_ranks(&mut RankedSeconds::default()).unwrap();
 
     assert!(ranks.get(&key(&context.seconds()[0].observation)).is_some());
     assert!(ranks.get(&key(&context.seconds()[1].observation)).is_none());
@@ -237,7 +238,7 @@ fn missing_middle_app_ranks_preserve_complete_sibling_observations() {
     ));
 }
 
-fn assert_window_ranks(
+pub(super) fn assert_window_ranks(
     context: &QueryContext,
     shown: &crate::WindowRanks,
     expected: &crate::WindowRanks,
@@ -290,6 +291,16 @@ pub(super) fn context(
     budget: &Arc<ByteBudget>,
 ) -> Arc<QueryContext> {
     held.ring_complete = true;
+
+    context_of(fixture, &held, budget)
+}
+
+/// The context of the newest second `held` holds, which the caller goes on adding seconds to.
+pub(super) fn context_of(
+    fixture: &Fixture,
+    held: &Held,
+    budget: &Arc<ByteBudget>,
+) -> Arc<QueryContext> {
     let queries = Queries::new();
     let handle = queries.handle(std::thread::current());
     handle
@@ -309,7 +320,7 @@ pub(super) fn context(
             end_ns: 10_000_000_000_000,
         },
     );
-    queries.serve(&held, Some(&coverage), budget);
+    queries.serve(held, Some(&coverage), budget);
 
     match handle.take().unwrap().outcome {
         QueryOutcome::Ready(context) => context,
@@ -317,7 +328,7 @@ pub(super) fn context(
     }
 }
 
-fn key(observation: &crate::live_app_response::Observation) -> ObservationKey {
+pub(super) fn key(observation: &crate::live_app_response::Observation) -> ObservationKey {
     ObservationKey {
         run: observation.stamp.run,
         boot: observation.stamp.boot,

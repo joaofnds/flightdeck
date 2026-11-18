@@ -497,6 +497,11 @@ impl LiveRecording {
         self.publication += 1;
     }
 
+    /// Lets `seconds` of every clock pass with no tick, so the next tick is that much later.
+    pub(crate) fn skip_seconds(&mut self, seconds: u64) {
+        self.clock_offset_seconds += seconds;
+    }
+
     /// The wall-clock second of the newest tick published.
     pub(crate) fn last_second(&self) -> u64 {
         assert!(self.publication > 0);

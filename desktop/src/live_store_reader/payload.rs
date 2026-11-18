@@ -3,17 +3,20 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use viewer::live_app_response::{Observation, Page};
-use viewer::store::{QueryContext, QueryReadiness, Response};
+use viewer::store::{QueryContext, QueryReadiness, RankedSeconds, Response};
 
 use super::ownership::{PartsWindow, RanksWindow};
 use super::presentation::Presentation;
 use crate::live_source::{AppChartSource, Command, Context, Shared, Snapshot};
 
+/// The reading of `context` the page shows. Where it brings the top Apps of each second, a
+/// second `ranked` holds from the reading before is not ranked again.
 pub(super) fn snapshot(
     context: &Arc<QueryContext>,
     command: &mut Command,
     shared: &Shared,
     inspected: Option<&Observation>,
+    ranked: &mut RankedSeconds,
 ) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
     let selection = if super::super::route_shows_no_reading(&command.request.route) {
@@ -62,7 +65,7 @@ pub(super) fn snapshot(
     }
     if command.context != Context::Keep {
         if context.readiness() == QueryReadiness::Complete {
-            histories(context, command, shared, &mut snapshot)?;
+            histories(context, command, shared, &mut snapshot, ranked)?;
         }
     }
 
@@ -177,6 +180,7 @@ fn histories(
     command: &Command,
     shared: &Shared,
     snapshot: &mut Snapshot,
+    ranked: &mut RankedSeconds,
 ) -> Result<(), String> {
     let request = &command.request;
     // A chart the window draws from the Store's View would replace this reading's history of
@@ -199,11 +203,17 @@ fn histories(
         if source == AppChartSource::Reading {
             attribution(context, command, shared, snapshot)?;
         }
-        if crate::live_source::route_ranks_apps(&request.route) {
-            snapshot.app_ranks = Some(Arc::new(RanksWindow::Store(
-                context.app_ranks().map_err(|error| error.to_string())?,
-            )));
-        }
+    }
+    if request.load_app_attribution_history && crate::live_source::route_ranks_apps(&request.route)
+    {
+        snapshot.app_ranks = Some(Arc::new(RanksWindow::Store(
+            context
+                .app_ranks(ranked)
+                .map_err(|error| error.to_string())?,
+        )));
+    } else {
+        // A page that shows no top Apps lets go of the ones ranked for the page before it.
+        *ranked = RankedSeconds::default();
     }
     if request.route == "apps" {
         if request.load_process_history {

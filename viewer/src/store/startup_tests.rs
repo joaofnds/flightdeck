@@ -105,7 +105,7 @@ fn assert_pending_histories(context: &Arc<super::QueryContext>, budget: &Arc<Byt
         Err(super::HistoryError::Pending)
     ));
     assert!(matches!(
-        context.app_ranks(),
+        context.app_ranks(&mut super::RankedSeconds::default()),
         Err(super::HistoryError::Pending)
     ));
     assert!(matches!(

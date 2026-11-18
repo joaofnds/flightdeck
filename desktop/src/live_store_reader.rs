@@ -16,7 +16,7 @@ use serde_json::Value;
 use viewer::LiveSession;
 use viewer::store::{
     QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReadiness, QueryRequest,
-    QuerySelection, QueryToken, QueryUnavailable,
+    QuerySelection, QueryToken, QueryUnavailable, RankedSeconds,
 };
 
 use super::{Command, Context, Histories, Reader, Shared, Snapshot, Update};
@@ -50,6 +50,10 @@ pub(super) struct StoreReader {
     /// The page's older readings come with a later step's reading.
     tail_pending: bool,
     store_waits: u32,
+    /// The top Apps of each second the reader last ranked, which the next reading that ranks
+    /// them shares, whichever page asks: the pages that show them rank the same Apps. A rest, a
+    /// page that shows none and a page the saved minutes answer let go of them.
+    ranked: RankedSeconds,
 }
 
 impl StoreReader {
@@ -62,6 +66,7 @@ impl StoreReader {
             published: 0,
             tail_pending: false,
             store_waits: 0,
+            ranked: RankedSeconds::default(),
         }
     }
 
@@ -71,6 +76,7 @@ impl StoreReader {
         }
         self.context = None;
         self.pending = None;
+        self.ranked = RankedSeconds::default();
         self.forget_page();
     }
 
@@ -142,12 +148,14 @@ impl StoreReader {
         if command.context == Context::Keep {
             return self.snapshot_kept(command, shared);
         }
-        if let Some(context) = self.tail_due() {
-            return payload::snapshot(context, command, shared, None).map(Answer::Ready);
+        if let Some(context) = self.tail_due().cloned() {
+            return payload::snapshot(&context, command, shared, None, &mut self.ranked)
+                .map(Answer::Ready);
         }
         if let Some(context) = &self.context {
             if fixed_context_answers(context, command)? {
-                return payload::snapshot(context, command, shared, None).map(Answer::Ready);
+                return payload::snapshot(context, command, shared, None, &mut self.ranked)
+                    .map(Answer::Ready);
             }
         }
 
@@ -219,7 +227,14 @@ impl StoreReader {
             .observation_for_identity(second, identity)
             .map_err(|error| error.to_string())?;
 
-        payload::snapshot(context, command, shared, Some(&observation)).map(Answer::Ready)
+        payload::snapshot(
+            context,
+            command,
+            shared,
+            Some(&observation),
+            &mut self.ranked,
+        )
+        .map(Answer::Ready)
     }
 
     fn snapshot_kept_refresh(
@@ -322,7 +337,7 @@ impl StoreReader {
                 return Ok(self.asked());
             }
         }
-        let snapshot = payload::snapshot(&context, command, shared, None)?;
+        let snapshot = payload::snapshot(&context, command, shared, None, &mut self.ranked)?;
         self.context = Some(context);
 
         Ok(Answer::Ready(snapshot))
@@ -515,17 +530,22 @@ pub(super) fn read(
             Some(Update::Ready(snapshot))
         }
         Ok(Answer::Waiting) => None,
-        Ok(Answer::Saved) => match read_saved(reader, root, command, shared) {
-            Ok(snapshot) => {
-                // What the recording saves comes a minute apart, so a page it answered asks again
-                // a second later rather than at the worker's pace, unless part of the page is due.
-                if !super::reader_pending(reader, command.generation) {
-                    reader.retry_after = Instant::now() + super::RETRY_INTERVAL;
+        Ok(Answer::Saved) => {
+            // The saved minutes rank this page's Apps, so nothing shows the Store's ranks.
+            store.ranked = RankedSeconds::default();
+            match read_saved(reader, root, command, shared) {
+                Ok(snapshot) => {
+                    // What the recording saves comes a minute apart, so a page it answered asks
+                    // again a second later rather than at the worker's pace, unless part of the
+                    // page is due.
+                    if !super::reader_pending(reader, command.generation) {
+                        reader.retry_after = Instant::now() + super::RETRY_INTERVAL;
+                    }
+                    snapshot.map(Update::Ready)
                 }
-                snapshot.map(Update::Ready)
+                Err(message) => Some(super::reader_failed(reader, command, message)),
             }
-            Err(message) => Some(super::reader_failed(reader, command, message)),
-        },
+        }
         Err(message) => Some(super::reader_failed(reader, command, message)),
     }
 }

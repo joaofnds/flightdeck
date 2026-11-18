@@ -798,7 +798,11 @@ fn time_context_histories(label: &str, context: &Arc<QueryContext>, app: &Ranked
 
     time(
         &format!("{label}: ranks of every second"),
-        || context.app_ranks().unwrap(),
+        || {
+            context
+                .app_ranks(&mut super::RankedSeconds::default())
+                .unwrap()
+        },
         |ranks| window_digest(context, ranks),
     );
     time(

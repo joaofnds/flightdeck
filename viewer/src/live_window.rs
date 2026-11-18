@@ -123,11 +123,22 @@ impl<T: WindowValue> Window<T> {
         self.observations.get(key)?.value.as_deref()
     }
 
+    /// The value the window holds for `key`, as its holders share it.
+    pub(crate) fn shared(&self, key: &ObservationKey) -> Option<&Arc<T>> {
+        self.observations.get(key)?.value.as_ref()
+    }
+
     fn holds(&self, key: &ObservationKey) -> bool {
         self.observations.contains_key(key)
     }
 
     pub(crate) fn insert(&mut self, value: T) -> Result<()> {
+        self.insert_shared(Arc::new(value))
+    }
+
+    /// Holds a value another window may hold too. It counts toward this window's bytes whole,
+    /// as a value of its own does.
+    pub(crate) fn insert_shared(&mut self, value: Arc<T>) -> Result<()> {
         // Only an observation with a wall clock lies in a window.
         let Some(wall_ns) = value.selected().wall_ns else {
             return Ok(());
@@ -139,7 +150,7 @@ impl<T: WindowValue> Window<T> {
             Held {
                 wall_ns,
                 bytes,
-                value: Some(Arc::new(value)),
+                value: Some(value),
             }
         } else {
             Held {

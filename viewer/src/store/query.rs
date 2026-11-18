@@ -304,7 +304,6 @@ impl QuerySecond {
     }
 
     /// The block holding the second's Apps.
-    #[cfg(test)]
     pub(super) fn block(&self) -> &Arc<Block> {
         &self.apps.block
     }

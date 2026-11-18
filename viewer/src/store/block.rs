@@ -59,7 +59,7 @@ pub const BLOCK_DEPARTED_MAX: usize = BLOCK_SECONDS_MAX - 1;
 pub(super) const DEPARTED_KEPT_MAX: usize = 256;
 
 /// The wall seconds whose seconds one block holds, three of the stretches the store closes.
-const BLOCK_WALL_NS: u64 = 30 * 1_000_000_000;
+pub(super) const BLOCK_WALL_NS: u64 = 30 * 1_000_000_000;
 
 const _: () = {
     assert!(BLOCK_WALL_NS == 3 * crate::session::EARLIER_STRIDE_SECONDS * 1_000_000_000);

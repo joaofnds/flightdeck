@@ -607,6 +607,169 @@ mod when_a_reading_reads_no_app_history {
     }
 }
 
+mod the_top_apps_of_each_second {
+    use super::*;
+    use crate::live_source::store_reader::ownership::RanksWindow;
+
+    /// The wall seconds the store holds in one block at most.
+    const HALF_MINUTE_SECONDS: u64 = 30;
+    /// A wall second the recording, which starts at second 1000, never held.
+    const SECOND_BEFORE_THE_RECORDING: u64 = 500;
+
+    /// The top Apps of each second of the reading whose selected second is the tick of
+    /// `publication`, which the worker reaches once the store has taken that tick, and the key of
+    /// the oldest second of its window. The reading itself is let go of, since the store admits
+    /// two contexts at once and a reading holds one.
+    fn ranked_at(
+        harness: &mut Harness,
+        publication: u64,
+    ) -> (Arc<RanksWindow>, viewer::ObservationKey) {
+        for _ in 0..32 {
+            let snapshot = harness.ready();
+            if snapshot.selection["selected"]["publication"] == publication {
+                let oldest =
+                    crate::live_rankings::observation_key(&snapshot.selection["trends"][0]);
+
+                return (
+                    Arc::clone(snapshot.app_ranks.as_ref().unwrap()),
+                    oldest.unwrap(),
+                );
+            }
+        }
+        panic!("the Worker read no reading of publication {publication}");
+    }
+
+    #[test]
+    fn a_followed_page_shares_the_ranks_of_a_second_the_reading_before_ranked() {
+        // Goal: a page that follows the newest second ranks the Apps of a second once, and not
+        // again at each reading.
+        // Method: read the CPU page three times, a second apart, once a tick in the next half
+        // minute has closed the block of its oldest second, and compare where the readings hold
+        // that second's ranks. The store packs a closed block once, which has one reading rank
+        // the block's seconds again, so the two readings before it or the two after it share
+        // the ranks.
+        let mut harness = Harness::new();
+        let recording = harness.recording.as_mut().unwrap();
+        recording.skip_seconds(HALF_MINUTE_SECONDS);
+        recording.publish_resources();
+        let mut request = request("cpu");
+        request.load_app_attribution_history = true;
+        harness.worker.request(request).unwrap();
+        let (first, oldest) = ranked_at(&mut harness, 3);
+        harness.recording.as_mut().unwrap().publish_resources();
+        let (second, _) = ranked_at(&mut harness, 4);
+        harness.recording.as_mut().unwrap().publish_resources();
+
+        let (third, _) = ranked_at(&mut harness, 5);
+
+        let shared = [
+            std::ptr::eq(first.get(&oldest).unwrap(), second.get(&oldest).unwrap()),
+            std::ptr::eq(second.get(&oldest).unwrap(), third.get(&oldest).unwrap()),
+        ];
+        assert!(shared.contains(&true));
+    }
+
+    /// The top Apps of each second of the CPU page, asked for anew over the two seconds the
+    /// recording starts with, and the key of the older one. Both lie in the block the store
+    /// still adds to, which it never packs, and no tick joins it, so only the reader decides
+    /// whether two such readings share a second's ranks.
+    fn cpu_ranks(harness: &mut Harness) -> (Arc<RanksWindow>, viewer::ObservationKey) {
+        let mut request = request("cpu");
+        request.load_app_attribution_history = true;
+        harness.worker.request(request).unwrap();
+
+        ranked_at(harness, 2)
+    }
+
+    #[test]
+    fn a_page_asked_for_again_shares_the_ranks_of_the_reading_before() {
+        // Goal: a new request for a page, as the end of a hover makes, costs no second ranking
+        // of the seconds the page already ranked.
+        // Method: ask for the CPU page twice over the same seconds and compare where the two
+        // readings hold a second's ranks.
+        let mut harness = Harness::new();
+        let (first, oldest) = cpu_ranks(&mut harness);
+
+        let (second, _) = cpu_ranks(&mut harness);
+
+        assert!(std::ptr::eq(
+            first.get(&oldest).unwrap(),
+            second.get(&oldest).unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_page_that_shows_no_top_apps_lets_go_of_the_ranks() {
+        // Goal: the reader holds the ranks only while a page shows them, so a page that shows
+        // none leaves no window of them behind.
+        // Method: read the Network page between two readings of the CPU page over the same
+        // seconds, and compare where the two hold a second's ranks.
+        let mut harness = Harness::new();
+        let (first, oldest) = cpu_ranks(&mut harness);
+        drop(harness.read_with_histories("network"));
+
+        let (second, _) = cpu_ranks(&mut harness);
+
+        assert!(!std::ptr::eq(
+            first.get(&oldest).unwrap(),
+            second.get(&oldest).unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_rest_lets_go_of_the_ranks() {
+        // Goal: a reader whose window closed holds no ranks while no page reads it.
+        // Method: hand the worker over to a next window between two readings of the CPU page
+        // over the same seconds, and compare where the two hold a second's ranks.
+        let mut harness = Harness::new();
+        let (first, oldest) = cpu_ranks(&mut harness);
+        harness.worker = harness.worker.hand_over().unwrap().unwrap();
+
+        let (second, _) = cpu_ranks(&mut harness);
+
+        assert!(!std::ptr::eq(
+            first.get(&oldest).unwrap(),
+            second.get(&oldest).unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_page_the_saved_minutes_answer_lets_go_of_the_ranks() {
+        // Goal: once the saved minutes answer a page, nothing shows the ranks of the Store's
+        // seconds, so the reader holds none.
+        // Method: between two readings of the CPU page over the same seconds, ask for a second
+        // from before the recording, which the Store leaves to the saved minutes, and compare
+        // where the two readings hold a second's ranks.
+        let mut harness = Harness::new();
+        let (first, oldest) = cpu_ranks(&mut harness);
+        let mut before = request("cpu");
+        before.second = Some(SECOND_BEFORE_THE_RECORDING);
+        before.load_app_attribution_history = true;
+        harness.worker.request(before).unwrap();
+        answered(&mut harness);
+
+        let (second, _) = cpu_ranks(&mut harness);
+
+        assert!(!std::ptr::eq(
+            first.get(&oldest).unwrap(),
+            second.get(&oldest).unwrap()
+        ));
+    }
+
+    /// Waits for the worker to answer its request, with a reading or with a failure.
+    fn answered(harness: &mut Harness) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for _ in 0..1000 {
+            if harness.worker.take().unwrap().is_some() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the Worker did not answer");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the Worker did not answer within its attempts");
+    }
+}
+
 #[test]
 fn a_store_worker_delivers_cpu_detail_and_history_with_matching_identity() {
     // Goal: CPU uses complete Store counters for both selected detail and its history.
