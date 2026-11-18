@@ -57,7 +57,7 @@ pub(super) struct StoreReader {
 struct Reused {
     /// The top Apps of each second the reader last ranked, which the next reading that ranks
     /// them shares: the pages that show them rank the same Apps. A rest, a page that shows none
-    /// and a page the saved minutes answer let go of them.
+    /// and a selected page the saved minutes answer let go of them.
     ranked: RankedSeconds,
     /// The chart points of the seconds the reader last charted, which the next reading that
     /// draws a chart shares: every page that draws one draws the same points. A rest, a page
@@ -540,11 +540,11 @@ pub(super) fn read(
         }
         Ok(Answer::Waiting) => None,
         Ok(Answer::Saved) => {
-            // The saved minutes rank this page's Apps, so nothing shows the Store's ranks. They
-            // draw a selected page's charts too, while a hover's reply goes to the hover and
-            // leaves the page's charts, and so their points, the Store's.
-            store.reused.ranked = RankedSeconds::default();
+            // The saved minutes rank a selected page's Apps and draw its charts, so nothing shows
+            // the Store's ranks or points. A hover's reply goes to the hover and leaves the
+            // page's ranks and charts, and so what the reader reuses, the Store's.
             if command.context == Context::Select {
+                store.reused.ranked = RankedSeconds::default();
                 store.reused.chart_points = ChartPoints::default();
             }
             match read_saved(reader, root, command, shared) {

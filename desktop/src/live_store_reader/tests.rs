@@ -760,6 +760,33 @@ mod the_top_apps_of_each_second {
         ));
     }
 
+    #[test]
+    fn a_hover_the_saved_minutes_answer_keeps_the_ranks() {
+        // Goal: a hover's reply goes to the hover and leaves the page showing the Store's ranks,
+        // so a hover the saved minutes answer costs the page's next reading no second ranking.
+        // Method: between two readings of the CPU page over the same seconds, hover a second
+        // from before the recording, which the Store leaves to the saved minutes, and compare
+        // where the two readings hold a second's ranks.
+        let mut harness = Harness::new();
+        let (first, oldest) = cpu_ranks(&mut harness);
+        let mut hover = request("cpu");
+        hover.second = Some(SECOND_BEFORE_THE_RECORDING);
+        hover.identity = Some(serde_json::json!({
+            "run": "00000000000000000000000000000001",
+            "boot": "00000000000000000000000000000001",
+            "publication": 1,
+        }));
+        harness.worker.inspect(hover).unwrap();
+        answered(&mut harness);
+
+        let (second, _) = cpu_ranks(&mut harness);
+
+        assert!(std::ptr::eq(
+            first.get(&oldest).unwrap(),
+            second.get(&oldest).unwrap()
+        ));
+    }
+
     /// Waits for the worker to answer its request, with a reading or with a failure.
     fn answered(harness: &mut Harness) {
         let deadline = Instant::now() + Duration::from_secs(10);
