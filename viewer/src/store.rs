@@ -29,6 +29,10 @@ mod stretch;
 #[path = "store/startup_tests.rs"]
 mod startup_tests;
 
+/// A store a test of this crate or of the desktop takes seconds into one at a time.
+#[cfg(any(test, feature = "fixtures"))]
+pub mod chart_fixture;
+
 #[cfg(test)]
 mod activity_tests;
 
@@ -83,7 +87,7 @@ pub use query::{
     QueryReadiness, QueryReply, QueryRequest, QuerySecond, QuerySelection, QuerySubmitError,
     QueryToken, QueryUnavailable, SourceGeneration,
 };
-pub use response::{ContextPart, ContextParts, ContextRanks, RankedSeconds, Response};
+pub use response::{ChartPoints, ContextPart, ContextParts, ContextRanks, RankedSeconds, Response};
 pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
 pub(crate) use second::reading_at;
 pub use second::{

@@ -614,7 +614,7 @@ impl Session {
         assert_eq!(observations.len(), output.len());
 
         context_points_order(output);
-        metrics::context_segments(output)?;
+        context_read_segments(output)?;
         Ok(observations)
     }
 
@@ -1162,6 +1162,17 @@ impl Reader<'_> {
 
         windows
     }
+}
+
+/// Writes into each of `output`'s points, which are in order, the segment of the line it is
+/// drawn on, so a chart breaks its line where the readings beside a point are not comparable.
+fn context_read_segments(output: &mut [Value]) -> Result<()> {
+    let points: Vec<&Value> = output.iter().collect();
+    let segments = metrics::context_segments(&points)?;
+    for (point, segment) in output.iter_mut().zip(segments) {
+        point["segment"] = json!(segment);
+    }
+    Ok(())
 }
 
 /// The observations of `range` that `windows` hold and their points, read through `reader`.

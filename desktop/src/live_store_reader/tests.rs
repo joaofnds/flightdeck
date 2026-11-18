@@ -1267,3 +1267,248 @@ fn request(route: &str) -> Request {
         executable: None,
     }
 }
+
+mod the_chart_points_of_each_second {
+    use super::*;
+    use crate::live_source::store_reader::{Reused, STORE_WAITS_MAX, StoreReader, payload};
+    use crate::live_source::{Command, Context, Histories, Pending, Reader, Shared};
+    use viewer::CHARTED_SECONDS;
+    use viewer::store::chart_fixture::{
+        Charted, FIRST_SECOND, charted, charted_point_count, shared_count,
+    };
+
+    /// A root the saved minutes refuse before they read anything, since a glob in a path is
+    /// refused as it is checked, so a reading the saved minutes answer fails at once.
+    const NO_RECORDING: &str = "no-recording-[here]";
+
+    /// The reading of `route` that follows the newest second `store` holds, sharing what
+    /// `reused` holds.
+    fn read(store: &Charted, route: &str, reused: &mut Reused) -> Box<Snapshot> {
+        let mut command = Command {
+            generation: 1,
+            epoch: 0,
+            request: request(route),
+            context: Context::Select,
+        };
+
+        payload::snapshot(
+            &store.followed(),
+            &mut command,
+            &Shared::new(),
+            None,
+            reused,
+        )
+        .unwrap()
+    }
+
+    /// A worker's reader whose Store reader asks a store of its own, which answers nothing,
+    /// and whose page of generation 1 the Store has not yet answered.
+    fn reader(store: &Charted) -> Reader {
+        let mut store_reader = StoreReader::new(store.handle());
+        store_reader.generation = 1;
+        Reader {
+            session: None,
+            store: Some(store_reader),
+            last_catalog: None,
+            last_generation: 1,
+            last_route: String::from("network"),
+            pending: Some(Pending {
+                generation: 1,
+                histories: Histories::Defer,
+            }),
+            deferred_listing_last_second: None,
+            page_caches_unread_since: None,
+            retry_after: Instant::now(),
+        }
+    }
+
+    /// What `reader`'s Store reader reuses from the reading before.
+    fn reused(reader: &mut Reader) -> &mut Reused {
+        &mut reader.store.as_mut().unwrap().reused
+    }
+
+    /// The worker's step that reads `command` through `reader`.
+    fn reader_step(reader: &mut Reader, command: &mut Command) -> Option<Update> {
+        crate::live_source::store_reader::read(
+            reader,
+            std::path::Path::new(NO_RECORDING),
+            command,
+            &Shared::new(),
+        )
+    }
+
+    /// Whether `update` is the failure of a reading the saved minutes answered.
+    fn reader_step_failed_saved(update: Option<Update>) -> bool {
+        matches!(
+            update,
+            Some(Update::Failed { message, .. }) if message.contains("query path glob")
+        )
+    }
+
+    #[test]
+    fn a_page_that_ranks_no_apps_shares_every_point_but_the_newest() {
+        // Goal: a page that draws a chart and shows no top Apps still builds each second's
+        // chart point once, since letting go of the ranks lets go of no chart point.
+        // Method: read the Network page, take in one more second, read it again with what the
+        // first reading left, and count the points the two readings share.
+        let mut store = charted();
+        let mut reused = Reused::default();
+        let first = read(&store, "network", &mut reused);
+        store.take(FIRST_SECOND + CHARTED_SECONDS);
+
+        let second = read(&store, "network", &mut reused);
+
+        assert_eq!(
+            first.selection.trends().unwrap().len(),
+            charted_point_count()
+        );
+        assert_eq!(
+            second.selection.trends().unwrap().len(),
+            charted_point_count()
+        );
+        assert_eq!(
+            shared_count(&first.selection, &second.selection),
+            charted_point_count() - 1
+        );
+    }
+
+    #[test]
+    fn a_page_that_draws_no_chart_lets_go_of_the_points() {
+        // Goal: the reader holds chart points only while a page draws them.
+        // Method: read the Network page, then the Computer page, which draws no chart, and see
+        // what the reader keeps.
+        let store = charted();
+        let mut reused = Reused::default();
+        drop(read(&store, "network", &mut reused));
+        assert_eq!(reused.chart_points.point_count(), charted_point_count());
+
+        drop(read(&store, "computer", &mut reused));
+
+        assert!(reused.chart_points.is_empty());
+    }
+
+    #[test]
+    fn a_page_that_shows_no_reading_lets_go_of_the_points() {
+        // Goal: Self-monitoring, which shows no reading of the recording and so draws no chart
+        // of it, lets go of the points the page before it drew.
+        // Method: read the Network page, then Self-monitoring, and see what the reader keeps.
+        let store = charted();
+        let mut reused = Reused::default();
+        drop(read(&store, "network", &mut reused));
+        assert_eq!(reused.chart_points.point_count(), charted_point_count());
+
+        drop(read(&store, "self", &mut reused));
+
+        assert!(reused.chart_points.is_empty());
+    }
+
+    #[test]
+    fn a_hover_between_two_readings_leaves_the_points_of_the_first() {
+        // Goal: a hover of a page that draws a chart builds no chart and keeps the reader's
+        // points, so the page's next reading still builds only the newest second's point.
+        // Method: read the Network page, hover an older second of its context, take in one
+        // more second, read the page again, and count the points the two readings share.
+        let mut store = charted();
+        let mut reused = Reused::default();
+        let first = read(&store, "network", &mut reused);
+        let context = store.followed();
+        let hovered = context.seconds()[100].observation;
+        let mut hover = Command {
+            generation: 2,
+            epoch: 0,
+            request: request("network"),
+            context: Context::Keep,
+        };
+        drop(
+            payload::snapshot(
+                &context,
+                &mut hover,
+                &Shared::new(),
+                Some(&hovered),
+                &mut reused,
+            )
+            .unwrap(),
+        );
+        drop(context);
+        store.take(FIRST_SECOND + CHARTED_SECONDS);
+
+        let second = read(&store, "network", &mut reused);
+
+        assert_eq!(
+            shared_count(&first.selection, &second.selection),
+            charted_point_count() - 1
+        );
+    }
+
+    #[test]
+    fn a_page_the_saved_minutes_select_lets_go_of_the_points() {
+        // Goal: a selected page the saved minutes answer draws its charts from them, so the
+        // reader keeps none of the Store's points for it.
+        // Method: fill a reader's points from the Network page, have its Store reader wait out
+        // its bound on a store that answers nothing, so the saved minutes answer the next
+        // step, and see what it keeps.
+        let store = charted();
+        let mut reader = reader(&store);
+        drop(read(&store, "network", reused(&mut reader)));
+        let mut command = Command {
+            generation: 1,
+            epoch: 0,
+            request: request("network"),
+            context: Context::Select,
+        };
+        assert!(reader_step(&mut reader, &mut command).is_none());
+        reader.store.as_mut().unwrap().store_waits = STORE_WAITS_MAX;
+
+        let update = reader_step(&mut reader, &mut command);
+
+        assert!(reader_step_failed_saved(update));
+        assert!(reused(&mut reader).chart_points.is_empty());
+    }
+
+    #[test]
+    fn a_hover_the_saved_minutes_answer_keeps_the_points() {
+        // Goal: a hover's reply goes to the hover and leaves the page's charts the Store's, so
+        // a hover of a second the context no longer holds, which the saved minutes answer,
+        // keeps the points the page's next reading shares.
+        // Method: fill a reader's points from the Network page, give its Store reader the
+        // context, hover a second before it, and see what it keeps.
+        let store = charted();
+        let mut reader = reader(&store);
+        drop(read(&store, "network", reused(&mut reader)));
+        reader.store.as_mut().unwrap().context = Some(store.followed());
+        let mut hover = request("network");
+        hover.second = Some(FIRST_SECOND - 1);
+        hover.identity = Some(serde_json::json!({}));
+        let mut command = Command {
+            generation: 1,
+            epoch: 0,
+            request: hover,
+            context: Context::Keep,
+        };
+
+        let update = reader_step(&mut reader, &mut command);
+
+        assert!(reader_step_failed_saved(update));
+        assert_eq!(
+            reused(&mut reader).chart_points.point_count(),
+            charted_point_count()
+        );
+    }
+
+    #[test]
+    fn a_rest_lets_go_of_the_points() {
+        // Goal: a reader whose window closed holds no chart points while no page reads it.
+        // Method: have a reader read the Network page, rest it, and see what it keeps.
+        let store = charted();
+        let mut store_reader = StoreReader::new(store.handle());
+        drop(read(&store, "network", &mut store_reader.reused));
+        assert_eq!(
+            store_reader.reused.chart_points.point_count(),
+            charted_point_count()
+        );
+
+        store_reader.rest();
+
+        assert!(store_reader.reused.chart_points.is_empty());
+    }
+}

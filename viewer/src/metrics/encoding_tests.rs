@@ -6,6 +6,7 @@ use collector::ring::{
     Dropped, Found, ObservationTimes, Place, Readings, RingReader, Shape, Tick, TickBuffers, Writer,
 };
 use persistence::{Limits, Store, Window, WindowIdentity};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 

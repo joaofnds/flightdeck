@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use viewer::LiveSession;
 use viewer::store::{
-    QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReadiness, QueryRequest,
-    QuerySelection, QueryToken, QueryUnavailable, RankedSeconds,
+    ChartPoints, QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReadiness,
+    QueryRequest, QuerySelection, QueryToken, QueryUnavailable, RankedSeconds,
 };
 
 use super::{Command, Context, Histories, Reader, Shared, Snapshot, Update};
@@ -49,10 +49,20 @@ pub(super) struct StoreReader {
     /// The page's older readings come with a later step's reading.
     tail_pending: bool,
     store_waits: u32,
+    reused: Reused,
+}
+
+/// What a reading of the Store leaves that the next reading shares, whichever page asks.
+#[derive(Default)]
+struct Reused {
     /// The top Apps of each second the reader last ranked, which the next reading that ranks
-    /// them shares, whichever page asks: the pages that show them rank the same Apps. A rest, a
-    /// page that shows none and a page the saved minutes answer let go of them.
+    /// them shares: the pages that show them rank the same Apps. A rest, a page that shows none
+    /// and a page the saved minutes answer let go of them.
     ranked: RankedSeconds,
+    /// The chart points of the seconds the reader last charted, which the next reading that
+    /// draws a chart shares: every page that draws one draws the same points. A rest, a page
+    /// that draws none and a selected page the saved minutes answer let go of them.
+    chart_points: ChartPoints,
 }
 
 impl StoreReader {
@@ -65,7 +75,7 @@ impl StoreReader {
             published: 0,
             tail_pending: false,
             store_waits: 0,
-            ranked: RankedSeconds::default(),
+            reused: Reused::default(),
         }
     }
 
@@ -75,7 +85,7 @@ impl StoreReader {
         }
         self.context = None;
         self.pending = None;
-        self.ranked = RankedSeconds::default();
+        self.reused = Reused::default();
         self.forget_page();
     }
 
@@ -148,12 +158,12 @@ impl StoreReader {
             return self.snapshot_kept(command, shared);
         }
         if let Some(context) = self.tail_due().cloned() {
-            return payload::snapshot(&context, command, shared, None, &mut self.ranked)
+            return payload::snapshot(&context, command, shared, None, &mut self.reused)
                 .map(Answer::Ready);
         }
         if let Some(context) = &self.context {
             if fixed_context_answers(context, command)? {
-                return payload::snapshot(context, command, shared, None, &mut self.ranked)
+                return payload::snapshot(context, command, shared, None, &mut self.reused)
                     .map(Answer::Ready);
             }
         }
@@ -231,7 +241,7 @@ impl StoreReader {
             command,
             shared,
             Some(&observation),
-            &mut self.ranked,
+            &mut self.reused,
         )
         .map(Answer::Ready)
     }
@@ -336,7 +346,7 @@ impl StoreReader {
                 return Ok(self.asked());
             }
         }
-        let snapshot = payload::snapshot(&context, command, shared, None, &mut self.ranked)?;
+        let snapshot = payload::snapshot(&context, command, shared, None, &mut self.reused)?;
         self.context = Some(context);
 
         Ok(Answer::Ready(snapshot))
@@ -530,8 +540,13 @@ pub(super) fn read(
         }
         Ok(Answer::Waiting) => None,
         Ok(Answer::Saved) => {
-            // The saved minutes rank this page's Apps, so nothing shows the Store's ranks.
-            store.ranked = RankedSeconds::default();
+            // The saved minutes rank this page's Apps, so nothing shows the Store's ranks. They
+            // draw a selected page's charts too, while a hover's reply goes to the hover and
+            // leaves the page's charts, and so their points, the Store's.
+            store.reused.ranked = RankedSeconds::default();
+            if command.context == Context::Select {
+                store.reused.chart_points = ChartPoints::default();
+            }
             match read_saved(reader, root, command, shared) {
                 Ok(snapshot) => {
                     // What the recording saves comes a minute apart, so a page it answered asks

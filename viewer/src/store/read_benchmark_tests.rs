@@ -20,10 +20,10 @@ use super::query::{CheckedCoverage, Queries};
 use super::recording::staged::{Advance, Input, Startup};
 use super::recording::{self, Continuity};
 use super::{
-    AppDetails, AppRow, AppsCursor, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
-    CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox, Newest,
-    Payload, ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest, QuerySelection,
-    Readings, Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond,
+    AppDetails, AppRow, AppsCursor, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, ChartPoints,
+    Cohorts, CompleteMachineState, ContextRanks, Held, KeptPlain, Leaders, MachineSecond, Mailbox,
+    Newest, Payload, ProcessAt, ProcessRow, QueryContext, QueryOutcome, QueryRequest,
+    QuerySelection, Readings, Response, RunIdentity, SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond,
     SourceGeneration, TickApps, View, WallSeconds, coverage,
 };
 use crate::app_process_groups_history::{
@@ -883,6 +883,48 @@ fn time_context_pages(label: &str, context: &Arc<QueryContext>, app: &RankedApp)
         || {
             context
                 .ungrouped_page_for(&selected, page, &cancellation, 0)
+                .unwrap()
+        },
+        response_digest,
+    );
+    time_context_pages_selection(label, context, &selected, &cancellation);
+}
+
+/// Times the selection of `selected`, once building every chart point and once sharing every
+/// point the reading before built.
+fn time_context_pages_selection(
+    label: &str,
+    context: &Arc<QueryContext>,
+    selected: &crate::live_app_response::Observation,
+    cancellation: &Arc<Cancellation>,
+) {
+    time(
+        &format!("{label}: the selection, every point built"),
+        || {
+            context
+                .selection_for(
+                    selected,
+                    false,
+                    &mut ChartPoints::default(),
+                    cancellation,
+                    0,
+                )
+                .unwrap()
+        },
+        response_digest,
+    );
+    // The cache holds what the reading before left, so each timed reading shares every point.
+    let mut chart_points = ChartPoints::default();
+    drop(
+        context
+            .selection_for(selected, false, &mut chart_points, cancellation, 0)
+            .unwrap(),
+    );
+    time(
+        &format!("{label}: the selection, every point shared"),
+        || {
+            context
+                .selection_for(selected, false, &mut chart_points, cancellation, 0)
                 .unwrap()
         },
         response_digest,

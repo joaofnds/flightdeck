@@ -267,9 +267,15 @@ impl MachineSecond {
 
     #[must_use]
     pub fn complete(&self) -> Option<&CompleteMachine> {
+        self.complete_shared().map(Arc::as_ref)
+    }
+
+    /// The complete reading of the second as the allocation it shares, which a reader may keep
+    /// a `Weak` to, since the store never rewrites a complete reading in place.
+    pub(crate) fn complete_shared(&self) -> Option<&Arc<CompleteMachine>> {
         match &self.complete {
             CompleteMachineState::Available(complete) => {
-                Some(complete.as_ref()).filter(|complete| complete.matches(self))
+                Some(complete).filter(|complete| complete.matches(self))
             }
             CompleteMachineState::Unread | CompleteMachineState::Refused(_) => None,
         }

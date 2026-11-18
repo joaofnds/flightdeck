@@ -455,18 +455,19 @@ fn page_json(page: Page, end: usize, count: usize) -> Value {
 }
 
 pub(crate) fn bounded(value: Value) -> Result<Value> {
-    bounded_bytes(&value, super::RESPONSE_BYTES_MAX)?;
+    serialized_bytes(&value, super::RESPONSE_BYTES_MAX)?;
 
     Ok(value)
 }
 
-pub(crate) fn bounded_bytes(value: &Value, maximum: usize) -> Result<()> {
+/// The bytes `value` takes once written out, refused where they pass `maximum`.
+pub(crate) fn serialized_bytes(value: &Value, maximum: usize) -> Result<usize> {
     let mut output = Envelope { bytes: 0, maximum };
     serde_json::to_writer(&mut output, value)
         .map_err(|_| Error::Bound("live App response bytes"))?;
     assert!(output.bytes <= maximum);
 
-    Ok(())
+    Ok(output.bytes)
 }
 
 struct Envelope {

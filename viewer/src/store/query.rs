@@ -158,7 +158,7 @@ struct ContextReservation {
 }
 
 impl CheckedCoverage {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     pub(crate) fn new(source: SourceGeneration, range: ContextRange) -> Self {
         assert!(range.first_ns < range.end_ns);
 

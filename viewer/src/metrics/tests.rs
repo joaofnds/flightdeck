@@ -2,6 +2,7 @@ use super::*;
 use crate::recording::{CpuRow, FanRow, GpuStateRow, InterfaceRow, MemoryRow, TickRow};
 use collector::interfaces::Interface;
 use collector::machine::{CPUTicks, Memory};
+use serde_json::json;
 
 mod app_machine_tests;
 mod battery_tests;

@@ -320,6 +320,37 @@ impl PartialEq for CompleteMachine {
     }
 }
 
+#[cfg(any(test, feature = "fixtures"))]
+impl CompleteMachine {
+    /// A complete reading of `second` whose one reading is a CPU share of `cpu_percent`, charged
+    /// to `budget`, so a test can give a second a complete reading of the content it chooses.
+    pub(crate) fn of_cpu_percent(
+        second: &MachineSecond,
+        cpu_percent: f64,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let Some(reservation) = budget.reserve(size_of::<Self>() + ARC_BYTES) else {
+            panic!("the budget has no room for a complete reading");
+        };
+
+        Arc::new(Self {
+            point: Point {
+                cpu_percent: Some(cpu_percent),
+                ..Point::default()
+            },
+            cpus: Vec::new(),
+            interval: CpuIntervalState::Refused("fixture"),
+            observation: MachineIdentity {
+                publication: second.publication,
+                run_tick: second.run_tick,
+                wall: second.wall_ns,
+                continuous: second.continuous_ns,
+            },
+            reservation,
+        })
+    }
+}
+
 fn capture_interval(
     reading: &Reading<'_>,
     previous: Option<&Reading<'_>>,

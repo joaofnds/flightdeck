@@ -3,31 +3,43 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use viewer::live_app_response::{Observation, Page};
-use viewer::store::{QueryContext, QueryReadiness, RankedSeconds, Response};
+use viewer::store::{ChartPoints, QueryContext, QueryReadiness, RankedSeconds, Response};
 
+use super::Reused;
 use super::ownership::{PartsWindow, RanksWindow};
 use super::presentation::Presentation;
 use crate::live_source::{AppChartSource, Command, Context, Shared, Snapshot};
 
 /// The reading of `context` the page shows. Where it brings the top Apps of each second, a
-/// second `ranked` holds from the reading before is not ranked again.
+/// second `reused` ranked for the reading before is not ranked again, and where it draws a
+/// chart, a point `reused` holds from the reading before is not built again.
 pub(super) fn snapshot(
     context: &Arc<QueryContext>,
     command: &mut Command,
     shared: &Shared,
     inspected: Option<&Observation>,
-    ranked: &mut RankedSeconds,
+    reused: &mut Reused,
 ) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
-    let selection = if super::super::route_shows_no_reading(&command.request.route) {
+    let route = &command.request.route;
+    let draws_no_chart = super::super::route_draws_no_chart(route);
+    let shows_no_reading = super::super::route_shows_no_reading(route);
+    // A page that draws no chart lets go of the points drawn for the page before it, and so
+    // does a page that shows no reading, which reads no selection and so draws no chart either.
+    // A hover of a page that draws a chart builds no chart, and keeps every point the reader
+    // holds for the reading after it.
+    if draws_no_chart || shows_no_reading {
+        reused.chart_points = ChartPoints::default();
+    }
+    let selection = if shows_no_reading {
         Presentation::Legacy(viewer::Selection::default())
     } else {
         Presentation::Store(
             context
                 .selection_for(
                     &observation,
-                    inspected.is_some()
-                        || super::super::route_draws_no_chart(&command.request.route),
+                    inspected.is_some() || draws_no_chart,
+                    &mut reused.chart_points,
                     &shared.cancellation,
                     command.epoch,
                 )
@@ -65,7 +77,7 @@ pub(super) fn snapshot(
     }
     if command.context != Context::Keep {
         if context.readiness() == QueryReadiness::Complete {
-            histories(context, command, shared, &mut snapshot, ranked)?;
+            histories(context, command, shared, &mut snapshot, &mut reused.ranked)?;
         }
     }
 

@@ -5,9 +5,13 @@ use serde_json::{Value, json};
 
 use crate::allocation_tests::observe;
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Page};
+use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Page, RESPONSE_BYTES_MAX};
+use crate::selection::ChartPoint;
+use crate::store::ChartPoints;
+use crate::store::chart_fixture::Charted;
+use crate::store::response::JSON_BYTES_MAX;
 use crate::store::{ByteBudget, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Store};
-use crate::{Cancellation, LiveSession};
+use crate::{Cancellation, LiveSession, Selection, TrendPoint, Trends};
 
 #[test]
 fn a_native_selection_matches_the_saved_minute_after_its_source_is_gone() {
@@ -91,41 +95,111 @@ fn an_apps_page_lists_every_app_one_second_holds() {
 }
 
 #[test]
-fn a_split_selection_flattens_to_the_json_the_store_builds() {
-    // Goal: splitting the Store's selection into fields and chart points changes nothing it
-    // presents, the bytes it is charged included.
-    // Method: read a followed context of three seconds and its summary alone both as one JSON
-    // value and split, then flatten the split ones.
+fn a_selection_is_bounded_by_the_bytes_its_json_takes_written_out() {
+    // Goal: a selection whose chart points travel apart from its fields is bounded by the bytes
+    // the one JSON value it stands for takes written out, so the Store admits no selection that
+    // bound refuses.
+    // Method: read a followed context of three seconds, and compare the bytes the bound counts
+    // with the bytes of the selection's JSON written out.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.publish_with_system_rows(102);
+    let selection = retained(&fixture)
+        .selection(&Arc::new(Cancellation::default()), 0)
+        .unwrap();
+
+    let counted = counted_serialized_bytes(&selection);
+
+    assert_eq!(selection.trends().unwrap().len(), 3);
+    assert_eq!(counted, written_bytes(&selection));
+}
+
+#[test]
+fn a_selection_whose_segments_take_two_digits_is_bounded_by_its_json_written_out() {
+    // Goal: the bound counts each segment's digits, so a chart broken more than nine times is
+    // bounded by what its JSON takes written out.
+    // Method: take a second, then twelve times miss a tick and take one, so the segments run to
+    // 13, and compare the bytes the bound counts with the bytes of the JSON written out.
+    let mut store = Charted::new();
+    store.take(1_000);
+    for second in 1_001..1_013 {
+        store.miss();
+        store.take(second);
+    }
+    let selection = store
+        .followed()
+        .selection(&Arc::new(Cancellation::default()), 0)
+        .unwrap();
+
+    let counted = counted_serialized_bytes(&selection);
+
+    assert_eq!(segments(&selection).last(), Some(&13));
+    assert_eq!(counted, written_bytes(&selection));
+}
+
+#[test]
+fn a_selection_of_the_summary_alone_has_no_chart_points() {
+    // Goal: a selection that keeps the context the window holds carries the selected second's
+    // summary and builds no chart.
+    // Method: read the selected second of a followed context of three seconds as a hover does.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.publish_with_system_rows(102);
     let context = retained(&fixture);
-    let observation = context.selected().observation;
-    let cancellation = Arc::new(Cancellation::default());
 
-    let whole = context
-        .selection_for_json(&observation, false, &cancellation, 0)
-        .unwrap();
-    let split = context
-        .selection_for(&observation, false, &cancellation, 0)
-        .unwrap();
-    let summary_whole = context
-        .selection_for_json(&observation, true, &cancellation, 0)
-        .unwrap();
-    let summary_split = context
-        .selection_for(&observation, true, &cancellation, 0)
+    let summary = context
+        .selection_for(
+            &context.selected().observation,
+            true,
+            &mut ChartPoints::default(),
+            &Arc::new(Cancellation::default()),
+            0,
+        )
         .unwrap();
 
-    assert_eq!(
-        split.trends().unwrap().len(),
-        whole["trends"].as_array().unwrap().len()
-    );
-    assert_eq!(split.json(), *whole);
-    assert_eq!(split.bytes(), whole.bytes());
-    assert_eq!(summary_split.trends(), None);
-    assert_eq!(summary_split.json(), *summary_whole);
-    assert_eq!(summary_split.bytes(), summary_whole.bytes());
+    assert_eq!(summary.trends(), None);
+}
+
+#[test]
+fn a_selection_whose_json_passes_the_response_bound_is_refused() {
+    // Goal: the Store refuses a selection whose JSON written out passes the bound on a
+    // response, as it refused one built as a single JSON value, where the fields alone fit.
+    // Method: give the selection's response no fields and one chart point that takes the whole
+    // bound written out, which with the chart's key passes it.
+    let budget = Arc::new(ByteBudget::new(super::POINT_BYTES_MAX));
+    let point_reservation = budget.reserve(1).unwrap();
+    let point = ChartPoint::admitted(json!({}), point_reservation, RESPONSE_BYTES_MAX);
+    let trends = Trends::of(vec![TrendPoint::shared(Arc::new(point), 1)]);
+    let reservation = budget.reserve(1024).unwrap();
+
+    let refused = super::selection_for_response(reservation, super::object([]), trends);
+
+    assert!(matches!(
+        refused,
+        Err(persistence::Error::Bound("live App response bytes"))
+    ));
+}
+
+#[test]
+fn a_selection_that_charges_past_the_json_bound_is_refused() {
+    // Goal: the Store refuses a selection whose fields, list of points and points together
+    // charge more than one JSON value may, as it refused one built as a single JSON value.
+    // Method: give the selection's response one chart point whose reservation charges a byte
+    // past the bound, which holds no memory of its own.
+    let points = Arc::new(ByteBudget::new(2 * JSON_BYTES_MAX));
+    let point = ChartPoint::admitted(json!({}), points.reserve(JSON_BYTES_MAX + 1).unwrap(), 2);
+    let trends = Trends::of(vec![TrendPoint::shared(Arc::new(point), 1)]);
+    let budget = Arc::new(ByteBudget::new(super::POINT_BYTES_MAX));
+    let reservation = budget.reserve(super::POINT_BYTES_MAX).unwrap();
+
+    let refused = super::selection_for_response(reservation, super::object([]), trends);
+
+    assert!(matches!(
+        refused,
+        Err(persistence::Error::Bound("Store JSON retained bytes"))
+    ));
 }
 
 #[test]
@@ -140,6 +214,87 @@ fn a_response_object_takes_its_chart_without_copying_it() {
     let (_long, long_requests) = observe(|| super::object([("trends", long)]));
 
     assert_eq!(long_requests, short_requests);
+}
+
+#[test]
+fn a_chart_starts_a_segment_at_a_missed_second_a_restart_and_a_reboot() {
+    // Goal: the chart's points carry the segment numbers of the one rule, which starts a segment
+    // wherever a reading does not follow the one before it in one run of one boot.
+    // Method: take five seconds of one run, miss a tick, take two more, restart the run and take
+    // two, reboot and take two, then read the chart of the followed context.
+    let mut store = Charted::new();
+    for second in 1_000..1_005 {
+        store.take(second);
+    }
+    store.miss();
+    store.take(1_006);
+    store.take(1_007);
+    store.restart();
+    store.take(1_008);
+    store.take(1_009);
+    store.reboot();
+    store.take(1_010);
+    store.take(1_011);
+
+    let selection = store
+        .followed()
+        .selection(&Arc::new(Cancellation::default()), 0)
+        .unwrap();
+
+    assert_eq!(segments(&selection), [1, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4]);
+}
+
+#[test]
+fn a_fixed_chart_numbers_its_segments_from_the_first_second_it_draws() {
+    // Goal: a fixed context's chart, whose window is shorter than the seconds the context holds,
+    // numbers its segments from its own first point, whatever readings lie before it.
+    // Method: take three seconds, miss a tick and take six more, of which the first two lie
+    // before the chart's 900 seconds, miss a tick, take two more, then the newest second after a
+    // gap, and read the chart of the context fixed on the newest second. Numbering every second
+    // of the context would start the chart at 2.
+    let mut store = Charted::new();
+    for second in 1_000..1_003 {
+        store.take(second);
+    }
+    store.miss();
+    for second in 1_004..1_010 {
+        store.take(second);
+    }
+    store.miss();
+    store.take(1_011);
+    store.take(1_012);
+    store.take(1_905);
+    let context = store.fixed(1_905);
+
+    let selection = context
+        .selection(&Arc::new(Cancellation::default()), 0)
+        .unwrap();
+
+    assert_eq!(context.seconds().len(), 12);
+    assert_eq!(segments(&selection), [1, 1, 1, 1, 2, 2, 3]);
+}
+
+/// The bytes the bound counts of `selection` written out as one JSON value.
+fn counted_serialized_bytes(selection: &Selection) -> usize {
+    let mut fields = selection.json();
+    fields.as_object_mut().unwrap().remove("trends");
+
+    super::selection_for_serialized_bytes(&fields, selection.trends().unwrap()).unwrap()
+}
+
+/// The bytes of `selection`'s JSON written out.
+fn written_bytes(selection: &Selection) -> usize {
+    serde_json::to_vec(&selection.json()).unwrap().len()
+}
+
+/// The segment of each of `selection`'s chart points, in their order.
+fn segments(selection: &Selection) -> Vec<u64> {
+    selection
+        .trends()
+        .unwrap()
+        .iter()
+        .map(|point| point.segment().unwrap())
+        .collect()
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {

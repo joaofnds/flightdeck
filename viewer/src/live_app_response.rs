@@ -8,7 +8,7 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::live_apps::Frame;
 
-pub(crate) use json::{Header, bounded};
+pub(crate) use json::{Header, bounded, serialized_bytes};
 pub use part::AppPart;
 pub(crate) use part::Present;
 pub use ranks::{AppIdentity, Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};

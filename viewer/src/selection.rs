@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+use crate::byte_budget::ByteReservation;
+
 /// The key of a selection's chart points in its JSON, which `Selection` holds as `Trends`.
 const TRENDS_KEY: &str = "trends";
 /// The key of a chart point's segment in its JSON, which `TrendPoint` holds beside the point.
@@ -43,6 +45,17 @@ impl Selection {
         Self {
             fields: value,
             trends,
+        }
+    }
+
+    /// The selection of the fields `fields`, which have no `"trends"` key, and the chart points
+    /// `trends`, as the Store builds one.
+    pub(crate) fn of(fields: Map<String, Value>, trends: Trends) -> Self {
+        assert!(!fields.contains_key(TRENDS_KEY));
+
+        Self {
+            fields: Value::Object(fields),
+            trends: Some(trends),
         }
     }
 
@@ -209,10 +222,20 @@ impl Trends {
         }
     }
 
+    /// The chart points `points`, in time order, as the Store builds them.
+    pub(crate) fn of(points: Vec<TrendPoint>) -> Self {
+        Self { points }
+    }
+
     /// The JSON list of the points, each with its segment back where it stood.
     #[must_use]
     pub fn json(&self) -> Value {
         Value::Array(self.points.iter().map(TrendPoint::json).collect())
+    }
+
+    /// The bytes the list of points takes, apart from the points it shares.
+    pub(crate) fn list_bytes(&self) -> usize {
+        self.points.capacity() * size_of::<TrendPoint>()
     }
 
     #[must_use]
@@ -266,7 +289,7 @@ impl Index<usize> for Trends {
 /// One chart point without its segment, which depends on the points beside it, and the segment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrendPoint {
-    point: Arc<Value>,
+    point: Arc<ChartPoint>,
     segment: Option<u64>,
 }
 
@@ -286,15 +309,26 @@ impl TrendPoint {
         });
 
         Self {
-            point: Arc::new(value),
+            point: Arc::new(ChartPoint {
+                value,
+                admission: None,
+            }),
             segment,
+        }
+    }
+
+    /// The shared point `point` at the segment `segment`, as the Store numbered it.
+    pub(crate) fn shared(point: Arc<ChartPoint>, segment: u64) -> Self {
+        Self {
+            point,
+            segment: Some(segment),
         }
     }
 
     /// The point, which has no `"segment"` key, since `segment` gives it.
     #[must_use]
     pub fn point(&self) -> &Value {
-        &self.point
+        &self.point.value
     }
 
     #[must_use]
@@ -306,7 +340,7 @@ impl TrendPoint {
     /// `Value` compares it.
     #[must_use]
     pub fn json(&self) -> Value {
-        let mut value = Value::clone(&self.point);
+        let mut value = self.point.value.clone();
         let Some(segment) = self.segment else {
             return value;
         };
@@ -316,5 +350,117 @@ impl TrendPoint {
         point.insert(SEGMENT_KEY.to_owned(), Value::from(segment));
 
         value
+    }
+
+    /// The bytes the point's own reservation charges, where the Store built the point.
+    pub(crate) fn charge(&self) -> Option<usize> {
+        self.point.charge()
+    }
+
+    /// The bytes the point's JSON takes once written out with its segment in it, where the
+    /// Store built the point.
+    pub(crate) fn serialized_bytes(&self) -> Option<usize> {
+        let admission = self.point.admission.as_ref()?;
+        let segment = self.segment?;
+
+        Some(admission.serialized_bytes + SEGMENT_SERIALIZED_BYTES + digit_count(segment))
+    }
+
+    /// Whether the point and `other` share one allocation, as two readings share the point of
+    /// a second the Store built once.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn shares_point_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.point, &other.point)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_point(&self) -> &Arc<ChartPoint> {
+        &self.point
+    }
+}
+
+/// The bytes a point's segment adds to its JSON once written out, past the digits of its
+/// number: the comma before it, its quoted key and the colon.
+const SEGMENT_SERIALIZED_BYTES: usize = ",\"segment\":".len();
+const _: () = assert!(SEGMENT_SERIALIZED_BYTES == 1 + SEGMENT_KEY.len() + 2 + 1);
+
+/// The count of decimal digits of `number`.
+fn digit_count(number: u64) -> usize {
+    match number.checked_ilog10() {
+        Some(log) => {
+            usize::try_from(log).unwrap_or_else(|_| unreachable!("a count of digits fits a usize"))
+                + 1
+        }
+        None => 1,
+    }
+}
+
+/// The chart point of one second, without its segment, which every reading of the second
+/// shares. A point the Store built holds its own charge and its size written out, so the budget
+/// counts it for as long as anything holds it. A point split from a JSON value is charged and
+/// bounded with that value.
+pub(crate) struct ChartPoint {
+    value: Value,
+    admission: Option<PointAdmission>,
+}
+
+struct PointAdmission {
+    reservation: ByteReservation,
+    serialized_bytes: usize,
+}
+
+impl ChartPoint {
+    /// The bytes a shared point takes outside its JSON's content, which the reading that holds
+    /// it is charged: the point and the `Arc`'s two counts.
+    pub(crate) const HEADER_BYTES: usize = size_of::<Self>() + 2 * size_of::<usize>();
+
+    /// The point `value`, without its segment, charged by `reservation`, which `serialized_bytes`
+    /// it takes once written out.
+    pub(crate) fn admitted(
+        value: Value,
+        reservation: ByteReservation,
+        serialized_bytes: usize,
+    ) -> Self {
+        assert!(value.get(SEGMENT_KEY).is_none());
+
+        Self {
+            value,
+            admission: Some(PointAdmission {
+                reservation,
+                serialized_bytes,
+            }),
+        }
+    }
+
+    /// The bytes the point's own reservation charges, where the Store built the point.
+    pub(crate) fn charge(&self) -> Option<usize> {
+        self.admission
+            .as_ref()
+            .map(|admission| admission.reservation.bytes())
+    }
+
+    /// The point, which has no `"segment"` key.
+    pub(crate) fn point(&self) -> &Value {
+        &self.value
+    }
+}
+
+/// Two points are equal where they hold the same JSON, whatever charges them, since a reading
+/// compares what it shows.
+impl PartialEq for ChartPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+/// A point prints its JSON alone, since its reservation would print the budget's live counts,
+/// and the read benchmark compares readings by how they print.
+impl std::fmt::Debug for ChartPoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ChartPoint")
+            .field(&self.value)
+            .finish()
     }
 }

@@ -2,7 +2,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use persistence::{Error, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::cpu_history_sample::{CapturedInterval, ObservedCounters, ObservedInterval};
 use crate::metric_view::{Sources, View};
@@ -301,16 +301,19 @@ pub(crate) fn public_point(point: &Value) -> Result<Value> {
     Ok(value)
 }
 
-pub(crate) fn context_segments(points: &mut [Value]) -> Result<()> {
+/// The segment of each of `points`, in their order: a point starts a new segment where it does
+/// not follow the point before it in one run of one boot, the first point starting the first.
+pub(crate) fn context_segments(points: &[&Value]) -> Result<Vec<u64>> {
     assert!(points.len() <= OBSERVATIONS_MAX);
+    let mut segments = Vec::with_capacity(points.len());
     let mut segment = 0_u64;
     for index in 0..points.len() {
         let compatible = if let Some(previous) = index.checked_sub(1) {
             if points[previous]["run"] == points[index]["run"] {
                 if points[previous]["boot"] == points[index]["boot"] {
                     compatible(
-                        &context_segments_observation(&points[previous])?,
-                        &context_segments_observation(&points[index])?,
+                        &context_segments_observation(points[previous])?,
+                        &context_segments_observation(points[index])?,
                     )
                 } else {
                     false
@@ -324,9 +327,11 @@ pub(crate) fn context_segments(points: &mut [Value]) -> Result<()> {
         if !compatible {
             segment += 1;
         }
-        points[index]["segment"] = json!(segment);
+        segments.push(segment);
     }
-    Ok(())
+    // Both callers zip the segments with the points, so a missing segment would drop a point.
+    assert_eq!(segments.len(), points.len());
+    Ok(segments)
 }
 
 fn context_segments_observation(point: &Value) -> Result<Observation> {

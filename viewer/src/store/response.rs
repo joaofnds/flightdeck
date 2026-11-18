@@ -1,6 +1,7 @@
 //! Presentations of the immutable Store context, without reading or deriving source facts.
 mod bounds;
 mod charge;
+mod chart_points;
 mod groups;
 mod histories;
 mod owned;
@@ -9,6 +10,7 @@ mod ranked;
 mod trace;
 
 pub(crate) use charge::{JSON_BYTES_MAX, json_charge};
+pub use chart_points::ChartPoints;
 pub use owned::Response;
 pub use ranked::RankedSeconds;
 
