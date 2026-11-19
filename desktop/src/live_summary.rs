@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 use crate::charts::{BLUE, GREEN, MUTED, ORANGE, PURPLE, RED, TEXT, YELLOW};
@@ -193,6 +195,9 @@ const FLOW: Specification = (
 );
 const HEALTH: Specification = ("Health", Reading::Health, "", GREEN);
 
+/// The cards of `route` reading the worker's summary of the second `selection` selects, as
+/// the page shows them where it draws no second from the store's View.
+#[cfg(test)]
 pub fn cards(route: &str, selection: &viewer::Selection) -> Vec<Card> {
     cards_of_summary(route, matching_summary(selection))
 }
@@ -405,9 +410,32 @@ pub(crate) fn memory_in_use_bytes_of(app: u64, wired: u64, compressed: u64) -> O
     app.checked_add(wired)?.checked_add(compressed)
 }
 
+impl crate::live_dashboard::LiveDashboard {
+    /// The readings of the second the page shows, keyed as the worker's summary of a second
+    /// keys them, which every readout reads: the store's View's record of that second where the
+    /// page draws it from the View, and otherwise the worker's reading of it.
+    pub(crate) fn shown_summary(&self) -> Cow<'_, Value> {
+        if let Some(summary) = self.store_view_summary() {
+            return Cow::Owned(summary);
+        }
+
+        let selection = self
+            .reading_snapshot()
+            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
+        Cow::Borrowed(matching_summary(selection))
+    }
+}
+
+/// The worker's summary of the second `selection` selects, as `shown_summary` reads it where the
+/// page draws no second from the store's View, so a test can compare a readout with it.
+#[cfg(test)]
+pub(crate) fn worker_summary(selection: &viewer::Selection) -> &Value {
+    matching_summary(selection)
+}
+
 /// The summary only where it is the selected observation's own: the same run, boot and
 /// publication, and the same wall clock, so a sibling observation never lends its readings.
-pub(crate) fn matching_summary(selection: &viewer::Selection) -> &Value {
+fn matching_summary(selection: &viewer::Selection) -> &Value {
     let selected = &selection["selected"];
     let summary = &selection["summary"];
     for field in ["run", "boot", "publication"] {

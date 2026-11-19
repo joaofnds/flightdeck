@@ -2,10 +2,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, Cohorts, MachineSecond, Totals, View};
+use viewer::store::{AppRow, AppsSecond, BatterySecond, Cohorts, MachineSecond, Totals, View};
 
 use super::super::LiveDashboard;
 use crate::data::{Line, Panel};
@@ -17,7 +17,8 @@ use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::apps_at;
 use crate::live_store_fixtures::{
-    levels, levels_named, reading_at, store_levels_named, trend_point, view,
+    levels, levels_named, reading_at, selection_of_json, store_levels_named, summary_point,
+    trend_point, view, with_memory_reading,
 };
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -196,6 +197,54 @@ fn a_view_newer_than_the_readings_fills_the_hardware_figure() {
         dashboard.live_hardware_readings(),
         (figure_readings(), [None, None])
     );
+}
+
+#[test]
+fn a_rested_overview_reads_the_cooling_card_of_the_views_newest_second() {
+    // Goal: once Overview's reader rests, its "Cooling and battery" card goes on showing the
+    // newest second the store holds, as its charts do. Method: the worker's reading of 10,000,
+    // a View of the same seconds that the page rests its reader on, then a View that ends at
+    // 10,005 with another SoC temperature, fan speeds and charge, whose card reads as the
+    // worker's reading of 10,005 reads it.
+    let first = [cooled_at(9_999), cooled_at(10_000)];
+    let newer = [cooled_at(9_999), cooled_at(10_000), cooled_at(10_005)];
+    let mut dashboard = opening();
+    let mut reading = worker_reading(&first);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    dashboard.take_view(Arc::new(view(1, &[], &first)));
+    dashboard.tick_rest();
+    assert!(dashboard.reader_rested());
+
+    dashboard.take_view(Arc::new(view(2, &[], &newer)));
+
+    let expected = read_by_the_worker(&newer).overview_cooling_readings();
+    assert_ne!(
+        read_by_the_worker(&first).overview_cooling_readings(),
+        expected
+    );
+    assert_eq!(dashboard.overview_cooling_readings(), expected);
+}
+
+#[test]
+fn the_memory_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it() {
+    // Goal: every readout the Memory page shows reads the second the store's View shows as the
+    // worker's reading of that second reads it, so the page can follow the View once its reader
+    // rests. Method: Overview, the page drawn from the View today, shows the worker's reading of
+    // 10,000 and then a View that ends at 10,005, each second with a complete reading whose
+    // every value differs from every other second's. Memory's cards, quantities, pressure and
+    // each chart's reading with no point are read from the summary the page shows and from the
+    // worker's summary of 10,005.
+    let first = memory_seconds(&[9_999, 10_000]);
+    let newer = memory_seconds(&[9_999, 10_000, 10_005]);
+    let mut dashboard = read_by_the_worker(&first);
+    let view = Arc::new(view(2, &[], &newer));
+
+    dashboard.take_view(Arc::clone(&view));
+
+    let expected = memory_readouts(&view, &worker_summary_of(&newer));
+    assert_ne!(memory_readouts(&view, &worker_summary_of(&first)), expected);
+    assert_eq!(memory_readouts(&view, &dashboard.shown_summary()), expected);
 }
 
 #[test]
@@ -1541,13 +1590,17 @@ fn opening_on(route: &str) -> LiveDashboard {
 /// An Overview showing the worker's readings of `seconds`, with the summary of the newest, as
 /// the worker reads them.
 fn read_by_the_worker(seconds: &[MachineSecond]) -> LiveDashboard {
-    let mut snapshot = readings(seconds);
-    snapshot.selection.legacy_mut().unwrap()["summary"] = trend_point(seconds.last().unwrap());
-
     let mut dashboard = opening();
-    dashboard.accept(snapshot);
+    dashboard.accept(worker_reading(seconds));
     assert!(dashboard.error.is_none());
     dashboard
+}
+
+/// The worker's readings of `seconds`, with the summary of the newest, as the worker reads them.
+fn worker_reading(seconds: &[MachineSecond]) -> Box<crate::live_source::Snapshot> {
+    let mut snapshot = readings(seconds);
+    snapshot.selection.legacy_mut().unwrap()["summary"] = trend_point(seconds.last().unwrap());
+    snapshot
 }
 
 /// What the chart `id` reads on the page, as macOS's accessibility reads it: its second and
@@ -1739,6 +1792,72 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         totals: Totals::of(&apps),
         apps: apps.try_into().unwrap(),
     }
+}
+
+/// The second at `wall_second` whose system-on-chip temperature, fan speeds and battery charge
+/// differ from those of every other second.
+fn cooled_at(wall_second: u64) -> MachineSecond {
+    let tenths = f32::from(u16::try_from(wall_second % 1_000).unwrap()) / 10.0;
+
+    MachineSecond {
+        soc_celsius: Some(30.0 + tenths),
+        fan_rpm: [Some(1_000.0 + tenths * 10.0), Some(2_000.0 + tenths * 20.0)],
+        battery: Some(BatterySecond {
+            charge_percent: Some(f64::from(tenths)),
+            power_watts: None,
+        }),
+        ..reading_at(wall_second, 0)
+    }
+}
+
+/// The seconds at `wall_seconds`, each with a complete reading of the memory it holds and of
+/// memory's rates, as the store holds a second it read.
+fn memory_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_memory_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
+/// The worker's summary of the newest of `seconds`, which the viewer writes from its complete
+/// reading, as the page reads it.
+fn worker_summary_of(seconds: &[MachineSecond]) -> Value {
+    let newest = seconds.last().unwrap();
+    let mut selection = crate::live_store_fixtures::summary_selection(&[], seconds);
+    selection["summary"] = summary_point(newest);
+
+    summary::worker_summary(&selection_of_json(&selection)).clone()
+}
+
+/// What the Memory page shows of `summary`: its cards, its quantities, its pressure, and what
+/// each line of each machine chart of `view` reads where the chart draws no point.
+fn memory_readouts(view: &View, summary: &Value) -> MemoryReadouts {
+    let panels =
+        crate::live_projection::held_projection::view_panels("memory", view, levels().as_ref())
+            .unwrap();
+    let mut charts = Vec::new();
+    for panel in &panels {
+        for line in 0..panel.lines.len() {
+            let value = crate::live_projection::reading_value("memory", &panel.id, line, summary);
+            charts.push((panel.id.clone(), line, value.unwrap()));
+        }
+    }
+
+    MemoryReadouts {
+        cards: texts(&summary::cards_of_summary("memory", summary)),
+        quantities: crate::live_memory::quantities(summary),
+        pressure: crate::live_views::pressure(&summary["pressure"]),
+        charts,
+    }
+}
+
+/// The readouts of the Memory page `memory_readouts` reads.
+#[derive(Debug, PartialEq)]
+struct MemoryReadouts {
+    cards: Vec<(String, String, String, u32)>,
+    quantities: Vec<crate::live_memory::MemoryQuantity>,
+    pressure: &'static str,
+    charts: Vec<(String, usize, Option<f32>)>,
 }
 
 /// The seconds 9,999, 10,000 and 10,005, five seconds newer than the worker's readings.

@@ -19,7 +19,6 @@ pub(crate) mod summary;
 mod system_context;
 #[path = "live_utilization.rs"]
 pub(crate) mod utilization;
-pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -264,14 +263,11 @@ impl LiveDashboard {
         if self.request.route == "apps" {
             return crate::live_app_views::app_cards(self.current_app());
         }
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         if self.request.route == "self" {
             return crate::self_monitoring::cards(&self.self_reports);
         }
 
-        let mut cards = summary::cards(&self.request.route, selection);
+        let mut cards = summary::cards_of_summary(&self.request.route, &self.shown_summary());
         if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
             if let Some(history) =
                 self.attribution_history(crate::live_app_attribution_history::Metric::Power)
@@ -348,9 +344,6 @@ impl LiveDashboard {
     }
 
     pub(crate) fn memory_quantities(&self) -> impl IntoElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         let keys = [
             "memory-app",
             "memory-wired",
@@ -359,7 +352,7 @@ impl LiveDashboard {
             "memory-free",
             "memory-pressure",
         ];
-        let readings = crate::live_memory::quantities(selection)
+        let readings = crate::live_memory::quantities(&self.shown_summary())
             .into_iter()
             .zip(keys)
             .map(|(row, key)| (key, row.name, self.shown_reading(row.reading)))

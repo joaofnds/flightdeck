@@ -200,6 +200,8 @@ pub fn trend_point(second: &MachineSecond) -> Value {
         "cpu_celsius": second.cpu_celsius,
         "gpu_celsius": second.gpu_celsius,
         "fan_rpm": second.fan_rpm,
+        "battery": second.battery.as_ref().map(|battery| json!({
+            "charge_percent": battery.charge_percent, "power_watts": battery.power_watts})),
         "thermal_pressure": second.thermal_pressure,
         "performance_levels": levels_json("Super", "Performance")})
 }

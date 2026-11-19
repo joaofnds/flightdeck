@@ -834,10 +834,16 @@ impl LiveDashboard {
         Some((self.store_panels.rankings.as_ref()?, second))
     }
 
-    /// The readings Overview's readouts read of the second the View the page draws shows,
-    /// keyed as the worker's summary of a second keys them.
+    /// The readings of the second the View the page draws shows, keyed as the worker's summary of
+    /// a second keys them: its complete reading's own summary, which the worker's reading of the
+    /// second is, and what the second itself holds where it has no complete reading.
     pub(crate) fn store_view_summary(&self) -> Option<Value> {
-        Some(store_view_summary_of(self.store_view_shown()?))
+        let second = self.store_view_shown()?;
+        let Some(complete) = second.complete() else {
+            return Some(store_view_summary_of(second));
+        };
+
+        Some(complete.summary(second))
     }
 
     /// The hardware figure's readings of the second the View the page draws shows.
@@ -1100,6 +1106,10 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
         "power_watts": second.power_watts,
         "storage": {"read_bps": second.disk_read_bps},
         "network_rx_bps": second.network.map(|traffic| traffic.received_bps),
+        "soc_celsius": second.soc_celsius,
+        "fan_rpm": second.fan_rpm,
+        "battery": second.battery.as_ref().map(|battery| json!({
+            "charge_percent": battery.charge_percent, "power_watts": battery.power_watts})),
     })
 }
 

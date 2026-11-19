@@ -196,10 +196,7 @@ impl LiveDashboard {
         }
 
         if panel.id == "live-battery-charging" {
-            let charging = self.reading_snapshot().and_then(|snapshot| {
-                crate::live_views::matching_summary(&snapshot.selection)["battery"]["charging"]
-                    .as_bool()
-            });
+            let charging = self.shown_summary()["battery"]["charging"].as_bool();
 
             return match charging {
                 Some(true) => "Charging",
@@ -210,13 +207,7 @@ impl LiveDashboard {
         }
 
         if panel.id == "live-memory-pressure" {
-            if let Some(summary) = self.store_view_summary() {
-                return crate::live_views::pressure(&summary["pressure"]).to_owned();
-            }
-            let selection = self
-                .reading_snapshot()
-                .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-            let summary = crate::live_views::matching_summary(selection);
+            let summary = self.shown_summary();
             return crate::live_views::pressure(&summary["pressure"]).to_owned();
         }
 
@@ -229,9 +220,9 @@ impl LiveDashboard {
         if index.is_some() {
             return chart_line_value(panel, line, index);
         }
-        let selection = &self.reading_snapshot()?.selection;
-        let summary = crate::live_views::matching_summary(selection);
-        match crate::live_projection::reading_value(&self.request.route, &panel.id, line, summary) {
+        let summary = self.shown_summary();
+        match crate::live_projection::reading_value(&self.request.route, &panel.id, line, &summary)
+        {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("Reading of a chart: {error}");

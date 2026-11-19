@@ -7,8 +7,9 @@ pub struct MemoryQuantity {
     pub reading: String,
 }
 
-pub fn quantities(selection: &viewer::Selection) -> Vec<MemoryQuantity> {
-    let summary = crate::live_views::matching_summary(selection);
+/// The Memory page's quantities of `summary`, the readings of one second keyed as the
+/// worker's summary keys them.
+pub fn quantities(summary: &Value) -> Vec<MemoryQuantity> {
     let bytes = |key: &str| summary[key].as_u64();
     let cached = bytes("memory_file_backed_bytes")
         .zip(bytes("memory_purgeable_bytes"))

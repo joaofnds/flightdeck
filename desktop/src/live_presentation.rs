@@ -15,10 +15,6 @@ impl LiveDashboard {
     /// The prototype's row of three compact cards: memory pressure, thermal state, and
     /// cooling and battery. They share the chart grid's columns.
     pub fn overview_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-        let summary = crate::live_views::matching_summary(selection);
         let pressure = self
             .panels
             .iter()
@@ -42,7 +38,7 @@ impl LiveDashboard {
             .gap(px(8.0))
             .child(div().flex().min_w_0().children(pressure))
             .child(div().flex().min_w_0().children(thermal))
-            .child(self.overview_cooling(summary))
+            .child(self.overview_cooling())
     }
 
     /// The prototype's battery state row: the compact charging timeline and a details card
@@ -52,10 +48,8 @@ impl LiveDashboard {
         panel: Option<&std::rc::Rc<crate::data::Panel>>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-        let battery = &crate::live_views::matching_summary(selection)["battery"];
+        let summary = self.shown_summary();
+        let battery = &summary["battery"];
         let reading = |reading| self.shown_reading(reading);
         let details = overview_context_card("battery-details")
             .child(timeline_heading_text(
@@ -119,10 +113,7 @@ impl LiveDashboard {
         panels: &[&Option<std::rc::Rc<crate::data::Panel>>; 3],
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-        let summary = crate::live_views::matching_summary(selection);
+        let summary = self.shown_summary();
         let columns = match self.reading_chart_columns() {
             1 => 1,
             _ => 2,
@@ -147,12 +138,12 @@ impl LiveDashboard {
             (
                 "fan0",
                 "Fan channel 0",
-                self.shown_reading(overview_context_fan(summary, 0)),
+                self.shown_reading(overview_context_fan(&summary, 0)),
             ),
             (
                 "fan1",
                 "Fan channel 1",
-                self.shown_reading(overview_context_fan(summary, 1)),
+                self.shown_reading(overview_context_fan(&summary, 1)),
             ),
         ];
 
@@ -195,11 +186,8 @@ impl LiveDashboard {
     ) -> gpui::AnyElement {
         let (help, reading) = match recorded {
             Some(key) => {
-                let selection = self
-                    .reading_snapshot()
-                    .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-                let summary = crate::live_views::matching_summary(selection);
-                let reading = hardware_reading(summary, key, " °C", 1);
+                let summary = self.shown_summary();
+                let reading = hardware_reading(&summary, key, " °C", 1);
                 (SENSOR_HELP, self.shown_reading(reading))
             }
             None => (TEMPERATURE_HELP, "Unavailable".into()),
@@ -244,8 +232,11 @@ struct ContextReading {
 }
 
 impl LiveDashboard {
-    fn overview_cooling(&self, summary: &Value) -> gpui::Div {
-        let reading = |reading| self.shown_reading(reading);
+    fn overview_cooling(&self) -> gpui::Div {
+        let [soc, fan0, fan1, charge] = self.overview_cooling_readings();
+        let row =
+            |key, label, reading| overview_context_reading(&ContextReading { key, label }, reading);
+
         overview_context_card("cooling-battery")
             .child(timeline_heading_text(
                 "Cooling and battery",
@@ -253,40 +244,27 @@ impl LiveDashboard {
                 "About",
             ))
             .child(quantity_list([
-                overview_context_reading(
-                    &ContextReading {
-                        key: "soc",
-                        label: "SoC temperature",
-                    },
-                    reading(hardware_reading(summary, "soc_celsius", " °C", 1)),
-                ),
-                overview_context_reading(
-                    &ContextReading {
-                        key: "fan0",
-                        label: "Fan channel 0",
-                    },
-                    reading(overview_context_fan(summary, 0)),
-                ),
-                overview_context_reading(
-                    &ContextReading {
-                        key: "fan1",
-                        label: "Fan channel 1",
-                    },
-                    reading(overview_context_fan(summary, 1)),
-                ),
-                overview_context_reading(
-                    &ContextReading {
-                        key: "charge",
-                        label: "Battery charge",
-                    },
-                    reading(hardware_reading(
-                        &summary["battery"],
-                        "charge_percent",
-                        "%",
-                        1,
-                    )),
-                ),
+                row("soc", "SoC temperature", soc),
+                row("fan0", "Fan channel 0", fan0),
+                row("fan1", "Fan channel 1", fan1),
+                row("charge", "Battery charge", charge),
             ]))
+    }
+
+    /// What the "Cooling and battery" card reads of the second the page shows: the
+    /// system-on-chip temperature, each fan channel's speed and the battery's charge, in that
+    /// order.
+    pub(crate) fn overview_cooling_readings(&self) -> [String; 4] {
+        let summary = self.shown_summary();
+        let charge = hardware_reading(&summary["battery"], "charge_percent", "%", 1);
+
+        [
+            hardware_reading(&summary, "soc_celsius", " °C", 1),
+            overview_context_fan(&summary, 0),
+            overview_context_fan(&summary, 1),
+            charge,
+        ]
+        .map(|reading| self.shown_reading(reading))
     }
 }
 

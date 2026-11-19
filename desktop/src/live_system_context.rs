@@ -17,10 +17,7 @@ impl LiveDashboard {
         panel: Option<&Rc<Panel>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
-        let summary = super::matching_summary(selection);
+        let summary = self.shown_summary();
         let uptime = self.shown_reading(
             summary["uptime_seconds"]
                 .as_u64()
