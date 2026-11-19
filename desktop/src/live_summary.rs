@@ -394,11 +394,7 @@ fn card_memory_in_use(summary: &Value) -> String {
 
 /// App memory, wired and compressed memory together, or none where any one is missing.
 pub(crate) fn memory_in_use_bytes(summary: &Value) -> Option<u64> {
-    let anonymous = summary["memory_anonymous_bytes"].as_u64();
-    let purgeable = summary["memory_purgeable_bytes"].as_u64();
-    let app = anonymous
-        .zip(purgeable)
-        .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable));
+    let app = crate::live_projection::app_memory(summary).as_u64();
     let wired = summary["memory_wired_bytes"].as_u64();
     let compressed = summary["memory_compressed_bytes"].as_u64();
 
@@ -423,15 +419,6 @@ impl crate::live_dashboard::LiveDashboard {
             .reading_snapshot()
             .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         Cow::Borrowed(matching_summary(selection))
-    }
-
-    /// Whether the worker's reading is its own reading of the wall second `second`.
-    pub(crate) fn worker_summarizes(&self, second: u64) -> bool {
-        let Some(snapshot) = self.reading_snapshot() else {
-            return false;
-        };
-        let selection = &*snapshot.selection;
-        selection["second"].as_u64() == Some(second) && !matching_summary(selection).is_null()
     }
 }
 

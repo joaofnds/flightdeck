@@ -17,8 +17,7 @@ use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::apps_at;
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    levels, levels_named, reading_at, selection_of_json, store_levels_named, summary_point,
-    trend_point, view, with_memory_reading,
+    levels, levels_named, reading_at, store_levels_named, trend_point, view, with_memory_reading,
 };
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -227,27 +226,6 @@ fn a_rested_overview_reads_the_cooling_card_of_the_views_newest_second() {
 }
 
 #[test]
-fn the_memory_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it() {
-    // Goal: every readout the Memory page shows reads the second the store's View shows as the
-    // worker's reading of that second reads it, so the page can follow the View once its reader
-    // rests. Method: Overview, the page drawn from the View today, shows the worker's reading of
-    // 10,000 and then a View that ends at 10,005, each second with a complete reading whose
-    // every value differs from every other second's. Memory's cards, quantities, pressure and
-    // each chart's reading with no point are read from the summary the page shows and from the
-    // worker's summary of 10,005.
-    let first = memory_seconds(&[9_999, 10_000]);
-    let newer = memory_seconds(&[9_999, 10_000, 10_005]);
-    let mut dashboard = read_by_the_worker(&first);
-    let view = Arc::new(view(2, &[], &newer));
-
-    dashboard.take_view(Arc::clone(&view));
-
-    let expected = memory_readouts(&view, &worker_summary_of(&newer));
-    assert_ne!(memory_readouts(&view, &worker_summary_of(&first)), expected);
-    assert_eq!(memory_readouts(&view, &dashboard.shown_summary()), expected);
-}
-
-#[test]
 fn a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_reading() {
     // Goal: a Memory page whose reader rests shows the memory the View records for its newest
     // second where the store holds no complete reading of that second, as where it refused one,
@@ -255,13 +233,7 @@ fn a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_r
     // 9,999 and 10,000, the View of them rests the reader, then a View adds 10,001 with the
     // memory of its record alone, and the memory the page's readings show.
     let first = memory_seconds(&[9_999, 10_000]);
-    let mut dashboard = opening_on("memory");
-    let mut reading = worker_reading(&first);
-    reading.generation = dashboard.generation;
-    assert!(dashboard.receive(Update::Ready(reading)));
-    dashboard.take_view(Arc::new(view(1, &[], &first)));
-    dashboard.tick_rest();
-    assert!(dashboard.reader_rested());
+    let mut dashboard = rested_on("memory", &first, worker_reading(&first));
     let newest = reading_at(10_001, 0);
     let memory = newest.memory.unwrap();
     let seconds = [first[0].clone(), first[1].clone(), newest];
@@ -290,6 +262,182 @@ fn a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_r
         shown["swap_total_bytes"].as_u64(),
         Some(memory.swap_total_bytes)
     );
+}
+
+#[test]
+fn every_page_drawn_from_the_view_draws_its_machine_charts_from_it() {
+    // Goal: the pages drawn from the store's View are the pages the View has machine charts of,
+    // so a page named in one list and not the other fails here rather than on the user's Mac.
+    // Method: draw every route's machine charts from a View, then whether each draws charts
+    // against whether the page is drawn from the View.
+    let view = view(1, &[], &memory_seconds(&[9_999, 10_000]));
+
+    for (route, _) in crate::live_dashboard::ROUTES {
+        let panels = crate::live_projection::view_panels(route, &view, levels().as_ref());
+
+        let drawn = panels.is_ok_and(|panels| !panels.is_empty());
+        assert_eq!(drawn, super::store_view_draws_machine(route), "{route}");
+    }
+}
+
+#[test]
+fn a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read() {
+    // Goal: Overview shows what the store's record of a second holds where the store refused
+    // that second's complete reading, even where the worker read the same second, whose point
+    // then holds none of the readings. Method: the worker reads 10,000 and a refused 10,001 and
+    // writes the point it writes for a refused second, the View of them rests the reader, then
+    // the readings of the shown second against the record's.
+    assert_shows_the_record_of_a_refused_second("overview");
+}
+
+#[test]
+fn a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read() {
+    // Goal and method: those of the Overview test above, on the Memory page.
+    assert_shows_the_record_of_a_refused_second("memory");
+}
+
+/// Rests `route` over a View whose newest second the store refused a complete reading of and
+/// the worker read, and asserts the page shows what that second's record holds.
+fn assert_shows_the_record_of_a_refused_second(route: &str) {
+    let (dashboard, refused) = rested_over_a_refused_second(route);
+
+    let shown = dashboard.shown_summary();
+
+    let memory = refused.memory.unwrap();
+    assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_eq!(shown["cpu_percent"].as_f64(), refused.cpu_percent);
+    assert_eq!(
+        shown["power_watts"].as_f64(),
+        refused.power_watts.map(f64::from)
+    );
+    assert_eq!(
+        shown["cpu_celsius"].as_f64(),
+        refused.cpu_celsius.map(f64::from)
+    );
+    assert_eq!(
+        shown["gpu_celsius"].as_f64(),
+        refused.gpu_celsius.map(f64::from)
+    );
+    assert_eq!(
+        shown["soc_celsius"].as_f64(),
+        refused.soc_celsius.map(f64::from)
+    );
+    assert_eq!(
+        summary::memory_in_use_bytes(&shown),
+        summary::memory_in_use_bytes_of(
+            memory.app_bytes.unwrap(),
+            memory.wired_bytes,
+            memory.compressed_bytes
+        )
+    );
+}
+
+#[test]
+fn a_rested_memory_page_shows_the_app_memory_of_a_second_without_a_complete_reading() {
+    // Goal: a second without a complete reading shows the app memory its record holds, and no
+    // summary of it makes up a purgeable reading the record does not hold. Method: rest the
+    // Memory page over a refused second the worker read, then the keys of the shown summary,
+    // its App memory against that of the worker's point of the same memory, and Memory in use.
+    let (dashboard, refused) = rested_over_a_refused_second("memory");
+
+    let shown = dashboard.shown_summary();
+
+    let memory = refused.memory.unwrap();
+    assert!(shown.get("memory_purgeable_bytes").is_none());
+    assert!(shown.get("memory_anonymous_bytes").is_none());
+    let app_memory = |summary: &Value| {
+        crate::live_memory::quantities(summary)
+            .into_iter()
+            .find(|quantity| quantity.name == "App memory")
+            .unwrap()
+            .reading
+    };
+    assert_eq!(app_memory(&shown), app_memory(&trend_point(&refused)));
+    assert_ne!(app_memory(&shown), "Unavailable");
+    assert_eq!(
+        summary::memory_in_use_bytes(&shown),
+        summary::memory_in_use_bytes_of(
+            memory.app_bytes.unwrap(),
+            memory.wired_bytes,
+            memory.compressed_bytes
+        )
+    );
+}
+
+/// A page on `route` whose reader rests over a View whose newest second, 10,001, the store
+/// refused a complete reading of, which the worker read and wrote its point of a refused second
+/// for, and that second.
+fn rested_over_a_refused_second(route: &str) -> (LiveDashboard, MachineSecond) {
+    let mut refused = reading_at(10_001, 0);
+    refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
+    let seconds = [with_memory_reading(reading_at(10_000, 0)), refused.clone()];
+    let mut reading = readings(&seconds);
+    reading.selection.legacy_mut().unwrap()["summary"] = missing_point(&refused);
+
+    (rested_on(route, &seconds, reading), refused)
+}
+
+/// The point the worker writes for `second` where the store holds no complete reading of it,
+/// which names the second and holds none of its readings.
+fn missing_point(second: &MachineSecond) -> Value {
+    let mut point = trend_point(second);
+    let named = ["run", "boot", "segment", "wall_ns", "publication"];
+    for (key, value) in point.as_object_mut().unwrap() {
+        if !named.contains(&key.as_str()) {
+            *value = Value::Null;
+        }
+    }
+
+    point
+}
+
+/// A page on `route` that took `reading`, the worker's reading of `seconds`, and rests its
+/// reader over the View of the same seconds.
+fn rested_on(
+    route: &str,
+    seconds: &[MachineSecond],
+    mut reading: Box<crate::live_source::Snapshot>,
+) -> LiveDashboard {
+    let mut dashboard = opening_on(route);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    dashboard.take_view(Arc::new(view(1, &[], seconds)));
+    dashboard.tick_rest();
+    assert!(dashboard.reader_rested());
+
+    dashboard
+}
+
+#[test]
+fn a_rested_memory_page_ranks_the_apps_of_the_views_newest_second() {
+    // Goal: once Memory's reader rests, its top Apps show the newest second the store holds, as
+    // its charts do. Method: the worker's reading of memory seconds 9,999 and 10,000, which ranks
+    // no Apps, the View of them that rests the reader, then a View whose newest second, at
+    // 10,005, holds one App that held 3 GiB resident.
+    let first = memory_seconds(&[9_999, 10_000]);
+    let mut dashboard = rested_on("memory", &first, worker_reading(&first));
+    let seconds = memory_seconds(&[9_999, 10_000, 10_005]);
+    let mut newer = view(2, &[], &seconds);
+    newer.apps.replace(
+        2,
+        Arc::new(apps_at(
+            &seconds[2],
+            &[("Brave Browser", 3 * 1_073_741_824)],
+        )),
+    );
+
+    assert!(dashboard.take_view(Arc::new(newer)));
+
+    let (rankings, target) = dashboard.ranking_reading().unwrap();
+    let resident = rankings
+        .metrics
+        .iter()
+        .find(|ranking| ranking.metric == crate::live_rankings::Metric::Resident)
+        .unwrap();
+    assert!(dashboard.reader_rested());
+    assert_eq!(target.second, 10_005);
+    assert_eq!(resident.entries[0].app.name, "Brave Browser");
+    assert_eq!(resident.entries[0].amount, 3 * 1_073_741_824);
 }
 
 #[test]
@@ -518,6 +666,25 @@ fn a_view_newer_than_the_readings_reads_each_chart_by_app_at_its_newest_second()
     ] {
         assert_eq!(chart_reading(&dashboard, id), chart_reading(&worker, id));
     }
+}
+
+#[test]
+fn a_rested_memory_page_reads_its_chart_of_resident_memory_by_app_at_the_views_newest_second() {
+    // Goal: once Memory's reader rests, its chart of resident memory by App reads the newest
+    // second the store holds as the worker's chart of the same seconds reads it, rather than the
+    // history of the worker's first reading. Method: the worker's reading of 9,999 and 10,000,
+    // the View of them that rests the reader, then a View that ends five seconds later and holds
+    // an App in each second, beside a page showing the worker's reading and charts by App of
+    // those seconds.
+    let first = [reading_at(9_999, 0), reading_at(10_000, 0)];
+    let mut dashboard = rested_on("memory", &first, worker_reading(&first));
+
+    assert!(dashboard.take_view(Arc::new(charted_view())));
+
+    let worker = drawn_by_app(&newer_seconds());
+    let id = crate::live_resident_history::PANEL_ID;
+    assert!(dashboard.reader_rested());
+    assert_eq!(chart_reading(&dashboard, id), chart_reading(&worker, id));
 }
 
 mod when_the_view_cannot_choose_the_apps_its_charts_draw {
@@ -1905,47 +2072,6 @@ fn memory_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
         .collect()
 }
 
-/// The worker's summary of the newest of `seconds`, which the viewer writes from its complete
-/// reading, as the page reads it.
-fn worker_summary_of(seconds: &[MachineSecond]) -> Value {
-    let newest = seconds.last().unwrap();
-    let mut selection = crate::live_store_fixtures::summary_selection(&[], seconds);
-    selection["summary"] = summary_point(newest);
-
-    summary::worker_summary(&selection_of_json(&selection)).clone()
-}
-
-/// What the Memory page shows of `summary`: its cards, its quantities, its pressure, and what
-/// each line of each machine chart of `view` reads where the chart draws no point.
-fn memory_readouts(view: &View, summary: &Value) -> MemoryReadouts {
-    let panels =
-        crate::live_projection::held_projection::view_panels("memory", view, levels().as_ref())
-            .unwrap();
-    let mut charts = Vec::new();
-    for panel in &panels {
-        for line in 0..panel.lines.len() {
-            let value = crate::live_projection::reading_value("memory", &panel.id, line, summary);
-            charts.push((panel.id.clone(), line, value.unwrap()));
-        }
-    }
-
-    MemoryReadouts {
-        cards: texts(&summary::cards_of_summary("memory", summary)),
-        quantities: crate::live_memory::quantities(summary),
-        pressure: crate::live_views::pressure(&summary["pressure"]),
-        charts,
-    }
-}
-
-/// The readouts of the Memory page `memory_readouts` reads.
-#[derive(Debug, PartialEq)]
-struct MemoryReadouts {
-    cards: Vec<(String, String, String, u32)>,
-    quantities: Vec<crate::live_memory::MemoryQuantity>,
-    pressure: &'static str,
-    charts: Vec<(String, usize, Option<f32>)>,
-}
-
 /// The seconds 9,999, 10,000 and 10,005, five seconds newer than the worker's readings.
 fn newer_seconds() -> [MachineSecond; 3] {
     [
@@ -2144,15 +2270,7 @@ fn a_followed_memory_page_reads_no_resident_history_past_its_first_reading(
     // store and reader settles on the View, the recording publishes a third second, and the page
     // ticks until it draws that second from the View, then the second the worker's reading
     // selects and the history of resident memory the page reads.
-    use gpui::AppContext;
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish_resources();
-    recording.publish_resources();
-    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
-    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
-    cx.update(|cx| super::install_store(store, cx));
-    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "memory".into(), None)));
-    tick_until_settled(cx, &page, 2);
+    let (mut recording, page) = followed_page_settled(cx, "memory");
     let read =
         cx.update(|cx| page.read(cx).snapshot.as_ref().unwrap().selection["second"].as_u64());
 
@@ -2166,7 +2284,6 @@ fn a_followed_memory_page_reads_no_resident_history_past_its_first_reading(
             page.snapshot.as_ref().unwrap().selection["second"].as_u64(),
             read
         );
-        assert!(page.store_panels.resident.is_some());
         assert!(page.resident_history().is_some());
     });
     drop(recording);
@@ -2180,7 +2297,7 @@ fn tick_until_drawn(
     second: u64,
 ) {
     let deadline = std::time::Instant::now() + Duration::from_secs(4);
-    loop {
+    for _ in 0..4_000 {
         page.update(cx, LiveDashboard::tick);
         let drawn = cx.update(|cx| page.read(cx).shown_second());
         if drawn == Some(second) {
@@ -2192,6 +2309,7 @@ fn tick_until_drawn(
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+    panic!("the page never drew {second}");
 }
 
 #[gpui::test]
@@ -2290,6 +2408,22 @@ fn followed_page_read_again(
     crate::live_dashboard::input_tests::source_mode::LiveRecording,
     gpui::Entity<LiveDashboard>,
 ) {
+    let (mut recording, page) = followed_page_settled(cx, route);
+
+    recording.publish_resources();
+    tick_until_read(cx, &page, recording.last_second());
+    (recording, page)
+}
+
+/// The page `route` over a real store and reader following a live recording, settled on the
+/// store's View of its second publication.
+fn followed_page_settled(
+    cx: &mut gpui::TestAppContext,
+    route: &str,
+) -> (
+    crate::live_dashboard::input_tests::source_mode::LiveRecording,
+    gpui::Entity<LiveDashboard>,
+) {
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish_resources();
@@ -2298,10 +2432,8 @@ fn followed_page_read_again(
     let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, route.into(), None)));
-    tick_until_settled(cx, &page, 2);
 
-    recording.publish_resources();
-    tick_until_read(cx, &page, recording.last_second());
+    tick_until_settled(cx, &page, 2);
     (recording, page)
 }
 

@@ -13,6 +13,9 @@ use crate::live_inventory::{PerformanceLevel, performance_levels};
 
 pub const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
+const RUN: &str = "00000000000000010000000000000002";
+const BOOT: &str = "00000000000000030000000000000004";
+
 /// The Overview's machine charts of `view`, as the page draws them from the store's View.
 /// `levels` names the performance levels the CPU chart draws.
 pub fn overview_panels(
@@ -21,8 +24,6 @@ pub fn overview_panels(
 ) -> Result<Vec<std::rc::Rc<crate::data::Panel>>, String> {
     crate::live_projection::view_panels("overview", view, levels)
 }
-const RUN: &str = "00000000000000010000000000000002";
-const BOOT: &str = "00000000000000030000000000000004";
 
 /// A second whose readings differ from those of every other second, a quarter of a second
 /// into wall second `wall_second`, in segment `segment` of the store's readings.

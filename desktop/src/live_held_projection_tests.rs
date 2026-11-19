@@ -6,7 +6,7 @@ use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
 use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
-use super::{Observations, OverviewPoints, overview_point_second, view_panels};
+use super::{Observations, ViewPanelsPoints, overview_point_second, view_panels};
 use crate::data::Panel;
 use crate::live_store_fixtures::{
     levels, memory_rates, overview_panels, reading_at, selection, selection_of_json, summary_point,
@@ -328,25 +328,34 @@ fn at_a_refused_second_the_memory_charts_draw_what_the_second_holds() {
     // Goal: where the store refused a second's complete reading, the Memory page draws the
     // readings the second holds itself, as the Overview does, and leaves the readings only a
     // complete reading holds missing. Method: a refused second among seconds with complete
-    // readings, and the value each Memory line draws there.
+    // readings, and the value each Memory line draws there against the value the worker's
+    // charts draw from its trend point of that second.
     let read = |wall_second| with_memory_reading(reading_at(wall_second, 3));
     let mut refused = reading_at(9_999, 3);
     refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
-    let view = view(1, &[], &[read(9_998), refused, read(10_000)]);
+    let seconds = [read(9_998), refused, read(10_000)];
+    let view = view(1, &[], &seconds);
 
     let drawn = view_panels("memory", &view, levels().as_ref()).unwrap();
 
+    let worker = panels(
+        "memory",
+        &selection_of_json(&selection(&[], &seconds)),
+        None,
+    )
+    .unwrap();
     let at = |id: &str, line: usize| {
         let line = &panel_named(&drawn, id).lines[line];
         (line.name.clone(), line.values[1])
     };
+    let read_by_the_worker = |id: &str, line: usize| panel_named(&worker, id).lines[line].values[1];
     let held = [
-        at("live-memory", 0),
-        at("live-memory", 1),
-        at("live-memory", 2),
-        at("live-memory", 3),
-        at("live-swap", 0),
-        at("live-swap", 1),
+        ("live-memory", 0),
+        ("live-memory", 1),
+        ("live-memory", 2),
+        ("live-memory", 3),
+        ("live-swap", 0),
+        ("live-swap", 1),
     ];
     let missing = [
         at("live-swap-flow", 0),
@@ -355,8 +364,10 @@ fn at_a_refused_second_the_memory_charts_draw_what_the_second_holds() {
         at("live-paging", 1),
         at("live-paging", 2),
     ];
-    for (name, value) in held {
+    for (id, line) in held {
+        let (name, value) = at(id, line);
         assert!(value.is_some(), "{name}");
+        assert_eq!(value, read_by_the_worker(id, line), "{name}");
     }
     for (name, value) in missing {
         assert_eq!(value, None, "{name}");
@@ -624,7 +635,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let stretch = stretch_of(902, std::slice::from_ref(&second));
         let seconds = [&second];
         let stretches = [Some(&*stretch.machine)];
-        let points = OverviewPoints {
+        let points = ViewPanelsPoints {
             seconds: &seconds,
             stretches: &stretches,
         };

@@ -857,7 +857,8 @@ impl VisibilityHarness {
         self.reader.command.generation
     }
 
-    /// Ends the hover `hover_from` began, as the pointer leaving the chart does.
+    /// Ends the pointer's hover `hover_with_pointer` began, as the pointer leaving the chart
+    /// does. A hover from the keyboard outlasts it, as on the page.
     fn leave(&mut self) {
         self.window
             .update(&mut self.cx, |dashboard, _, cx| {

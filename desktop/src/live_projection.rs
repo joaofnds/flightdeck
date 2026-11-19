@@ -1033,8 +1033,14 @@ fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, 
 }
 
 /// App memory as Activity Monitor counts it: anonymous memory that macOS may not purge. A
-/// purgeable count above the anonymous one leaves it unknown rather than zero.
+/// summary drawn from the store's record of a second holds it as app memory, and the worker's
+/// point as anonymous and purgeable memory. A purgeable count above the anonymous one leaves it
+/// unknown rather than zero.
 pub(crate) fn app_memory(point: &Value) -> Value {
+    if let Some(app) = point.get("memory_app_bytes") {
+        return app.clone();
+    }
+
     let anonymous = point["memory_anonymous_bytes"].as_u64();
     let purgeable = point["memory_purgeable_bytes"].as_u64();
     anonymous

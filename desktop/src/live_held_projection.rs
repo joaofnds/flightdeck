@@ -19,9 +19,9 @@ use super::{
 #[path = "live_held_projection_tests.rs"]
 mod tests;
 
-/// The machine charts of `route` of `view`, following its newest second, which the charts
-/// select, over the loaded hour as the Overview's span it. `levels` names the performance levels
-/// the Overview's CPU chart draws.
+/// The machine charts of `route` drawn from `view` over the loaded hour, following its newest
+/// second, which the charts select. `levels` names the performance levels Overview's CPU chart
+/// draws.
 pub fn view_panels(
     route: &str,
     view: &View,
@@ -32,11 +32,11 @@ pub fn view_panels(
         return super::empty_panels(route);
     };
 
-    let domain = overview_panels_domain(newest)?;
-    let seconds = overview_panels_points(view, &domain);
-    let coordinates = overview_panels_coordinates(&seconds, &domain)?;
-    let stretches = overview_panels_stretches(view, &seconds, &domain);
-    let points = OverviewPoints {
+    let domain = view_panels_domain(newest)?;
+    let seconds = view_panels_points(view, &domain);
+    let coordinates = view_panels_coordinates(&seconds, &domain)?;
+    let stretches = view_panels_stretches(view, &seconds, &domain);
+    let points = ViewPanelsPoints {
         seconds: &seconds,
         stretches: &stretches,
     };
@@ -69,8 +69,8 @@ pub fn overview_seconds(view: &View) -> Result<Vec<u64>, String> {
         return Ok(Vec::new());
     };
 
-    let domain = overview_panels_domain(newest)?;
-    let points = overview_panels_points(view, &domain);
+    let domain = view_panels_domain(newest)?;
+    let points = view_panels_points(view, &domain);
     Ok(points
         .iter()
         .map(|second| second.wall_ns / NANOSECONDS_PER_SECOND)
@@ -86,8 +86,8 @@ pub fn overview_point_second(view: &View, second: u64) -> Result<Option<u64>, St
         return Ok(None);
     };
 
-    let domain = overview_panels_domain(newest)?;
-    let points = overview_panels_points(view, &domain);
+    let domain = view_panels_domain(newest)?;
+    let points = view_panels_points(view, &domain);
     Ok(points
         .iter()
         .map(|point| point.wall_ns / NANOSECONDS_PER_SECOND)
@@ -109,7 +109,7 @@ fn overview_point_second_stands_for(domain: &Domain, point: u64, second: u64) ->
 
 /// The span the Overview's machine charts draw, ending at `newest`. The page always asks for the
 /// older tail, so the charts span the loaded hour.
-fn overview_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {
+fn view_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {
     let older_stride = Some(viewer::EARLIER_STRIDE_SECONDS);
 
     Domain::ending_at(newest.wall_ns / NANOSECONDS_PER_SECOND, older_stride)
@@ -118,16 +118,16 @@ fn overview_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {
 /// The seconds of `view` the charts of `domain` draw, oldest first: of the seconds older than
 /// the full-detail ones, the first of each stretch the older tail keeps, and every full-detail
 /// second after them.
-fn overview_panels_points<'a>(view: &'a View, domain: &Domain) -> Vec<&'a MachineSecond> {
-    overview_panels_indices(view, domain)
+fn view_panels_points<'a>(view: &'a View, domain: &Domain) -> Vec<&'a MachineSecond> {
+    view_panels_indices(view, domain)
         .into_iter()
-        .map(|index| overview_panels_second(view, index))
+        .map(|index| view_panels_second(view, index))
         .collect()
 }
 
-/// Where each second `overview_panels_points` gives sits among the seconds of `view`'s older
+/// Where each second `view_panels_points` gives sits among the seconds of `view`'s older
 /// tail and then its live span.
-fn overview_panels_indices(view: &View, domain: &Domain) -> Vec<usize> {
+fn view_panels_indices(view: &View, domain: &Domain) -> Vec<usize> {
     // The older tail ends where the stretch that holds the first full-detail second starts, so
     // that stretch draws only its full-detail seconds. The divisions floor, as the store's and
     // the older tail's stretches do.
@@ -161,7 +161,7 @@ fn overview_panels_indices(view: &View, domain: &Domain) -> Vec<usize> {
 /// What each of the seconds the charts of `domain` draw stands for: the stretch of a point older
 /// than the full-detail seconds, where the store holds it, and only itself after them. The first
 /// of those also stands for the seconds before it that lie in no point, which are of its stretch.
-fn overview_panels_stretches<'view>(
+fn view_panels_stretches<'view>(
     view: &'view View,
     seconds: &[&MachineSecond],
     domain: &Domain,
@@ -193,12 +193,12 @@ fn overview_stretch<'view>(
 }
 
 /// The seconds a chart drawn from the store draws, with what each of them stands for.
-struct OverviewPoints<'view> {
+struct ViewPanelsPoints<'view> {
     seconds: &'view [&'view MachineSecond],
     stretches: &'view [Option<&'view MachineStretch>],
 }
 
-impl Observations for OverviewPoints<'_> {
+impl Observations for ViewPanelsPoints<'_> {
     fn count(&self) -> usize {
         self.seconds.len()
     }
@@ -228,7 +228,7 @@ impl Observations for OverviewPoints<'_> {
 }
 
 /// The second at `index` among the seconds of `view`'s older tail and then its live span.
-fn overview_panels_second(view: &View, index: usize) -> &MachineSecond {
+fn view_panels_second(view: &View, index: usize) -> &MachineSecond {
     match index.checked_sub(view.earlier.len()) {
         Some(live) => &view.seconds[live],
         None => &view.earlier[index],
@@ -285,13 +285,13 @@ pub fn overview_app_points(view: &View) -> Result<OverviewAppPoints<'_>, String>
         unreachable!("the App charts draw a View that holds a second");
     };
 
-    let domain = overview_panels_domain(newest)?;
-    let indices = overview_panels_indices(view, &domain);
+    let domain = view_panels_domain(newest)?;
+    let indices = view_panels_indices(view, &domain);
     let seconds: Vec<&MachineSecond> = indices
         .iter()
-        .map(|index| overview_panels_second(view, *index))
+        .map(|index| view_panels_second(view, *index))
         .collect();
-    let coordinates = overview_panels_coordinates(&seconds, &domain)?;
+    let coordinates = view_panels_coordinates(&seconds, &domain)?;
     let apps = overview_app_points_apps(view, &seconds, &indices, &domain);
 
     assert_eq!(apps.len(), seconds.len());
@@ -354,7 +354,7 @@ fn overview_app_points_apps<'view>(
 
 /// Where each of `points` sits in `domain`, and its segment, numbered from zero in the order
 /// the segments first appear, as the trend points number theirs. The newest point is selected.
-fn overview_panels_coordinates(
+fn view_panels_coordinates(
     points: &[&MachineSecond],
     domain: &Domain,
 ) -> Result<Coordinates, String> {
@@ -411,7 +411,7 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "memory_used_bytes", None) => stretch_reach_measured(&stretch.memory_used_bytes),
         (None, "swap_used_bytes", None) => stretch_reach_measured(&stretch.swap_used_bytes),
         (None, "swap_total_bytes", None) => stretch_reach_measured(&stretch.swap_total_bytes),
-        (None, key, None) if let Some(rate) = memory_rate(key) => {
+        (None, key, None) if let Some(rate) = memory_rate_named(key) => {
             stretch_reach_measured(stretch.memory_rate(rate))
         }
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
@@ -470,7 +470,9 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, "pressure", None) => memory.map(|memory| f32::from(pressure_level(memory.pressure))),
         (None, "swap_used_bytes", None) => bytes(memory.map(|memory| memory.swap_used_bytes)),
         (None, "swap_total_bytes", None) => bytes(memory.map(|memory| memory.swap_total_bytes)),
-        (None, key, None) if let Some(rate) = memory_rate(key) => narrow(second.memory_rate(rate)),
+        (None, key, None) if let Some(rate) = memory_rate_named(key) => {
+            narrow(second.memory_rate(rate))
+        }
         // The collector records neither, so their charts draw no reading wherever they are drawn.
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => narrow(network.map(|traffic| traffic.received_bps)),
@@ -491,7 +493,7 @@ pub(crate) use viewer::store::pressure_level;
 
 /// The rate of memory's counters a trend point names `key`, which only a second's complete
 /// reading holds.
-fn memory_rate(key: &str) -> Option<MemoryRate> {
+fn memory_rate_named(key: &str) -> Option<MemoryRate> {
     MemoryRate::ALL.into_iter().find(|rate| rate.key() == key)
 }
 

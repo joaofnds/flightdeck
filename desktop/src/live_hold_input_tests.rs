@@ -15,7 +15,9 @@ use crate::live_source::{Snapshot, Update};
 use crate::live_store_app_fixtures::{
     HOUR_NEWEST, apps_at, hour, hour_led_from_its_older_part, hour_until,
 };
-use crate::live_store_fixtures::{reading_at, trend_point, view, with_memory_reading};
+use crate::live_store_fixtures::{
+    reading_at, summary_point, trend_point, view, with_memory_reading,
+};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
 use crate::time_range::Range;
@@ -327,9 +329,18 @@ fn a_page_opened_while_a_second_is_held_shows_the_held_second_s_readings_from_it
     // that context reads. Method: click 800 seconds before the newest on the CPU page's chart by
     // App, move the pointer to the sidebar and open Memory, hand the page the reader's answer,
     // whose context holds the held second, then the second the page's readings show and the
-    // text of each summary readout against those of the held second's readings.
+    // text of each summary readout against those of the held second's readings. The View holds
+    // the held second with its complete reading, as the store holds a second it read.
+    let held = with_memory_reading(reading_at(HELD, 0));
+    let (mut hour, _) = hour();
+    let index = hour
+        .seconds
+        .iter()
+        .position(|second| second.wall_ns / NANOSECONDS_PER_SECOND == HELD)
+        .unwrap();
+    hour.seconds[index] = Arc::new(held.clone());
     let mut harness = InputHarness::open_route(cx, "cpu");
-    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_view_at_fifteen_minutes(hour);
     harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
     harness.driver.click_second_on("live-cpu-apps-plot", HELD);
     harness
@@ -340,9 +351,11 @@ fn a_page_opened_while_a_second_is_held_shows_the_held_second_s_readings_from_it
     harness.driver.answer_page_read_holding(HELD);
 
     assert_eq!(harness.driver.shown_reading_second(), Some(HELD));
+    let mut selection = summary_selection(&held);
+    selection["summary"] = crate::live_store_fixtures::summary_point(&held);
     let expected = summary::cards(
         "memory",
-        &crate::live_store_fixtures::selection_of_json(&summary_selection(&reading_at(HELD, 0))),
+        &crate::live_store_fixtures::selection_of_json(&selection),
     );
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
@@ -3149,6 +3162,36 @@ fn a_followed_memory_page_at_the_hour_draws_its_older_tail_from_the_view(cx: &mu
 }
 
 #[gpui::test]
+fn the_memory_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a followed Memory page whose reader rests renders every readout of the newest second
+    // the store's View shows as the worker's reading of that second reads it. Method: Memory over
+    // a View of memory seconds up to 10,005, each with a complete reading whose every value
+    // differs from every other second's, and the worker's reading of 10,000, the reader rested,
+    // then the cards, quantities, pressure and chart legends the page renders against what the
+    // worker's summary of 10,005 reads.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    let view = harness.driver.show_memory_view_over_tail();
+
+    harness.driver.rest_reader();
+
+    let newest = view.seconds.last().unwrap();
+    let read = summary_point(&view.seconds[1]);
+    let expected = summary_point(newest);
+    assert_ne!(
+        texts(&summary::cards_of_summary("memory", &read)),
+        texts(&summary::cards_of_summary("memory", &expected))
+    );
+    assert_ne!(
+        crate::live_memory::quantities(&read),
+        crate::live_memory::quantities(&expected)
+    );
+    harness.driver.assert_memory_page_reads(&view, &expected);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn pause_on_a_rested_memory_page_shows_the_views_newest_second_without_reading(
     cx: &mut TestAppContext,
 ) {
@@ -3157,7 +3200,7 @@ fn pause_on_a_rested_memory_page_shows_the_views_newest_second_without_reading(
     // asks the reader for nothing, as on Overview. Method: Memory over a View of memory seconds
     // up to 10,005 and the worker's readings up to 10,000, the reader rested, Pause, then the
     // commands the reader was sent, the second the readings show, and the readings, cards,
-    // quantities and chart readings against those of the View's complete reading of 10,005.
+    // quantities and chart legends against those of the View's complete reading of 10,005.
     let mut harness = InputHarness::open_route(cx, "memory");
     let view = harness.driver.show_memory_view_over_tail();
     harness.driver.rest_reader();
@@ -3180,13 +3223,13 @@ fn pause_on_a_rested_memory_page_shows_the_views_newest_second_without_reading(
 fn holding_an_older_second_the_view_lacks_on_memory_reads_the_workers_reading_of_it(
     cx: &mut TestAppContext,
 ) {
-    // Goal: a second held on a followed Memory page that the View holds no complete reading of
-    // shows the worker's reading of that second, since the View's record of it leaves out the
-    // memory the Memory page shows. Method: Memory over a View whose older tail holds 9,500
-    // without a complete reading, over the worker's readings that hold 9,500 in their older
-    // tail, a hover there that reads its second, a click there and the answer to that read,
-    // then the second the readings show, and the readings, cards, quantities and chart readings
-    // against those of the worker's reading of 9,500.
+    // Goal: a second held on a followed Memory page in the View's older tail, of which the View
+    // keeps no record the page shows, shows the worker's reading of that second. Method: Memory
+    // over a View whose older tail holds 9,500 without a complete reading, over the worker's
+    // readings that hold 9,500 in their older tail, a hover there that reads its second, a click
+    // there and the answer to that read, then the second the readings show, and the readings,
+    // cards, quantities and chart legends against the summary the worker's reading of 9,500
+    // carries.
     let mut harness = InputHarness::open_route(cx, "memory");
     let view = harness.driver.show_memory_view_over_tail();
     harness.driver.hover_second_on("live-swap-flow-plot", TAIL);
@@ -3196,16 +3239,23 @@ fn holding_an_older_second_the_view_lacks_on_memory_reads_the_workers_reading_of
     harness.driver.answer_held_read_of(&reading_at(TAIL, 0));
 
     assert_eq!(harness.driver.shown_reading_second(), Some(TAIL));
-    let expected = harness.driver.held_worker_summary();
-    assert_eq!(
-        expected["wall_ns"]
-            .as_u64()
-            .map(|wall| wall / NANOSECONDS_PER_SECOND),
-        Some(TAIL)
-    );
-    assert!(expected["memory_wired_bytes"].as_u64().is_some());
+    let expected = trend_point(&reading_at(TAIL, 0));
     harness.driver.assert_memory_readouts(&view, &expected);
     harness.teardown();
+}
+
+/// What the legend of `panel` reads for its line `line` at `value`: the state a chart of states
+/// names, or the quantity in the line's unit.
+fn legend_reading(panel: &crate::data::Panel, line: usize, value: Option<f32>) -> String {
+    let Some(value) = value else {
+        return "Unavailable".into();
+    };
+    if let Some(states) = panel.states.as_ref().filter(|_| panel.kind == "timeline") {
+        return states[num_traits::ToPrimitive::to_usize(&value).unwrap()].clone();
+    }
+
+    let unit = panel.lines[line].unit.as_deref().unwrap_or(&panel.unit);
+    crate::live_projection::quantity_text(value, unit)
 }
 
 impl InputDriver {
@@ -3251,40 +3301,70 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    /// The worker's summary of the second its reading of the held second selects.
-    fn held_worker_summary(&self) -> serde_json::Value {
-        self.view.read_with(&self.context, |dashboard, _| {
-            let snapshot = dashboard.reading_snapshot().unwrap();
-            summary::worker_summary(&snapshot.selection).clone()
-        })
-    }
-
-    /// Asserts that the Memory page shows the readings of `expected` in its cards, its
-    /// quantities and the reading each line of each machine chart of `view` gives where no point
-    /// is hovered.
-    fn assert_memory_readouts(&self, view: &viewer::store::View, expected: &serde_json::Value) {
+    /// Asserts that the Memory page shows the readings of `expected`: the readings it reads, and
+    /// what `assert_memory_page_reads` reads of them.
+    fn assert_memory_readouts(&mut self, view: &viewer::store::View, expected: &serde_json::Value) {
         let shown = self.view.read_with(&self.context, |dashboard, _| {
             dashboard.shown_summary().into_owned()
         });
         assert_eq!(&shown, expected);
+        self.assert_memory_page_reads(view, expected);
+    }
+
+    /// Asserts that the Memory page renders what `summary` reads: the text of each summary card,
+    /// each quantity, and the reading of each line of each of its machine charts of `view` that
+    /// the chart's legend or caption renders.
+    fn assert_memory_page_reads(
+        &mut self,
+        view: &viewer::store::View,
+        summary: &serde_json::Value,
+    ) {
         assert_eq!(
             self.readout_texts(),
-            texts(&summary::cards_of_summary("memory", expected))
+            texts(&summary::cards_of_summary("memory", summary))
         );
-        assert_eq!(
-            crate::live_memory::quantities(&shown),
-            crate::live_memory::quantities(expected)
-        );
+        let keys = [
+            "memory-app",
+            "memory-wired",
+            "memory-compressed",
+            "memory-cached",
+            "memory-free",
+            "memory-pressure",
+        ];
+        let quantities = crate::live_memory::quantities(summary);
+        assert_eq!(quantities.len(), keys.len());
+        for (key, quantity) in keys.into_iter().zip(quantities) {
+            let selector = format!("overview-context:{key}:{}", quantity.reading);
+            assert!(self.rendered(selector), "{key}: {}", quantity.reading);
+        }
         let panels =
             crate::live_projection::held_projection::view_panels("memory", view, None).unwrap();
         for panel in &panels {
-            for line in 0..panel.lines.len() {
-                let reading = |summary| {
-                    crate::live_projection::reading_value("memory", &panel.id, line, summary)
+            for (index, line) in panel.lines.iter().enumerate() {
+                let value =
+                    crate::live_projection::reading_value("memory", &panel.id, index, summary)
+                        .unwrap();
+                let reading = legend_reading(panel, index, value);
+                // A chart of states names its state in its caption rather than in a legend.
+                let selector = if panel.kind == "timeline" {
+                    format!("chart-caption:{}:{reading}", panel.id)
+                } else {
+                    format!("chart-legend:{}:{}:{reading}", panel.id, line.name)
                 };
-                assert_eq!(reading(&shown), reading(expected), "{} {line}", panel.id);
+                assert!(
+                    self.rendered(selector),
+                    "{} {}: {reading}",
+                    panel.id,
+                    line.name
+                );
             }
         }
+    }
+
+    /// Whether the page renders the element `selector` names.
+    fn rendered(&mut self, selector: String) -> bool {
+        let selector: &'static str = Box::leak(selector.into_boxed_str());
+        self.context.debug_bounds(selector).is_some()
     }
 
     /// Whether the page's reader rests, reading nothing until a hover or a hold wakes it.
@@ -3702,8 +3782,8 @@ impl InputDriver {
             .update(&mut self.context, |dashboard, _| dashboard.hold_tick());
     }
 
-    /// Runs the page's step that rests the reader while it draws Overview from the store's
-    /// View, and answers whether the reader rests.
+    /// Runs the page's step that rests the reader while it draws a page from the store's View,
+    /// and answers whether the reader rests.
     fn offer_rest(&mut self) -> bool {
         self.view.update(&mut self.context, |dashboard, _| {
             dashboard.tick_rest();
@@ -3711,7 +3791,7 @@ impl InputDriver {
         })
     }
 
-    /// Rests the reader, as the page does while it draws Overview from the store's View.
+    /// Rests the reader, as the page does while it draws a page from the store's View.
     fn rest_reader(&mut self) {
         assert!(self.offer_rest());
     }
