@@ -1083,6 +1083,258 @@ mod when_the_page_has_a_chart_by_app {
     }
 }
 
+mod when_the_view_is_placed_before_the_reading_of_its_tick {
+    use super::*;
+    use crate::chart_axes::TimeWindow;
+    use crate::live_source::{AppChartSource, Snapshot};
+    use viewer::store::WallSeconds;
+
+    #[test]
+    fn the_memory_page_ends_as_after_the_reading_and_then_the_view() {
+        // Goal: a page other than Overview that places the store's View before it takes the
+        // worker's reading of the same tick ends as it would taking the reading with the
+        // earlier View and then the new View, today's order. Method: two Memory pages drawn
+        // from one View take a reading that left their chart by App to the View and a newer
+        // View, each in one order, and their states are compared.
+        let (taken_after, placed_before) = both_orders("memory", left_to_the_view);
+
+        assert_eq!(placed_before, taken_after);
+    }
+
+    #[test]
+    fn the_cpu_page_ends_as_after_the_reading_and_then_the_view() {
+        // Goal: as on the Memory page, for a chart by App of a metric the reading would bring.
+        // Method: as on the Memory page, on the CPU page.
+        let (taken_after, placed_before) = both_orders("cpu", left_to_the_view);
+
+        assert_eq!(placed_before, taken_after);
+    }
+
+    #[test]
+    fn overview_ends_as_after_the_reading_and_then_the_view() {
+        // Goal: Overview, which draws its machine charts and charts by App from the View
+        // through a branch of its own, ends as in today's order too. Method: as on the Memory
+        // page, on Overview, whose readings bring its charts by App.
+        let (taken_after, placed_before) = both_orders("overview", carrying_the_chart);
+
+        assert_eq!(placed_before, taken_after);
+    }
+
+    #[test]
+    fn a_page_that_draws_nothing_from_the_view_ends_as_after_the_reading_and_then_the_view() {
+        // Goal: where the page draws nothing from the newer View, since the View trails a
+        // reading that brought the chart by App, the reading's own charts stand as in today's
+        // order. Method: as on the Memory page, with a reading past the newer View that
+        // carries the chart.
+        let (taken_after, placed_before) = both_orders("memory", past_the_view);
+
+        assert_eq!(placed_before, taken_after);
+    }
+
+    #[test]
+    fn the_page_builds_its_charts_by_app_once() {
+        // Goal: placing the View first builds the charts by App once, for the reading and the
+        // View together. Method: the Memory page of the first test that places the View
+        // first, counting its builds after it was drawn from one View.
+        let mut placed_before = drawn_from_the_earlier_view("memory");
+        let built = placed_before.store_panels.builds;
+
+        place_the_view_and_then_take_the_reading(&mut placed_before, left_to_the_view());
+
+        assert_eq!(placed_before.store_panels.builds, built + 1);
+    }
+
+    mod when_the_page_refuses_the_reading {
+        use super::*;
+
+        #[test]
+        fn the_memory_page_draws_nothing_from_the_view_in_either_order() {
+            // Goal: where a page other than Overview refuses the reading, the View draws
+            // nothing whether the page takes it after the reading or places it before, so a
+            // tick that placed it first owes the page no draw. Method: two Memory pages drawn
+            // from one View take a reading whose context ends before its second and a newer
+            // View, each in one order.
+            let (drawn_after, taken_after, placed_before) = refused_in_both_orders("memory");
+
+            assert!(!drawn_after);
+            assert_eq!(placed_before, taken_after);
+        }
+
+        #[test]
+        fn overview_draws_nothing_from_the_view_in_either_order() {
+            // Goal: as on the Memory page, on Overview, which draws its machine charts from
+            // the View through a branch of its own. Method: as on the Memory page.
+            let (drawn_after, taken_after, placed_before) = refused_in_both_orders("overview");
+
+            assert!(!drawn_after);
+            assert_eq!(placed_before, taken_after);
+        }
+
+        /// Whether the newer View drew on a page `route` that refused a reading and then took
+        /// it, that page's state, and the state of a page that placed the View and then
+        /// refused the reading.
+        fn refused_in_both_orders(route: &str) -> (bool, State, State) {
+            let mut taken_after = drawn_from_the_earlier_view(route);
+            let mut placed_before = drawn_from_the_earlier_view(route);
+
+            taken_after.accept(refused());
+            let drawn_after = taken_after.take_view(newer_charted_view());
+            placed_before.store_view_place(newer_charted_view());
+            placed_before.accept(refused());
+
+            assert!(taken_after.error.is_some());
+            assert_eq!(placed_before.error, taken_after.error);
+            (drawn_after, state(&taken_after), state(&placed_before))
+        }
+    }
+
+    mod when_the_page_cannot_draw_the_view {
+        use super::*;
+
+        #[test]
+        fn overview_shows_the_readings_charts_whole() {
+            // Goal: where Overview cannot draw the View placed first, it shows the reading's
+            // own charts whole, as a page that holds no View does, and reports no failure of
+            // its reading. Method: Overview drawn from a View places a newer View whose newest
+            // power reading is no number and takes a reading, and an Overview that never held
+            // a View takes the same reading.
+            let mut placed_before = drawn_from_the_earlier_view("overview");
+            let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+            let mut without_a_view = dashboard_on("overview", &trends);
+
+            placed_before.store_view_place(view_that_cannot_be_drawn());
+            placed_before.accept(carrying_the_chart());
+            without_a_view.accept(carrying_the_chart());
+
+            assert!(placed_before.store_view.is_none());
+            assert!(placed_before.error.is_none());
+            assert_eq!(charts(&placed_before), charts(&without_a_view));
+        }
+
+        /// A View past `charted_view` whose newest power reading is no number.
+        fn view_that_cannot_be_drawn() -> Arc<View> {
+            let mut seconds = [
+                reading_at(9_999, 0),
+                reading_at(10_000, 0),
+                reading_at(10_005, 0),
+            ];
+            seconds[2].power_watts = Some(f32::NAN);
+            Arc::new(view(2, &[], &seconds))
+        }
+    }
+
+    /// What the page shows and what it drew it from.
+    #[derive(Debug, PartialEq)]
+    struct State {
+        panels: Vec<Panel>,
+        rows: usize,
+        window: Option<TimeWindow>,
+        chosen_over: Option<WallSeconds>,
+        drawn_version: Option<u64>,
+        app_chart_source: AppChartSource,
+        last_second: Option<u64>,
+        view_version: Option<u64>,
+    }
+
+    /// The states of two pages `route` drawn from an earlier View, of which one takes the
+    /// reading `reading` gives and then a newer View, and the other places the newer View and
+    /// then takes the reading.
+    fn both_orders(route: &str, reading: fn() -> Box<Snapshot>) -> (State, State) {
+        let mut taken_after = drawn_from_the_earlier_view(route);
+        let mut placed_before = drawn_from_the_earlier_view(route);
+
+        take_the_reading_and_then_the_view(&mut taken_after, reading());
+        place_the_view_and_then_take_the_reading(&mut placed_before, reading());
+
+        (state(&taken_after), state(&placed_before))
+    }
+
+    fn take_the_reading_and_then_the_view(page: &mut LiveDashboard, reading: Box<Snapshot>) {
+        page.accept(reading);
+        page.take_view(newer_charted_view());
+        assert!(page.error.is_none());
+    }
+
+    fn place_the_view_and_then_take_the_reading(page: &mut LiveDashboard, reading: Box<Snapshot>) {
+        page.store_view_place(newer_charted_view());
+        page.accept(reading);
+        assert!(page.error.is_none());
+    }
+
+    fn state(page: &LiveDashboard) -> State {
+        State {
+            panels: charts(page),
+            rows: page.rows.len(),
+            window: page.view_window(),
+            chosen_over: page.store_panels.chosen_over,
+            drawn_version: page.store_panels.version,
+            app_chart_source: page.app_chart_source(),
+            last_second: page.store_view_last_second(),
+            view_version: page.store_view.as_ref().map(|view| view.version),
+        }
+    }
+
+    /// The charts the page shows, each as it is drawn.
+    fn charts(page: &LiveDashboard) -> Vec<Panel> {
+        page.panels
+            .iter()
+            .map(|panel| Panel::clone(panel))
+            .collect()
+    }
+
+    /// The page `route` showing the worker's readings of the two seconds before a
+    /// `charted_view`, drawn from that View.
+    fn drawn_from_the_earlier_view(route: &str) -> LiveDashboard {
+        let mut page = dashboard_on(route, &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        assert!(page.take_view(Arc::new(charted_view())));
+        page
+    }
+
+    /// The worker's reading of the newest second of a `charted_view`, read while the page said
+    /// the View draws its chart by App.
+    fn left_to_the_view() -> Box<Snapshot> {
+        let mut snapshot = carrying_the_chart();
+        snapshot.app_chart_source = AppChartSource::View;
+        snapshot
+    }
+
+    /// The worker's reading of the newest second of a `charted_view`.
+    fn carrying_the_chart() -> Box<Snapshot> {
+        readings(&[reading_at(10_000, 0), reading_at(10_005, 0)])
+    }
+
+    /// A reading the page refuses, whose context ends before its second.
+    fn refused() -> Box<Snapshot> {
+        let mut reading = carrying_the_chart();
+        reading.selection.legacy_mut().unwrap()["second"] = serde_json::json!(10_005);
+        reading.selection.legacy_mut().unwrap()["context_last_second"] = serde_json::json!(10_000);
+        reading
+    }
+
+    /// The worker's reading of a second past `newer_charted_view`, which brought its chart by
+    /// App.
+    fn past_the_view() -> Box<Snapshot> {
+        readings(&[reading_at(10_006, 0), reading_at(10_007, 0)])
+    }
+
+    /// A `charted_view` the store published one second later, as version 2.
+    fn newer_charted_view() -> Arc<View> {
+        let seconds = [
+            reading_at(9_999, 0),
+            reading_at(10_000, 0),
+            reading_at(10_005, 0),
+            reading_at(10_006, 0),
+        ];
+        let mut view = view(2, &[], &seconds);
+        view.apps_loaded = true;
+        view.apps = seconds
+            .iter()
+            .map(|second| Arc::new(apps_of(second, "Brave Browser", 750_000_000)))
+            .collect();
+        Arc::new(view)
+    }
+}
+
 mod when_the_window_reads_a_saved_recording {
     use super::*;
 
@@ -2299,6 +2551,151 @@ mod when_the_store_or_the_worker_wakes_the_page {
         close_dashboard_window(&mut window, &page);
     }
 
+    mod when_one_tick_takes_the_reading_and_the_view {
+        use super::*;
+
+        #[gpui::test]
+        fn the_page_builds_its_charts_by_app_once(cx: &mut TestAppContext) {
+            // Goal: a followed page other than Overview builds its charts by App once in a tick
+            // that takes the worker's reading and the store's View of one second, rather than
+            // from the earlier View for the reading and again from the new one. Method: hold the
+            // worker, publish a second, wake the page as the store does, let the worker read the
+            // second, wake the page as the worker does, and count the page's builds.
+            let mut followed = Followed::open(cx, "memory");
+            followed.wait_for_a_keyed_question();
+            let built = followed.builds();
+            followed.publish_with_the_worker_held();
+            followed.store_wakes();
+            followed.worker_reads();
+
+            followed.worker_wakes();
+
+            assert_eq!(followed.builds(), built + 1);
+            assert_eq!(followed.reading_second(), followed.view_second());
+        }
+    }
+
+    mod when_the_tick_looks_ahead_of_the_pages_reading {
+        use super::*;
+        use crate::live_dashboard::Presence;
+        use crate::live_dashboard::store_view::MailboxWatch;
+
+        #[gpui::test]
+        fn it_takes_the_view_the_store_left(cx: &mut TestAppContext) {
+            // Goal: a followed page shown, waking for the store's View, takes that View ahead of
+            // its reading. Method: publish a second to a followed page and look ahead of a
+            // reading of the page, changing nothing.
+            let mut followed = Followed::open(cx, "memory");
+            let published = followed.publish();
+
+            assert!(followed.takes_the_view_ahead(|_| {}));
+            assert_eq!(followed.view_publication(), Some(published));
+        }
+
+        #[gpui::test]
+        fn a_page_whose_reader_rests_takes_the_view(cx: &mut TestAppContext) {
+            // Goal: a page whose reader rests is shown, and a reading wakes its reader, so it
+            // takes the View ahead as a page shown does. Method: as in the first test, with
+            // the reader resting.
+            let mut followed = Followed::open(cx, "memory");
+            let published = followed.publish();
+
+            assert!(followed.takes_the_view_ahead(|page| page.presence = Presence::Rested));
+            assert_eq!(followed.view_publication(), Some(published));
+        }
+
+        #[gpui::test]
+        fn a_held_second_leaves_the_view_to_a_later_tick(cx: &mut TestAppContext) {
+            // Goal: a held second keeps the View its charts were drawn from, as the tick's own
+            // look leaves it. Method: as in the first test, holding the newest second first.
+            let mut followed = Followed::open(cx, "memory");
+            followed.hold_the_newest_second();
+            followed.publish();
+
+            assert!(!followed.takes_the_view_ahead(|_| {}));
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_hover_leaves_the_view_to_the_ticks_look(cx: &mut TestAppContext) {
+            // Goal: a hover, which takes the page's reading itself and may end within the tick,
+            // leaves the View to the tick's own look. Method: as in the first test, with a hover
+            // shown.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            let ahead = followed.takes_the_view_ahead(|page| page.preview = Some(preview(page)));
+
+            assert!(!ahead);
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_window_macos_hides_leaves_the_view(cx: &mut TestAppContext) {
+            // Goal: a window that hides in the tick, or is hidden, takes no View, and neither
+            // does one macOS hid from the start, which hides at its first reading. Method: as
+            // in the first test, with the window opening hidden, hiding and then hidden.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            assert!(!followed.takes_the_view_ahead(|page| page.presence = Presence::Opening));
+            assert!(!followed.takes_the_view_ahead(|page| page.presence = Presence::Hiding));
+            assert!(!followed.takes_the_view_ahead(|page| page.presence = Presence::Hidden));
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_window_shown_again_leaves_the_view_to_its_own_look(cx: &mut TestAppContext) {
+            // Goal: a window shown again takes its View as it shows, so the tick does not take
+            // it ahead. Method: as in the first test, with the window showing again.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            assert!(!followed.takes_the_view_ahead(|page| page.presence = Presence::Showing));
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_page_waiting_for_the_stores_wake_leaves_the_view(cx: &mut TestAppContext) {
+            // Goal: a page whose tick would not look in the mailbox does not look ahead either.
+            // Method: as in the first test, on a page the store has not woken.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            let ahead = followed.takes_the_view_ahead(|page| {
+                page.mailbox_watch = MailboxWatch::FromWake { woken: false };
+            });
+
+            assert!(!ahead);
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_page_of_a_chosen_second_leaves_the_view(cx: &mut TestAppContext) {
+            // Goal: a page that no longer follows the newest second, which lets go of its View
+            // within the tick, takes none ahead. Method: as in the first test, on a page whose
+            // request names a second.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            let ahead = followed.takes_the_view_ahead(|page| page.request.second = Some(10_000));
+
+            assert!(!ahead);
+            assert!(followed.store_pending());
+        }
+
+        #[gpui::test]
+        fn a_reading_of_an_earlier_request_leaves_the_view(cx: &mut TestAppContext) {
+            // Goal: a reading the page will not take draws nothing, so the View waits for the
+            // tick's own look. Method: as in the first test, with the page asking anew.
+            let mut followed = Followed::open(cx, "memory");
+            followed.publish();
+
+            assert!(!followed.takes_the_view_ahead(|page| page.generation += 1));
+            assert!(followed.store_pending());
+        }
+    }
+
     /// A page following the newest second of a real store and worker in a test window, which the
     /// test wakes by hand where the app's two wakes would, in the order each test chooses.
     struct Followed {
@@ -2380,6 +2777,11 @@ mod when_the_store_or_the_worker_wakes_the_page {
             self.page.read_with(&self.window, |page, _| page.renders)
         }
 
+        fn builds(&self) -> u64 {
+            self.page
+                .read_with(&self.window, |page, _| page.store_panels.builds)
+        }
+
         fn view_second(&self) -> Option<u64> {
             self.page.read_with(&self.window, |page, _| {
                 let second = page.store_view.as_ref()?.seconds.last()?;
@@ -2448,6 +2850,19 @@ mod when_the_store_or_the_worker_wakes_the_page {
                 page.pin_second(second, cx);
             });
             self.window.run_until_parked();
+        }
+
+        /// Looks in the store's mailbox ahead of a reading of the page's request, as a tick does,
+        /// on the page woken for the store's View and then changed by `change`, and answers
+        /// whether it took the View.
+        fn takes_the_view_ahead(&mut self, change: impl FnOnce(&mut LiveDashboard)) -> bool {
+            self.page.update(&mut self.window, |page, cx| {
+                let mut reading = readings(&[reading_at(10_000, 0)]);
+                reading.generation = page.generation;
+                page.mark_woken();
+                change(page);
+                page.tick_view_ahead(&Ok(Some(Update::Ready(reading))), cx)
+            })
         }
 
         fn timer_ticks(&mut self) {

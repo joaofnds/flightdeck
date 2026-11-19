@@ -206,6 +206,8 @@ pub(super) struct StorePanels {
     /// What the page kept of the View they were drawn from when it let go of it, or none while
     /// it holds a View.
     remnant: Option<Remnant>,
+    /// How many times the page built charts from a View, which a timed run reports.
+    builds: u64,
 }
 
 /// The newest second of a View the page let go of, which the page shows, with the charts it
@@ -215,13 +217,18 @@ struct Remnant {
     newest: MachineSecond,
 }
 
+impl StorePanels {
+    /// How many times the page built charts from a View.
+    pub(super) fn builds(&self) -> u64 {
+        self.builds
+    }
+}
+
 impl LiveDashboard {
     /// Takes `view`, the store's newest, and draws Overview's machine charts from it where the
     /// page draws them from the store. Answers whether the page changed.
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
-        take_view_report(self.store_view.as_deref(), &view);
-        self.store_view = Some(view);
-        self.store_panels.remnant = None;
+        self.store_view_place(view);
         // The hover holds the charts where they were until it ends.
         if self.store_view_hover_shown() {
             return false;
@@ -234,6 +241,14 @@ impl LiveDashboard {
         self.refresh_chart_inspector();
         self.rebuild();
         true
+    }
+
+    /// Puts `view`, the store's newest, in place of the View the page holds, drawing nothing, so
+    /// the page's next draw draws from it.
+    pub(super) fn store_view_place(&mut self, view: Arc<View>) {
+        take_view_report(self.store_view.as_deref(), &view);
+        self.store_view = Some(view);
+        self.store_panels.remnant = None;
     }
 
     /// Puts Overview's machine charts drawn from the store's View in place of the page's own,
@@ -269,7 +284,7 @@ impl LiveDashboard {
             };
             let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
             match self.draw_store_view_panels(&view, older, &cohorts, chosen_over) {
-                Ok(panels) => self.store_panels = panels,
+                Ok(panels) => self.store_view_built(panels),
                 Err(error) => {
                     self.draw_store_view_failed(error);
                     return false;
@@ -334,7 +349,7 @@ impl LiveDashboard {
             for panel in &mut panels.apps {
                 super::zoom_panel(panel, window);
             }
-            self.store_panels = panels;
+            self.store_view_built(panels);
         }
         let route = self.request.route.clone();
         draw_store_view_splice_apps(&route, &mut self.panels, &self.store_panels.apps);
@@ -437,6 +452,14 @@ impl LiveDashboard {
         let mut panels = std::mem::take(&mut self.store_panels);
         panels.remnant = None;
         panels
+    }
+
+    /// Puts `panels`, built from the View the page holds, in place of the charts it drew before.
+    fn store_view_built(&mut self, panels: StorePanels) {
+        // Charts just built carry no count of their own, which this would drop.
+        assert_eq!(panels.builds, 0);
+        let builds = self.store_panels.builds + 1;
+        self.store_panels = StorePanels { builds, ..panels };
     }
 
     /// Lets go of the View the page could not draw, so the page shows the worker's readings

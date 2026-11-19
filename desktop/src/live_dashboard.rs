@@ -660,7 +660,9 @@ impl LiveDashboard {
             cx.notify();
         }
         self.native_tick(cx);
-        match self.worker.take() {
+        let update = self.worker.take();
+        let ahead = self.tick_view_ahead(&update, cx);
+        match update {
             Ok(Some(update)) => {
                 if self.take_update(update) {
                     cx.notify();
@@ -683,11 +685,19 @@ impl LiveDashboard {
         self.tick_presence(cx);
         // A hover's read would wake the resting reader of a hidden window.
         if self.presence == Presence::Hidden {
+            // The View is taken ahead only on a page shown, which no tick hides.
+            assert!(!ahead);
             self.store_pending = false;
         } else {
             self.preview_tick(cx);
             self.hold_tick();
-            self.tick_store_view(cx);
+            if ahead {
+                // The reading drew the page from the View taken ahead of it, which this look
+                // would have taken, since no tick holds a second.
+                assert!(self.hold.is_none());
+            } else {
+                self.tick_store_view(cx);
+            }
             self.tick_rest();
             self.tick_store_pending(cx);
         }
@@ -715,17 +725,74 @@ impl LiveDashboard {
         if self.hold.is_some() {
             return;
         }
-        if !self.mailbox_watch.looks() {
-            return;
-        }
 
-        let Some(view) = store_view::take_store_view(cx) else {
+        let Some(view) = self.tick_store_view_take(cx) else {
             return;
         };
-        self.mailbox_watch = self.mailbox_watch.after_view();
         if self.take_view(view) {
             cx.notify();
         }
+    }
+
+    /// Takes the View the store left in its mailbox, but none before a wake on a page waiting
+    /// for one. The page then waits for the store's next wake.
+    fn tick_store_view_take(
+        &mut self,
+        cx: &Context<Self>,
+    ) -> Option<std::sync::Arc<viewer::store::View>> {
+        if !self.mailbox_watch.looks() {
+            return None;
+        }
+
+        let view = store_view::take_store_view(cx)?;
+        self.mailbox_watch = self.mailbox_watch.after_view();
+        Some(view)
+    }
+
+    /// Takes the store's newest View ahead of `update`, the worker's reading of the page, in a
+    /// tick that would take both, so the page draws the reading's charts once, from that View,
+    /// rather than from the View it held and then again from the new one. It takes one only
+    /// where nothing the tick does before `tick_store_view` depends on which View the page
+    /// holds, so the page ends the tick as it would taking the View after the reading, but for
+    /// a View it cannot draw, which then leaves the reading's charts whole rather than with the
+    /// charts of the View before spliced in. A reading the page refuses draws nothing, and
+    /// neither does the View, taken before it or after. Answers whether it took one.
+    fn tick_view_ahead(
+        &mut self,
+        update: &Result<Option<Update>, String>,
+        cx: &Context<Self>,
+    ) -> bool {
+        let Ok(Some(Update::Ready(snapshot))) = update else {
+            return false;
+        };
+        if snapshot.generation != self.generation {
+            return false;
+        }
+        // A hover takes the page's reading itself.
+        if self.preview.is_some() {
+            return false;
+        }
+        // A window that hides or shows again in this tick lets go of its View or takes one
+        // itself.
+        if !matches!(self.presence, Presence::Shown | Presence::Rested) {
+            return false;
+        }
+        // A page that does not follow the newest second, a held one among them, lets go of its
+        // View in this tick or keeps the one its charts were drawn from.
+        if !self.follows_live_mac() {
+            return false;
+        }
+        // Looking only where the store left a View keeps the tick to its one look in the
+        // mailbox.
+        if !store_view::store_pending(cx) {
+            return false;
+        }
+
+        let Some(view) = self.tick_store_view_take(cx) else {
+            return false;
+        };
+        self.store_view_place(view);
+        true
     }
 
     fn tick_store_pending(&mut self, cx: &Context<Self>) {
@@ -754,6 +821,7 @@ impl LiveDashboard {
                     serde_json::json!({"mode":"live", "route":self.request.route,
                     "elapsed_seconds":self.started.elapsed().as_secs_f64(),
                     "updates":self.updates,"renders":self.renders,
+                    "store_view_builds":self.store_panels.builds(),
                     "hardware_animation":self.hardware_state.animation_statistics(),
                     "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
                     "curve_builds":self.plots.curve_builds(),
