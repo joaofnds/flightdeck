@@ -6,9 +6,12 @@ use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
 use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
-use super::{Observations, OverviewPoints, overview_panels, overview_point_second};
+use super::{Observations, OverviewPoints, overview_panels, overview_point_second, view_panels};
 use crate::data::Panel;
-use crate::live_store_fixtures::{levels, reading_at, selection, trend_point, view};
+use crate::live_store_fixtures::{
+    levels, memory_rates, reading_at, selection, selection_of_json, summary_point,
+    summary_selection, trend_point, view, with_memory_rates, with_memory_reading,
+};
 
 /// `place` as a trend point's reach names a reading.
 fn reach_place(place: &crate::data::MachinePlace) -> serde_json::Value {
@@ -112,6 +115,256 @@ fn a_view_draws_the_overview_the_trend_points_of_its_seconds_draw() {
     let drawn = overview_panels(&view, levels().as_ref());
 
     assert_eq!(drawn.unwrap(), expected.unwrap());
+}
+
+/// The Memory lines whose readings the collector records nowhere, by chart and line.
+const MEMORY_UNRECORDED: [(&str, &str); 2] = [
+    ("live-swap-flow", "Paged out"),
+    ("live-memory-temperature", "Memory"),
+];
+
+/// Asserts that every line of `panels` draws a value, except the lines no reading is recorded
+/// for, which draw none.
+fn assert_memory_lines_drawn(panels: &[std::rc::Rc<Panel>]) {
+    for panel in panels {
+        for line in &panel.lines {
+            let unrecorded = MEMORY_UNRECORDED.contains(&(panel.id.as_str(), line.name.as_str()));
+            let drawn = line.values.iter().filter(|value| value.is_some()).count();
+            if unrecorded {
+                assert_eq!(drawn, 0, "{} {}", panel.id, line.name);
+            } else {
+                assert!(drawn > 0, "{} {}", panel.id, line.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_memory_charts_of_the_view_draw_as_the_readings_draw_them() {
+    // Goal: the Memory page draws the same charts from the seconds the store holds as from the
+    // trend points the viewer writes of their complete readings. Method: seconds whose complete
+    // readings hold every reading Memory draws, each with its own value, across older seconds and
+    // a break, drawn both ways, with every line but the two recorded nowhere drawing a value.
+    let read = |wall_second, segment| with_memory_reading(reading_at(wall_second, segment));
+    let earlier = [read(6_345, 0), read(7_001, 2)];
+    let older = [read(9_020, 3), read(9_030, 3)];
+    let detail = [
+        read(9_041, 3),
+        read(9_042, 3),
+        read(9_500, 4),
+        read(10_000, 4),
+    ];
+    let view = view(1, &earlier, &[older.as_slice(), &detail].concat());
+    let expected = panels(
+        "memory",
+        &selection_of_json(&summary_selection(&[earlier, older].concat(), &detail)),
+        None,
+    );
+
+    let drawn = view_panels("memory", &view, levels().as_ref());
+
+    let drawn = drawn.unwrap();
+    assert_eq!(drawn, expected.unwrap());
+    assert_eq!(drawn.len(), 6);
+    assert_memory_lines_drawn(&drawn);
+}
+
+/// The first second the Memory page of a View whose newest second is 10,000 draws in full
+/// detail.
+const MEMORY_HOUR_DETAIL_FIRST: u64 = 9_041;
+
+/// An hour of seconds that ends at 10,000, each with the complete reading the Memory page draws:
+/// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
+/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+fn memory_hour() -> Vec<MachineSecond> {
+    (6_400..=10_000)
+        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
+        .map(|wall_second| {
+            let segment = match wall_second {
+                ..7_500 => 0,
+                7_500..8_000 => 1,
+                8_000.. => 2,
+            };
+            let mut second = reading_at(wall_second, segment);
+            if wall_second >= 8_000 {
+                second.run = [5, 6];
+            }
+            let peak = matches!(wall_second, 7_013 | 9_040);
+            let memory = second.memory.as_mut().unwrap();
+            // Every reading moves over each stretch, so the reach of each names it.
+            memory.total_bytes += wall_second * 4_096;
+            memory.swap_total_bytes += wall_second * 8_192;
+            if peak {
+                memory.app_bytes = memory.app_bytes.map(|bytes| bytes * 4);
+                memory.wired_bytes *= 4;
+                memory.compressed_bytes *= 4;
+                memory.swap_used_bytes *= 4;
+                memory.total_bytes *= 2;
+                memory.swap_total_bytes *= 2;
+            }
+            let mut rates = memory_rates(&second);
+            if peak {
+                rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
+            }
+            // A gap and a restart each leave the first second after them with no rates.
+            if matches!(wall_second, 7_600 | 8_000) {
+                second.elapsed_ns = None;
+                rates = [None; 5];
+            }
+            with_memory_rates(second, rates)
+        })
+        .collect()
+}
+
+/// `seconds` by the stretch each lies in, oldest first.
+fn memory_hour_stretches(
+    seconds: &[MachineSecond],
+) -> std::collections::BTreeMap<u64, Vec<&MachineSecond>> {
+    let mut stretches = std::collections::BTreeMap::<u64, Vec<&MachineSecond>>::new();
+    for second in seconds {
+        let stretch = second.wall_ns / 1_000_000_000 / viewer::EARLIER_STRIDE_SECONDS;
+        stretches.entry(stretch).or_default().push(second);
+    }
+    stretches
+}
+
+/// What the store reduces `seconds`, all of stretch `stretch`, to, each reading placed in its own
+/// run.
+fn memory_hour_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStretch> {
+    let mut held = AppsStretch::of_seconds(stretch, &[Arc::new(AppsSecond::default())]);
+    for second in seconds {
+        let run = RunIdentity {
+            recording: Identity([1, 1]),
+            run: Identity(second.run),
+            boot: Identity(second.boot),
+        };
+        held.machine.add(&run, second);
+    }
+
+    Arc::new(held)
+}
+
+/// The reach the older tail writes for `seconds`, the readings of one stretch.
+fn memory_hour_reach(seconds: &[&MachineSecond]) -> serde_json::Value {
+    let readings: Vec<_> = seconds
+        .iter()
+        .map(|second| {
+            let place = viewer::store::MachinePlace {
+                boot: second.boot,
+                run: second.run,
+                publication: second.publication,
+                wall_ns: second.wall_ns,
+            };
+            (summary_point(second), place)
+        })
+        .collect();
+
+    viewer::reach_of_readings(&readings)
+}
+
+#[test]
+fn the_memory_charts_of_the_view_draw_an_hour_as_the_readings_draw_it() {
+    // Goal: over the loaded hour the Memory page draws the same charts, peaks included, from the
+    // seconds and stretches the store holds as from the trend points and reach the viewer writes
+    // of the same readings. Method: an hour with a peak in an older stretch, a gap, a collector
+    // restart and a peak at the join, drawn both ways, the tail written as the session writes it:
+    // the first reading of each stretch before the join with the reach of the whole stretch, and
+    // the reach of the join's stretch on its last point.
+    let seconds = memory_hour();
+    let stretches = memory_hour_stretches(&seconds);
+    let join = MEMORY_HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
+    let (earlier, live) = seconds.split_at(
+        seconds
+            .iter()
+            .position(|second| second.wall_ns / 1_000_000_000 >= 9_000)
+            .unwrap(),
+    );
+    let mut view = view(1, earlier, live);
+    view.stretches = stretches
+        .range(..=join)
+        .map(|(stretch, held)| memory_hour_stretch(*stretch, held))
+        .collect();
+    let mut tail: Vec<serde_json::Value> = stretches
+        .range(..join)
+        .map(|(_, held)| {
+            let mut point = summary_point(held[0]);
+            point["reach"] = memory_hour_reach(held);
+            point
+        })
+        .collect();
+    tail.last_mut().unwrap()["reach_after"] = memory_hour_reach(&stretches[&join]);
+    let detail: Vec<MachineSecond> = seconds
+        .iter()
+        .filter(|second| second.wall_ns / 1_000_000_000 >= MEMORY_HOUR_DETAIL_FIRST)
+        .cloned()
+        .collect();
+    let mut selected = summary_selection(&[], &detail);
+    selected["earlier_trends"] = serde_json::json!(tail);
+    let expected = panels("memory", &selection_of_json(&selected), None);
+
+    let drawn = view_panels("memory", &view, levels().as_ref());
+
+    let drawn = drawn.unwrap();
+    assert_eq!(drawn, expected.unwrap());
+    assert_memory_lines_drawn(&drawn);
+    for (id, line) in [("live-swap", 0), ("live-swap-flow", 0), ("live-paging", 0)] {
+        let extremes = panel_named(&drawn, id).lines[line]
+            .extremes
+            .clone()
+            .unwrap();
+        let peaks: Vec<u64> = extremes
+            .iter()
+            .flatten()
+            .map(|reach| reach.peak.second())
+            .filter(|second| matches!(second, 7_013 | 9_040))
+            .collect();
+        assert_eq!(peaks, [7_013, 9_040], "{id}");
+        assert_eq!(extremes[tail.len()].unwrap().peak.second(), 9_040, "{id}");
+    }
+}
+
+#[test]
+fn at_a_refused_second_the_memory_charts_draw_what_the_second_holds() {
+    // Goal: where the store refused a second's complete reading, the Memory page draws the
+    // readings the second holds itself, as the Overview does, and leaves the readings only a
+    // complete reading holds missing. Method: a refused second among seconds with complete
+    // readings, and the value each Memory line draws there.
+    let read = |wall_second| with_memory_reading(reading_at(wall_second, 3));
+    let mut refused = reading_at(9_999, 3);
+    refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
+    let view = view(1, &[], &[read(9_998), refused, read(10_000)]);
+
+    let drawn = view_panels("memory", &view, levels().as_ref()).unwrap();
+
+    let at = |id: &str, line: usize| {
+        let line = &panel_named(&drawn, id).lines[line];
+        (line.name.clone(), line.values[1])
+    };
+    let held = [
+        at("live-memory", 0),
+        at("live-memory", 1),
+        at("live-memory", 2),
+        at("live-memory", 3),
+        at("live-swap", 0),
+        at("live-swap", 1),
+    ];
+    let missing = [
+        at("live-swap-flow", 0),
+        at("live-swap-flow", 2),
+        at("live-paging", 0),
+        at("live-paging", 1),
+        at("live-paging", 2),
+    ];
+    for (name, value) in held {
+        assert!(value.is_some(), "{name}");
+    }
+    for (name, value) in missing {
+        assert_eq!(value, None, "{name}");
+    }
+    let pressure = &panel_named(&drawn, "live-memory-pressure").lines[0];
+    let window = panel_named(&drawn, "live-memory-pressure").window.unwrap();
+    let cell = usize::try_from(9_999 - window.first).unwrap();
+    assert_eq!(pressure.values[cell], Some(0.0));
 }
 
 mod when_seconds_are_older_than_the_full_detail_ones {

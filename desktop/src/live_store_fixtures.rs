@@ -4,8 +4,10 @@
 use std::sync::Arc;
 
 use collector::machine::Pressure;
+use collector::recording::identity_text;
+use collector::ring::Identity;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, MachineSecond, MemorySecond, Traffic, View};
+use viewer::store::{AppsSecond, MachineSecond, MemoryRate, MemorySecond, Traffic, View};
 
 use crate::live_inventory::{PerformanceLevel, performance_levels};
 
@@ -90,13 +92,31 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
 /// The selection that follows the newest of `trends`, its full-detail trend points, with
 /// `earlier` as its older tail.
 pub fn selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
+    selection_of_points(earlier, trends, trend_point)
+}
+
+/// The selection of `selection` whose trend points are what the complete reading of each second
+/// summarizes, as the viewer writes the point of a second it holds such a reading for.
+pub fn summary_selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
+    selection_of_points(earlier, trends, summary_point)
+}
+
+/// The selection of `selection` whose trend point of each second `point` writes.
+fn selection_of_points(
+    earlier: &[MachineSecond],
+    trends: &[MachineSecond],
+    point: impl Fn(&MachineSecond) -> Value,
+) -> Value {
     let newest = trends.last().unwrap();
-    let earlier: Vec<Value> = earlier.iter().map(trend_point).collect();
-    let trends: Vec<Value> = trends.iter().map(trend_point).collect();
+    let earlier: Vec<Value> = earlier.iter().map(&point).collect();
+    let trends: Vec<Value> = trends.iter().map(&point).collect();
     let last = newest.wall_ns / NANOSECONDS_PER_SECOND;
+    // The newest point names the run it was read in, which the selection follows.
+    let selected = trends.last().unwrap();
 
     json!({"second": last, "context_last_second": last,
-        "selected": {"run": RUN, "boot": BOOT, "publication": newest.publication},
+        "selected": {"run": selected["run"], "boot": selected["boot"],
+            "publication": newest.publication},
         "trends": trends, "earlier_trends": earlier, "earlier_stride_seconds": 10})
 }
 
@@ -104,6 +124,47 @@ pub fn selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
 /// selection takes as it enters a snapshot.
 pub fn selection_of_json(value: &Value) -> viewer::Selection {
     viewer::Selection::from_json(value.clone())
+}
+
+/// `second` with a complete reading of the memory it holds and of memory's rates, as the store
+/// holds a second it read. Each rate differs from the other rates and from the rates of every
+/// other second.
+pub fn with_memory_reading(second: MachineSecond) -> MachineSecond {
+    let rates = memory_rates(&second);
+    with_memory_rates(second, rates)
+}
+
+/// The rates `with_memory_reading` gives `second`, in the order of `MemoryRate::ALL`.
+pub fn memory_rates(second: &MachineSecond) -> [Option<f64>; MemoryRate::ALL.len()] {
+    let wall_second = f64::from(u32::try_from(second.wall_ns / NANOSECONDS_PER_SECOND).unwrap());
+
+    [
+        Some(wall_second + 0.25),
+        Some(wall_second * 2.0 + 0.5),
+        Some(wall_second * 3.0 + 0.75),
+        Some(wall_second * 4_096.0),
+        Some(wall_second * 8_192.0),
+    ]
+}
+
+/// `second` with a complete reading of the memory it holds and of memory's rates `rates`.
+pub fn with_memory_rates(
+    mut second: MachineSecond,
+    rates: [Option<f64>; MemoryRate::ALL.len()],
+) -> MachineSecond {
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_memory(&second, rates, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
+/// The trend point the viewer writes for `second` from its complete reading.
+pub fn summary_point(second: &MachineSecond) -> Value {
+    let identity = |identity| identity_text(Identity(identity)).to_string();
+    let mut point = second.complete().unwrap().summary(second);
+    point["run"] = json!(identity(second.run));
+    point["boot"] = json!(identity(second.boot));
+    point
 }
 
 /// The trend point the viewer writes for `second`.

@@ -1,17 +1,18 @@
-//! The Overview's machine charts drawn from the seconds the store holds, which the main thread
-//! reads as values rather than as trend points.
+//! A route's machine charts drawn from the seconds the store holds, which the main thread reads
+//! as values rather than as trend points.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, Reduction, Second, View,
+    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, Reduction, Second,
+    View,
 };
 
 use super::{
     Coordinates, Domain, FAN_MEAN_KEY, LineReach, NANOSECONDS_PER_SECOND, OBSERVATIONS_MAX,
-    OVERVIEW_PANELS_MAX, Observations, Panel, PerformanceLevel, Reading,
+    Observations, Panel, PerformanceLevel, Reading, Specification,
 };
 
 #[cfg(test)]
@@ -24,14 +25,25 @@ pub fn overview_panels(
     view: &View,
     levels: Option<&[PerformanceLevel; 2]>,
 ) -> Result<Vec<Rc<Panel>>, String> {
+    view_panels("overview", view, levels)
+}
+
+/// The machine charts of `route` of `view`, following its newest second, which the charts
+/// select, over the loaded hour as the Overview's span it. `levels` names the performance levels
+/// the Overview's CPU chart draws.
+pub fn view_panels(
+    route: &str,
+    view: &View,
+    levels: Option<&[PerformanceLevel; 2]>,
+) -> Result<Vec<Rc<Panel>>, String> {
+    let specifications = view_panels_specifications(route, levels)?;
     let Some(newest) = view.seconds.last() else {
-        return super::empty_panels("overview");
+        return super::empty_panels(route);
     };
 
     let domain = overview_panels_domain(newest)?;
     let seconds = overview_panels_points(view, &domain);
     let coordinates = overview_panels_coordinates(&seconds, &domain)?;
-    let specifications = super::overview(levels);
     let stretches = overview_panels_stretches(view, &seconds, &domain);
     let points = OverviewPoints {
         seconds: &seconds,
@@ -43,8 +55,20 @@ pub fn overview_panels(
         let panel = super::panels_panel(specification, &domain, &points, &coordinates)?;
         result.push(Rc::new(panel));
     }
-    assert!(result.len() <= OVERVIEW_PANELS_MAX);
+    assert!(result.len() <= super::panels_limit(route, false));
     Ok(result)
+}
+
+/// The charts of `route` the store draws, which are the charts the trend points draw of it.
+fn view_panels_specifications(
+    route: &str,
+    levels: Option<&[PerformanceLevel; 2]>,
+) -> Result<Vec<Specification>, String> {
+    match route {
+        "overview" => Ok(super::overview(levels)),
+        "memory" => Ok(super::memory_specifications()),
+        _ => Err(format!("The store draws no charts of {route}")),
+    }
 }
 
 /// The wall second of each point the Overview's machine charts of `view` draw, in the order of
@@ -394,6 +418,12 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         }
         (None, "memory_total_bytes", None) => stretch_reach_measured(&stretch.memory_total_bytes),
         (None, "memory_used_bytes", None) => stretch_reach_measured(&stretch.memory_used_bytes),
+        (None, "swap_used_bytes", None) => stretch_reach_measured(&stretch.swap_used_bytes),
+        (None, "swap_total_bytes", None) => stretch_reach_measured(&stretch.swap_total_bytes),
+        (None, key, None) if let Some(rate) = memory_rate(key) => {
+            stretch_reach_measured(stretch.memory_rate(rate))
+        }
+        (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => stretch_reach_measured(&stretch.network_received_bps),
         (None, "network_tx_bps", None) => stretch_reach_measured(&stretch.network_sent_bps),
         (Some("storage"), "read_bps", None) => stretch_reach_measured(&stretch.disk_read_bps),
@@ -447,6 +477,11 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         }
         (None, "memory_total_bytes", None) => bytes(memory.map(|memory| memory.total_bytes)),
         (None, "pressure", None) => memory.map(|memory| f32::from(pressure_level(memory.pressure))),
+        (None, "swap_used_bytes", None) => bytes(memory.map(|memory| memory.swap_used_bytes)),
+        (None, "swap_total_bytes", None) => bytes(memory.map(|memory| memory.swap_total_bytes)),
+        (None, key, None) if let Some(rate) = memory_rate(key) => narrow(second.memory_rate(rate)),
+        // The collector records neither, so their charts draw no reading wherever they are drawn.
+        (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => narrow(network.map(|traffic| traffic.received_bps)),
         (None, "network_tx_bps", None) => narrow(network.map(|traffic| traffic.sent_bps)),
         (Some("storage"), "read_bps", None) => narrow(second.disk_read_bps),
@@ -462,6 +497,12 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
 }
 
 pub(crate) use viewer::store::pressure_level;
+
+/// The rate of memory's counters a trend point names `key`, which only a second's complete
+/// reading holds.
+fn memory_rate(key: &str) -> Option<MemoryRate> {
+    MemoryRate::ALL.into_iter().find(|rate| rate.key() == key)
+}
 
 /// The nearest `f32` to `value`.
 fn narrow(value: Option<f64>) -> Option<f32> {
