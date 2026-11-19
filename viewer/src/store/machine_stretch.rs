@@ -7,7 +7,7 @@ use model::rates::number;
 pub use model::summary::MachinePlace;
 use model::summary::{CategorySummary, GaugeSummary, RateSummary};
 
-use super::{MachineSecond, STRETCHES_MAX};
+use super::{MachineSecond, MemoryRate, STRETCHES_MAX};
 use crate::EARLIER_STRIDE_SECONDS;
 
 /// The changes of category a stretch keeps. One run's stretch holds a reading a second.
@@ -16,9 +16,9 @@ const CATEGORY_CHANGES_KEPT: usize = 10;
 const _: () = {
     // Ten readings change at most nine times, which `CATEGORY_CHANGES_KEPT` holds.
     assert!(EARLIER_STRIDE_SECONDS == 10);
-    // The Mac's readings cost a store about 2 MiB at the most stretches it holds.
-    assert!(size_of::<MachineStretch>() <= 6 * 1024);
-    assert!(STRETCHES_MAX * size_of::<MachineStretch>() <= 2_300 * 1024);
+    // The Mac's readings cost a store about 2.4 MiB at the most stretches it holds.
+    assert!(size_of::<MachineStretch>() <= 7 * 1024);
+    assert!(STRETCHES_MAX * size_of::<MachineStretch>() <= 2_500 * 1024);
 };
 
 pub type Gauge = GaugeSummary<MachinePlace>;
@@ -41,6 +41,10 @@ pub struct MachineStretch {
     pub memory_total_bytes: Gauge,
     pub memory_used_bytes: Gauge,
     pub memory_wired_bytes: Gauge,
+    pub swap_used_bytes: Gauge,
+    pub swap_total_bytes: Gauge,
+    /// The rates of `MemoryRate::ALL`, in its order.
+    pub memory_rates: [Rate; MemoryRate::ALL.len()],
     pub power_watts: Gauge,
     pub soc_celsius: Gauge,
     pub fan_mean_rpm: Gauge,
@@ -69,6 +73,12 @@ impl MachineStretch {
             .push(second.fan_mean_rpm.map(f64::from), follows, place);
         self.thermal_pressure
             .push(second.thermal_pressure, follows, place);
+    }
+
+    /// The stretch's `rate`.
+    #[must_use]
+    pub fn memory_rate(&self, rate: MemoryRate) -> &Rate {
+        &self.memory_rates[rate.index()]
     }
 
     fn add_rates(&mut self, second: &MachineSecond, follows: bool, place: &MachinePlace) {
@@ -101,6 +111,9 @@ impl MachineStretch {
             follows,
             place,
         );
+        for (series, memory_rate) in self.memory_rates.iter_mut().zip(MemoryRate::ALL) {
+            series.push(rate(second.memory_rate(memory_rate)), follows, place);
+        }
     }
 
     fn add_memory(
@@ -134,6 +147,16 @@ impl MachineStretch {
         );
         self.memory_used_bytes.push(
             bytes(memory.and_then(MachineStretch::add_memory_used)),
+            follows,
+            place,
+        );
+        self.swap_used_bytes.push(
+            bytes(memory.map(|memory| memory.swap_used_bytes)),
+            follows,
+            place,
+        );
+        self.swap_total_bytes.push(
+            bytes(memory.map(|memory| memory.swap_total_bytes)),
             follows,
             place,
         );

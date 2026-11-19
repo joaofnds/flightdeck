@@ -4,7 +4,7 @@ use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::system::{FactText, PerformanceLevel};
 
-use super::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
+use super::{BatterySecond, MachineSecond, MemoryRate, MemorySecond, Reading, Traffic, readings};
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
 };
@@ -483,6 +483,42 @@ fn app_memory_is_anonymous_memory_that_macos_may_not_purge() {
         swap_total_bytes: 0,
     };
     assert_eq!(second.memory, Some(expected));
+}
+
+#[test]
+fn a_second_reads_each_memory_rate_its_complete_reading_holds() {
+    // Goal: the Memory page reads a second's paging and swap rates from the second's complete
+    // reading, as its summary writes them. Method: each counter, page-outs too, grows by its own
+    // amount over one second, and each rate the second reads is set beside the summary's.
+    let before = Machine::at(1).cpus(&[(0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(25, 75)]);
+    let memory = &mut current.memory.memory;
+    memory.pageins = 3;
+    memory.pageouts = 17;
+    memory.compressions = 5;
+    memory.decompressions = 7;
+    memory.swapped_in_bytes = 11;
+    memory.swapped_out_bytes = 13;
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    let summary = second.complete().unwrap().summary(&second);
+    let read = MemoryRate::ALL.map(|rate| (rate.key(), second.memory_rate(rate)));
+    let written = MemoryRate::ALL.map(|rate| (rate.key(), summary[rate.key()].as_f64()));
+    assert_eq!(read, written);
+    assert_eq!(
+        read,
+        [
+            ("memory_pageins_per_second", Some(3.0)),
+            ("memory_compressions_per_second", Some(5.0)),
+            ("memory_decompressions_per_second", Some(7.0)),
+            ("swap_in_bytes_per_second", Some(11.0)),
+            ("swap_out_bytes_per_second", Some(13.0)),
+        ]
+    );
 }
 
 #[test]

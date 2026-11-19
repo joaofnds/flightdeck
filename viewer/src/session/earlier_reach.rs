@@ -81,6 +81,19 @@ fn number_reach_identity(text: &Value) -> Result<[u64; 2]> {
     Ok(parse_identity(text)?.0)
 }
 
+/// The reach the older tail writes for a stretch of `readings`, each a trend point with the
+/// reading it was taken at, so a test outside the viewer can write the points the tail writes.
+#[cfg(any(test, feature = "fixtures"))]
+#[must_use]
+pub fn reach_of_readings(readings: &[(Value, MachinePlace)]) -> Value {
+    let mut reach = Reach::default();
+    for (point, place) in readings {
+        reach.add(point, place);
+    }
+
+    reach.json()
+}
+
 /// The readings of each number, by its path through the point.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Reach {

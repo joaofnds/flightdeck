@@ -917,6 +917,21 @@ mod tests {
         }
 
         fn publish_following_wall(&mut self, tick: u32, wall_second: u64) {
+            let memory = collector::machine::Memory {
+                total_bytes: 48 * 1024 * 1024 * 1024,
+                active_bytes: u64::from(tick) * 1024 * 1024,
+                ..collector::machine::Memory::default()
+            };
+            self.publish_following_memory(tick, wall_second, &memory);
+        }
+
+        /// Publishes `publish_following_wall`'s reading of `tick` with `memory` for its memory.
+        fn publish_following_memory(
+            &mut self,
+            tick: u32,
+            wall_second: u64,
+            memory: &collector::machine::Memory,
+        ) {
             assert!((1..=901).contains(&tick));
 
             let cpus = [collector::machine::CPUTicks {
@@ -925,11 +940,6 @@ mod tests {
                 nice: tick * 10,
                 idle: tick * 50,
             }; 18];
-            let memory = collector::machine::Memory {
-                total_bytes: 48 * 1024 * 1024 * 1024,
-                active_bytes: u64::from(tick) * 1024 * 1024,
-                ..collector::machine::Memory::default()
-            };
             let fan_rpm: Vec<f32> = (0..self.following_fans)
                 .map(|channel| match channel {
                     0 => f32::from(u16::try_from(tick).unwrap()),
@@ -941,7 +951,7 @@ mod tests {
                 &Readings {
                     run_tick: u64::from(tick),
                     cpus: &cpus,
-                    memory: &memory,
+                    memory,
                     interfaces: &[],
                     ioreport: None,
                     smc: Some(collector::ring::SmcReadings {

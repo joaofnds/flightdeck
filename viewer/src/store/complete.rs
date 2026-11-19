@@ -216,6 +216,12 @@ impl CompleteMachine {
         &self.point
     }
 
+    /// The reading's `rate` over the interval before it, `None` where the readings give none.
+    #[must_use]
+    pub fn memory_rate(&self, rate: super::MemoryRate) -> Option<f64> {
+        self.point.rates[rate.point_index()]
+    }
+
     /// The reservation charges one physical owner even when Views and sampled tails share it.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -329,15 +335,64 @@ impl CompleteMachine {
         cpu_percent: f64,
         budget: &Arc<ByteBudget>,
     ) -> Arc<Self> {
+        let point = Point {
+            cpu_percent: Some(cpu_percent),
+            ..Point::default()
+        };
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// A complete reading of `second` whose readings are the memory `second` holds, with no
+    /// purgeable memory, and memory's rates `rates` in the order of `MemoryRate::ALL`, charged to
+    /// `budget`, so a test outside the viewer can give a second the complete reading the Memory
+    /// page draws.
+    #[must_use]
+    pub fn of_memory(
+        second: &MachineSecond,
+        rates: [Option<f64>; super::MemoryRate::ALL.len()],
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let mut point = Point::default();
+        if let Some(memory) = second.memory.as_ref() {
+            let held = [
+                ("memory_total_bytes", Some(memory.total_bytes)),
+                ("memory_wired_bytes", Some(memory.wired_bytes)),
+                ("memory_compressed_bytes", Some(memory.compressed_bytes)),
+                ("memory_anonymous_bytes", memory.app_bytes),
+                ("memory_purgeable_bytes", Some(0)),
+                ("swap_total_bytes", Some(memory.swap_total_bytes)),
+                ("swap_used_bytes", Some(memory.swap_used_bytes)),
+                (
+                    "pressure",
+                    Some(u64::from(crate::store::pressure_level(memory.pressure))),
+                ),
+            ];
+            for (name, amount) in held {
+                let Some(index) = crate::metrics::point::MEMORY_FIELDS
+                    .iter()
+                    .position(|(field, _column)| *field == name)
+                else {
+                    unreachable!("a trend point holds memory's {name}");
+                };
+                point.memory[index] = amount;
+            }
+        }
+        for (rate, value) in super::MemoryRate::ALL.into_iter().zip(rates) {
+            point.rates[rate.point_index()] = value;
+        }
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// The complete reading of `second` whose readings are `point`, charged to `budget`.
+    fn of_point(second: &MachineSecond, point: Point, budget: &Arc<ByteBudget>) -> Arc<Self> {
         let Some(reservation) = budget.reserve(size_of::<Self>() + ARC_BYTES) else {
             panic!("the budget has no room for a complete reading");
         };
 
         Arc::new(Self {
-            point: Point {
-                cpu_percent: Some(cpu_percent),
-                ..Point::default()
-            },
+            point,
             cpus: Vec::new(),
             interval: CpuIntervalState::Refused("fixture"),
             observation: MachineIdentity {

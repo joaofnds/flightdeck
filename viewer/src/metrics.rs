@@ -11,7 +11,7 @@ use crate::session::{OBSERVATIONS_MAX, Observation, Reader};
 use crate::store::{Reading, reading_at};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
-const MEMORY_RATES: [(&str, &str); 6] = [
+pub(crate) const MEMORY_RATES: [(&str, &str); 6] = [
     ("memory_pageins_per_second", "pageins"),
     ("memory_pageouts_per_second", "pageouts"),
     ("memory_compressions_per_second", "compressions"),

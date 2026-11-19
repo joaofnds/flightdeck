@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::{MEMORY_RATES, TRAFFIC_RATES, battery, storage, system};
 use crate::session::Observation;
 
-pub(super) const MEMORY_FIELDS: [(&str, &str); 13] = [
+pub(crate) const MEMORY_FIELDS: [(&str, &str); 13] = [
     ("memory_total_bytes", "total_bytes"),
     ("memory_free_bytes", "free_bytes"),
     ("memory_active_bytes", "active_bytes"),

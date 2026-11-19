@@ -1087,6 +1087,91 @@ fn a_stretch_reaches_the_same_readings_live_and_saved() {
 }
 
 #[test]
+fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
+    // Goal: an older stretch keeps the lowest and highest of each reading the Memory page draws,
+    // with the reading that read the highest, as the session's older tail keeps them for the same
+    // seconds, so a peak of the Memory charts drawn from a store is the peak the tail draws.
+    // Method: each series rises at its own pace and reads its highest at its own second of the
+    // stretch of 10,030, and the stretch's summaries are set beside the reach of the tail's point.
+    let mut fixture = RingFixture::new_following();
+    for tick in 1..=70 {
+        let memory = earlier_memory_peaks(tick);
+        fixture.publish_following_memory(tick, EARLIER_BASE + u64::from(tick), &memory);
+    }
+    fixture.seal_held();
+    let stretch = earlier_store_stretch(&fixture, 70, 3);
+    let tail = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(earlier_context_last(EARLIER_BASE + 70))
+        .unwrap();
+    let point = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| {
+            point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND / EARLIER_STRIDE_SECONDS
+                == (EARLIER_BASE + 30) / EARLIER_STRIDE_SECONDS
+        })
+        .unwrap();
+
+    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
+        let measured = reduction.measured.unwrap();
+        (
+            measured.minimum.value,
+            measured.maximum.value,
+            measured.maximum.place,
+        )
+    };
+    let rates = crate::store::MemoryRate::ALL;
+    let held: Vec<_> = [
+        ("swap_used_bytes", kept(&stretch.swap_used_bytes)),
+        ("swap_total_bytes", kept(&stretch.swap_total_bytes)),
+    ]
+    .into_iter()
+    .chain(rates.map(|rate| (rate.key(), kept(stretch.memory_rate(rate)))))
+    .collect();
+    let reached: Vec<_> = held
+        .iter()
+        .map(|(key, _)| {
+            let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
+            (*key, (reach.low, reach.high, reach.peak))
+        })
+        .collect();
+
+    assert_eq!(held, reached);
+    let peaks: Vec<u64> = held.iter().map(|(_, kept)| kept.2.second()).collect();
+    assert_eq!(peaks, (EARLIER_BASE + 31..=EARLIER_BASE + 37).collect::<Vec<_>>());
+}
+
+/// The memory of tick `tick` of a run whose swap and paging each rise at their own pace and read
+/// their highest at their own tick of 31 to 37.
+fn earlier_memory_peaks(tick: u32) -> collector::machine::Memory {
+    const MIB: u64 = 1024 * 1024;
+    let tick = u64::from(tick);
+    let gauge = |base: u64, peak: u64| {
+        let rise = if tick == peak { 1024 * MIB } else { 0 };
+        base + tick * MIB + rise
+    };
+    let counter = |pace: u64, peak: u64| {
+        let rise = if tick >= peak { 49 * pace } else { 0 };
+        pace * tick + rise
+    };
+
+    collector::machine::Memory {
+        total_bytes: 48 * 1024 * MIB,
+        swap_used_bytes: gauge(0, 31),
+        swap_total_bytes: gauge(4096 * MIB, 32),
+        pageins: counter(3, 33),
+        pageouts: 17 * tick,
+        compressions: counter(5, 34),
+        decompressions: counter(7, 35),
+        swapped_in_bytes: counter(11 * 4096, 36),
+        swapped_out_bytes: counter(13 * 4096, 37),
+        ..collector::machine::Memory::default()
+    }
+}
+
+#[test]
 fn a_points_reach_holds_no_more_than_its_stretch_however_long_the_recording() {
     // Goal: what a point carries of its stretch is bounded by the stretch and not by how much the
     // recording holds, so a longer recording costs a chart more points and not larger ones.

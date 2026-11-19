@@ -88,6 +88,52 @@ pub struct MemorySecond {
     pub swap_total_bytes: u64,
 }
 
+/// A rate of memory's counters the complete reading of a second holds and the second does not,
+/// since only the Memory page draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryRate {
+    Pageins,
+    Compressions,
+    Decompressions,
+    SwapIn,
+    SwapOut,
+}
+
+impl MemoryRate {
+    pub const ALL: [Self; 5] = [
+        Self::Pageins,
+        Self::Compressions,
+        Self::Decompressions,
+        Self::SwapIn,
+        Self::SwapOut,
+    ];
+
+    /// The name a trend point gives the rate.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        crate::metrics::MEMORY_RATES[self.point_index()].0
+    }
+
+    /// Where `ALL` holds the rate.
+    pub(super) fn index(self) -> usize {
+        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
+            unreachable!("`ALL` holds every rate");
+        };
+        index
+    }
+
+    /// Where a complete reading holds the rate among memory's rates, which hold page-outs at 1.
+    fn point_index(self) -> usize {
+        match self {
+            Self::Pageins => 0,
+            Self::Compressions => 2,
+            Self::Decompressions => 3,
+            Self::SwapIn => 4,
+            Self::SwapOut => 5,
+        }
+    }
+}
+
 /// External traffic over a second, in bytes per second.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Traffic {
@@ -279,6 +325,14 @@ impl MachineSecond {
             }
             CompleteMachineState::Unread | CompleteMachineState::Refused(_) => None,
         }
+    }
+
+    /// The second's `rate` as its complete reading holds it, `None` where the second has no
+    /// complete reading, as an unread or refused second has none.
+    #[must_use]
+    pub fn memory_rate(&self, rate: MemoryRate) -> Option<f64> {
+        self.complete()
+            .and_then(|complete| complete.memory_rate(rate))
     }
 
     #[must_use]
