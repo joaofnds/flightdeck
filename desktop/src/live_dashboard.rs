@@ -557,7 +557,7 @@ impl LiveDashboard {
     }
 
     fn uses_live_store(&self) -> bool {
-        if self.request.route != "overview" {
+        if !store_view::store_view_draws_machine(&self.request.route) {
             return false;
         }
 
@@ -797,7 +797,7 @@ impl LiveDashboard {
 
     fn tick_store_pending(&mut self, cx: &Context<Self>) {
         self.store_pending = false;
-        if self.request.route != "overview" {
+        if !store_view::store_view_draws_machine(&self.request.route) {
             return;
         }
 
@@ -886,8 +886,8 @@ impl LiveDashboard {
         }
     }
 
-    /// Rests the reader while the page draws Overview from the store's View, which brings each
-    /// second the page shows.
+    /// Rests the reader while the page draws its machine charts and readings from the store's
+    /// View, which brings each second the page shows.
     fn tick_rest(&mut self) {
         // Each rest cancels what the resting reader does, and a hidden window's reader rests.
         if self.presence != Presence::Shown {
@@ -926,7 +926,7 @@ impl LiveDashboard {
         }
     }
 
-    /// Whether the page rested its reader while it draws Overview from the store's View.
+    /// Whether the page rested its reader while it draws from the store's View.
     pub(crate) fn reader_rested(&self) -> bool {
         self.presence == Presence::Rested
     }
@@ -1752,6 +1752,8 @@ pub(crate) use store_view::store_active;
 #[cfg(feature = "automation")]
 pub(crate) use store_view::store_activity;
 pub(crate) use store_view::store_query_handle;
+#[cfg(feature = "automation")]
+pub(crate) use store_view::store_view_draws_machine;
 #[cfg(all(test, feature = "automation"))]
 pub(crate) use store_view::uninstall_store;
 

@@ -238,7 +238,7 @@ impl LiveDashboard {
             return self.held_reading().is_some_and(|reading| reading.complete);
         }
         if self.request.second.is_none() {
-            if self.request.route == "overview" {
+            if crate::live_dashboard::store_view_draws_machine(&self.request.route) {
                 let Some(version) = self.resume_store_version() else {
                     return false;
                 };

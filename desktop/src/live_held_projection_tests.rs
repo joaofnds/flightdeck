@@ -6,10 +6,10 @@ use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
 use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
-use super::{Observations, OverviewPoints, overview_panels, overview_point_second, view_panels};
+use super::{Observations, OverviewPoints, overview_point_second, view_panels};
 use crate::data::Panel;
 use crate::live_store_fixtures::{
-    levels, memory_rates, reading_at, selection, selection_of_json, summary_point,
+    levels, memory_rates, overview_panels, reading_at, selection, selection_of_json, summary_point,
     summary_selection, trend_point, view, with_memory_rates, with_memory_reading,
 };
 

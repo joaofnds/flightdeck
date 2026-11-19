@@ -576,6 +576,60 @@ fn a_hover_on_a_resting_overview_reads_its_second_once_the_page_arrives(cx: &mut
     assert_eq!(Some(window.reader_generation()), window.hover_read());
 }
 
+#[gpui::test]
+fn a_memory_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a followed Memory page shown again draws the store's newest View and asks its reader
+    // for no page, as Overview does, since the View holds each second the page shows.
+    // Method: hide a Memory page drawn from a View, give it a newer View as it shows again, step
+    // its dashboard, then the second the page shows and the reader's mailbox.
+    let mut window = VisibilityHarness::open_resting_on(cx, "memory");
+    assert!(window.reader_rested());
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+    let generation = window.generation();
+    window.report(WindowVisibility::Visible);
+    window.take_view(&[reading_at(10_001, 0), reading_at(10_002, 0)]);
+
+    window.tick();
+
+    assert_eq!(window.shown_second(), Some(10_002));
+    assert!(window.reader_rested());
+    assert_eq!(window.generation(), generation);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
+fn a_hover_wakes_a_resting_memory_page_s_reader_and_letting_go_rests_it_again(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover of a second the View does not hold wakes the reader of a Memory page that
+    // rested it, as on Overview, and letting go of the hover rests the reader again once the
+    // page it asks for then arrives. Method: rest the reader of a Memory page drawn from a View,
+    // hover a second the View does not hold, step the dashboard, answer the page's request,
+    // step it again and step the reader's mailbox, then end the hover, step the dashboard,
+    // answer the page it asked for, step it again and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_resting_on(cx, "memory");
+    window.hover_with_pointer();
+    window.tick();
+    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
+    window.tick();
+    assert!(!window.reader_rested());
+    assert_eq!(window.reader.receive(), (Received::Taken, true));
+    assert_eq!(Some(window.reader_generation()), window.hover_read());
+
+    window.leave();
+    window.tick();
+    assert!(!window.hovering());
+    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
+
+    window.tick();
+
+    assert!(window.reader_rested());
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
 struct VisibilityHarness {
     cx: TestAppContext,
     window: WindowHandle<LiveDashboard>,
@@ -586,7 +640,12 @@ impl VisibilityHarness {
     /// Opens a live window over a reader the test steps, and lets the reader take the window's
     /// first request, as a reader that reads the page does.
     fn open(cx: &TestAppContext) -> Self {
-        let mut harness = Self::open_unobserved(cx);
+        Self::open_on(cx, "overview")
+    }
+
+    /// Opens a live window on `route` as `open` opens Overview.
+    fn open_on(cx: &TestAppContext, route: &str) -> Self {
+        let mut harness = Self::open_unobserved_on(cx, route);
         harness.observe();
 
         harness
@@ -595,13 +654,18 @@ impl VisibilityHarness {
     /// Opens a live window whose dashboard does not yet observe its visibility, and lets the
     /// reader take the window's first request.
     fn open_unobserved(cx: &TestAppContext) -> Self {
+        Self::open_unobserved_on(cx, "overview")
+    }
+
+    /// Opens a live window on `route` as `open_unobserved` opens Overview.
+    fn open_unobserved_on(cx: &TestAppContext, route: &str) -> Self {
         let cx = cx.clone();
         let mut reader = SnapshotReader::new();
         let worker = reader.hand_over();
         let window = cx
             .update(|cx| {
                 cx.open_window(WindowOptions::default(), |_, cx| {
-                    cx.new(|_| LiveDashboard::new(worker, "overview".into(), None))
+                    cx.new(|_| LiveDashboard::new(worker, route.into(), None))
                 })
             })
             .unwrap();
@@ -612,7 +676,12 @@ impl VisibilityHarness {
 
     /// Opens an Overview drawn from the store's View, which rests its reader.
     fn open_resting(cx: &TestAppContext) -> Self {
-        let mut harness = Self::open(cx);
+        Self::open_resting_on(cx, "overview")
+    }
+
+    /// Opens the page `route` drawn from the store's View, which rests its reader.
+    fn open_resting_on(cx: &TestAppContext, route: &str) -> Self {
+        let mut harness = Self::open_on(cx, route);
         harness.answer_readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
         harness.tick();
         harness.take_view(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
@@ -786,6 +855,29 @@ impl VisibilityHarness {
     /// The generation of the request the reader reads.
     fn reader_generation(&self) -> u64 {
         self.reader.command.generation
+    }
+
+    /// Ends the hover `hover_from` began, as the pointer leaving the chart does.
+    fn leave(&mut self) {
+        self.window
+            .update(&mut self.cx, |dashboard, _, cx| {
+                dashboard.clear_reading_target(&"visibility".into(), cx);
+            })
+            .unwrap();
+    }
+
+    /// The second the window's readings show.
+    fn shown_second(&self) -> Option<u64> {
+        self.window
+            .read_with(&self.cx, |dashboard, _| dashboard.shown_second())
+            .unwrap()
+    }
+
+    /// Whether the window rested its reader.
+    fn reader_rested(&self) -> bool {
+        self.window
+            .read_with(&self.cx, |dashboard, _| dashboard.reader_rested())
+            .unwrap()
     }
 
     fn tick(&mut self) {

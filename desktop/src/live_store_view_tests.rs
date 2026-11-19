@@ -12,10 +12,10 @@ use crate::data::{Line, Panel};
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_hover::{Origin, Preview, Target};
 use crate::live_overview_app_histories::OverviewAppHistories;
-use crate::live_projection::overview_panels;
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::apps_at;
+use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
     levels, levels_named, reading_at, selection_of_json, store_levels_named, summary_point,
     trend_point, view, with_memory_reading,
@@ -245,6 +245,92 @@ fn the_memory_readouts_of_the_views_newest_second_read_as_the_workers_reading_of
     let expected = memory_readouts(&view, &worker_summary_of(&newer));
     assert_ne!(memory_readouts(&view, &worker_summary_of(&first)), expected);
     assert_eq!(memory_readouts(&view, &dashboard.shown_summary()), expected);
+}
+
+#[test]
+fn a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_reading() {
+    // Goal: a Memory page whose reader rests shows the memory the View records for its newest
+    // second where the store holds no complete reading of that second, as where it refused one,
+    // since the resting reader never reads that second. Method: the worker reads memory seconds
+    // 9,999 and 10,000, the View of them rests the reader, then a View adds 10,001 with the
+    // memory of its record alone, and the memory the page's readings show.
+    let first = memory_seconds(&[9_999, 10_000]);
+    let mut dashboard = opening_on("memory");
+    let mut reading = worker_reading(&first);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    dashboard.take_view(Arc::new(view(1, &[], &first)));
+    dashboard.tick_rest();
+    assert!(dashboard.reader_rested());
+    let newest = reading_at(10_001, 0);
+    let memory = newest.memory.unwrap();
+    let seconds = [first[0].clone(), first[1].clone(), newest];
+
+    assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
+
+    let shown = dashboard.shown_summary();
+    assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_eq!(
+        summary::memory_in_use_bytes(&shown),
+        summary::memory_in_use_bytes_of(
+            memory.app_bytes.unwrap(),
+            memory.wired_bytes,
+            memory.compressed_bytes
+        )
+    );
+    assert_eq!(
+        shown["memory_total_bytes"].as_u64(),
+        Some(memory.total_bytes)
+    );
+    assert_eq!(
+        shown["swap_used_bytes"].as_u64(),
+        Some(memory.swap_used_bytes)
+    );
+    assert_eq!(
+        shown["swap_total_bytes"].as_u64(),
+        Some(memory.swap_total_bytes)
+    );
+}
+
+#[test]
+fn a_followed_memory_page_rests_its_reader_and_draws_each_newer_view() {
+    // Goal: a Memory page following the newest second rests its reader after its first reading
+    // and draws each second after it from the store's View, as Overview does. Method: the
+    // worker's first reading of Memory ends at 10,000 and the page takes a View of the same
+    // seconds, then three Views each one second newer arrive with no reading, and after each the
+    // page's machine charts are that View's and its readings show the View's newest second.
+    let first = memory_seconds(&[9_999, 10_000]);
+    let mut dashboard = opening_on("memory");
+    let mut reading = worker_reading(&first);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    let generation = dashboard.generation;
+
+    dashboard.take_view(Arc::new(view(1, &[], &first)));
+    dashboard.tick_rest();
+
+    assert!(dashboard.reader_rested());
+    for (version, newest) in [(2, 10_001), (3, 10_002), (4, 10_003)] {
+        let seconds = memory_seconds(&(9_999..=newest).collect::<Vec<_>>());
+        let view = Arc::new(view(version, &[], &seconds));
+        assert!(dashboard.take_view(Arc::clone(&view)));
+        let panels = crate::live_projection::held_projection::view_panels(
+            "memory",
+            &view,
+            levels().as_ref(),
+        )
+        .unwrap();
+        for panel in &panels {
+            assert_eq!(
+                drawn(&dashboard, &panel.id).lines,
+                panel.lines,
+                "{}",
+                panel.id
+            );
+        }
+        assert_eq!(dashboard.shown_second(), Some(newest));
+    }
+    assert_eq!(dashboard.generation, generation);
 }
 
 #[test]
@@ -2049,22 +2135,63 @@ fn a_followed_cpu_page_drawn_from_the_view_reads_no_app_history(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn a_followed_memory_page_drawn_from_the_view_reads_no_resident_history(
+fn a_followed_memory_page_reads_no_resident_history_past_its_first_reading(
     cx: &mut gpui::TestAppContext,
 ) {
-    // Goal: as on the CPU page, the Memory page's reading builds no resident history while the
-    // View draws that chart. Method: as on the CPU page.
-    let (recording, page) = followed_page_read_again(cx, "memory");
+    // Goal: the Memory page's reader builds no resident history while the View draws that
+    // chart, since the page rests its reader once it took its first reading and draws each
+    // newer second's history of resident memory from the View. Method: a Memory page over a real
+    // store and reader settles on the View, the recording publishes a third second, and the page
+    // ticks until it draws that second from the View, then the second the worker's reading
+    // selects and the history of resident memory the page reads.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "memory".into(), None)));
+    tick_until_settled(cx, &page, 2);
+    let read =
+        cx.update(|cx| page.read(cx).snapshot.as_ref().unwrap().selection["second"].as_u64());
+
+    recording.publish_resources();
+    tick_until_drawn(cx, &page, recording.last_second());
 
     cx.update(|cx| {
         let page = page.read(cx);
-        let snapshot = page.snapshot.as_ref().unwrap();
-        assert!(snapshot.resident_history.is_none());
-        assert!(snapshot.app_ranks.is_some());
+        assert!(page.reader_rested());
+        assert_eq!(
+            page.snapshot.as_ref().unwrap().selection["second"].as_u64(),
+            read
+        );
+        assert!(page.store_panels.resident.is_some());
         assert!(page.resident_history().is_some());
     });
     drop(recording);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+/// Ticks `page` until it draws `second` from the store's View.
+fn tick_until_drawn(
+    cx: &mut gpui::TestAppContext,
+    page: &gpui::Entity<LiveDashboard>,
+    second: u64,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        page.update(cx, LiveDashboard::tick);
+        let drawn = cx.update(|cx| page.read(cx).shown_second());
+        if drawn == Some(second) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page never drew {second}: {drawn:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[gpui::test]
@@ -2542,7 +2669,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // Method: hold the worker at the start of a step, publish a second, wake the page as the
         // store does, let the worker read the second, wake the page as the worker does, and count
         // the page's draws.
-        let mut followed = Followed::open(cx, "memory");
+        let mut followed = Followed::open(cx, "cpu");
         followed.wait_for_a_keyed_question();
         let drawn = followed.renders();
         followed.publish_with_the_worker_held();
@@ -2579,7 +2706,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // after it finds nothing new. Method: hold the worker, publish a second, let the worker
         // read it, wake the page as the worker does and then as the store does, and count the
         // page's draws.
-        let mut followed = Followed::open(cx, "memory");
+        let mut followed = Followed::open(cx, "cpu");
         followed.wait_for_a_keyed_question();
         let drawn = followed.renders();
         followed.publish_with_the_worker_held();
@@ -2598,7 +2725,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // Method: hold the worker so that its reading does not come, publish a second, wake the
         // page as the store does, which leaves the View to the reading, and tick it as its timer
         // does, and count the page's draws.
-        let mut followed = Followed::open(cx, "memory");
+        let mut followed = Followed::open(cx, "cpu");
         followed.wait_for_a_keyed_question();
         let earlier = followed.view_publication();
         let drawn = followed.renders();
@@ -2675,12 +2802,12 @@ mod when_the_store_or_the_worker_wakes_the_page {
 
         #[gpui::test]
         fn the_page_builds_its_charts_by_app_once(cx: &mut TestAppContext) {
-            // Goal: a followed page other than Overview builds its charts by App once in a tick
+            // Goal: a followed page that reads each second builds its charts by App once in a tick
             // that takes the worker's reading and the store's View of one second, rather than
             // from the earlier View for the reading and again from the new one. Method: hold the
             // worker, publish a second, wake the page as the store does, let the worker read the
             // second, wake the page as the worker does, and count the page's builds.
-            let mut followed = Followed::open(cx, "memory");
+            let mut followed = Followed::open(cx, "cpu");
             followed.wait_for_a_keyed_question();
             let built = followed.builds();
             followed.publish_with_the_worker_held();

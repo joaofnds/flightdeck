@@ -19,15 +19,6 @@ use super::{
 #[path = "live_held_projection_tests.rs"]
 mod tests;
 
-/// The Overview's machine charts of `view`, following its newest second, which the charts
-/// select. `levels` names the performance levels the CPU chart draws.
-pub fn overview_panels(
-    view: &View,
-    levels: Option<&[PerformanceLevel; 2]>,
-) -> Result<Vec<Rc<Panel>>, String> {
-    view_panels("overview", view, levels)
-}
-
 /// The machine charts of `route` of `view`, following its newest second, which the charts
 /// select, over the loaded hour as the Overview's span it. `levels` names the performance levels
 /// the Overview's CPU chart draws.

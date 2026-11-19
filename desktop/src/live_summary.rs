@@ -424,6 +424,15 @@ impl crate::live_dashboard::LiveDashboard {
             .map_or(viewer::Selection::NULL, |snapshot| &*snapshot.selection);
         Cow::Borrowed(matching_summary(selection))
     }
+
+    /// Whether the worker's reading is its own reading of the wall second `second`.
+    pub(crate) fn worker_summarizes(&self, second: u64) -> bool {
+        let Some(snapshot) = self.reading_snapshot() else {
+            return false;
+        };
+        let selection = &*snapshot.selection;
+        selection["second"].as_u64() == Some(second) && !matching_summary(selection).is_null()
+    }
 }
 
 /// The worker's summary of the second `selection` selects, as `shown_summary` reads it where the

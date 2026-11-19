@@ -245,7 +245,7 @@ mod over_the_loaded_hour {
 
         let drawn = ResidentHistory::from_view(&view, &cohorts);
 
-        let machine = crate::live_projection::overview_panels(&view, None)
+        let machine = crate::live_store_fixtures::overview_panels(&view, None)
             .unwrap()
             .into_iter()
             .find(|panel| panel.id == "live-cpu")
@@ -266,7 +266,7 @@ mod over_the_loaded_hour {
 
         let drawn = ResidentHistory::from_view(&view, &cohorts);
 
-        let machine = crate::live_projection::overview_panels(&view, None)
+        let machine = crate::live_store_fixtures::overview_panels(&view, None)
             .unwrap()
             .into_iter()
             .find(|panel| panel.id == "live-cpu")
