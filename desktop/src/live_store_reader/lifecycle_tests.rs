@@ -575,11 +575,13 @@ fn a_page_with_no_reading_yet_awaits_the_stores_answer() {
 }
 
 #[test]
-fn a_page_showing_its_readings_awaits_no_answer() {
-    // Goal: a page that follows the Mac asks at the worker's pace, since an answer that ended the
-    // pause would double the queries it costs while the Mac is followed.
-    // Method: step the reader past its first reading until it asks the Store again.
+fn a_page_showing_its_readings_awaits_the_answer_to_its_keyed_question() {
+    // Goal: a page that follows the Mac ends the worker's pause on the Store's answer, which the
+    // Store gives only once it holds something new, so a new second's reading waits for no pace
+    // of the worker's and the answer costs no query more than one a second.
+    // Method: step the reader past its first complete reading until it asks the Store again.
     let (recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
     let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.command.request = request("network");
     assert!(matches!(
@@ -597,7 +599,7 @@ fn a_page_showing_its_readings_awaits_no_answer() {
             .as_ref()
             .unwrap()
             .answer_awaited()
-            .is_none()
+            .is_some()
     );
 }
 
@@ -683,13 +685,16 @@ fn a_page_asking_for_its_first_reading_ends_the_stores_wait_on_the_ring() {
 
 #[test]
 fn a_page_following_the_mac_leaves_the_store_to_its_wait_on_the_ring() {
-    // Goal: a followed page's refreshes do not wake the Store, since that wake reaches every reader
-    // of the ring, the persister too, at the rate the page asks.
-    // Method: publish nothing, wait on the ring as the persister does through a few refreshes, and
-    // see that wait outlast them. Only a wake ends it before its bound, and a busy machine moves
-    // its end only later, as it moves the refreshes.
+    // Goal: a followed page's keyed question does not wake the Store, since that wake reaches
+    // every reader of the ring, the persister too, and the Store answers it at its own turn once
+    // it holds something new.
+    // Method: show the page's first complete reading, publish nothing, and wait on the ring as the
+    // persister does while the reader puts its keyed question out and steps on it, and see that
+    // wait outlast the steps. Only a wake ends it before its bound, and a busy machine moves its
+    // end only later, as it moves the steps.
     let (recording, _store, handle) = store_answering();
-    let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.command.request = request("network");
     assert!(matches!(
         adapter.update_within(Duration::from_secs(10)),
@@ -697,12 +702,95 @@ fn a_page_following_the_mac_leaves_the_store_to_its_wait_on_the_ring() {
     ));
     let bystander = Bystander::waiting(recording.lock_path());
 
-    for _refresh in 0..5 {
-        adapter_refreshed(&mut adapter, &handle);
+    for _step in 0..5 {
+        assert!(adapter.read().is_none());
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let refreshed = Instant::now();
+    let stepped = Instant::now();
 
-    assert!(bystander.wait_ended() > refreshed);
+    assert!(
+        adapter
+            .reader
+            .store
+            .as_ref()
+            .unwrap()
+            .pending
+            .is_some_and(|question| question.keyed)
+    );
+    assert!(bystander.wait_ended() > stepped);
+}
+
+#[test]
+fn a_plain_question_of_a_page_showing_its_readings_leaves_the_store_to_its_wait_on_the_ring() {
+    // Goal: the plain question a followed page asks half the bound into a wait does not wake the
+    // Store, since that wake reaches every reader of the ring, and the Store answers it at its own
+    // turn.
+    // Method: show the page's first complete reading, publish nothing, and wait on the ring as the
+    // persister does while the reader steps half the bound, which puts the plain question out at
+    // its last step, and see that wait outlast a pause after the steps, which a wake at the last
+    // step would end the wait within.
+    let (recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    assert!(matches!(
+        adapter.update_within(Duration::from_secs(10)),
+        Update::Ready(_)
+    ));
+    let bystander = Bystander::waiting(recording.lock_path());
+
+    for _step in 0..super::super::STORE_WAITS_KEYED_MAX {
+        assert!(adapter.read().is_none());
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let stepped = Instant::now();
+
+    assert!(
+        adapter
+            .reader
+            .store
+            .as_ref()
+            .unwrap()
+            .pending
+            .is_some_and(|question| !question.keyed)
+    );
+    assert!(bystander.wait_ended() > stepped);
+}
+
+#[test]
+fn a_page_showing_a_primary_reading_asks_with_no_key() {
+    // Goal: a page whose reading still waits for its App histories asks with no key, so the
+    // Store answers at its next serve, also while it holds nothing new.
+    // Method: show the Memory page's primary reading while the Store has no room for its App
+    // histories, step the reader so that it asks again, and wait for the Store's answer.
+    let (harness, _budget, _lease) = Harness::denied_history();
+    let handle = harness.store.as_ref().unwrap().query_handle();
+    let mut adapter = Adapter::new(handle.clone());
+    adapter.ready_for(viewer::store::QueryReadiness::Primary);
+
+    assert!(adapter.read().is_none());
+    let answered = a_page_showing_a_primary_reading_answered(&handle, Duration::from_secs(5));
+
+    assert!(answered);
+}
+
+/// Whether the Store of `handle` answers within `limit`.
+fn a_page_showing_a_primary_reading_answered(
+    handle: &viewer::store::QueryHandle,
+    limit: Duration,
+) -> bool {
+    let deadline = Instant::now() + limit;
+    for _attempt in 0..10_000 {
+        if handle.answered() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    false
 }
 
 const WAIT_ON_THE_RING_HALF: Duration = Duration::from_millis(50);
@@ -718,13 +806,6 @@ fn adapter_time_to_answer(adapter: &mut Adapter, handle: &viewer::store::QueryHa
     adapter.read();
 
     answered
-}
-
-/// Asks for the page again and reads the Store's answer.
-fn adapter_refreshed(adapter: &mut Adapter, handle: &viewer::store::QueryHandle) {
-    assert!(adapter.read().is_none());
-    wait_until_answered(handle);
-    adapter.read();
 }
 
 /// Another reader of the ring, which waits as the persister does for a publication that never
@@ -783,8 +864,8 @@ impl Bystander {
 
 #[test]
 fn an_answer_no_page_waits_for_leaves_the_pause_to_run() {
-    // Goal: a page that follows the Mac asks at the worker's pace, since an answer that ended the
-    // pause would double the queries it costs.
+    // Goal: an answer no page waits for, as to a plain question of a page that shows its readings,
+    // leaves the pause to run, since an answer that ended it would double the queries it costs.
     // Method: pause for half a second with no answer awaited while the real Store answers.
     let (_recording, _store, handle) = store_answering();
     let shared = Arc::new(crate::live_source::Shared::new());

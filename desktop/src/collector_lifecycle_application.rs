@@ -20,9 +20,15 @@ struct Collection {
     timer: Option<Timer>,
     /// Runs only while the worker owes an answer, and is suspended the rest of the time.
     quick_timer: Option<Timer>,
-    /// Runs the page's tick as the store hands it a View, so a reading reaches the charts as it
-    /// arrives. The timer goes on ticking for the page's animation, its notices and the worker.
+    /// Marks the View the store hands the page, and runs the page's tick to take it where no
+    /// reading of its second is on its way, so a View reaches the charts as it arrives. The timer
+    /// goes on ticking for the page's animation, its notices and the collector, and takes any
+    /// update or View that no wake brought.
     wake: Option<Wake>,
+    /// Runs the page's tick as the worker leaves it an update, or ends a keyed question with no
+    /// reading, so a reading the Store answered, and the View it came with, reach the page as they
+    /// land rather than at the timer's next tick.
+    worker_wake: Option<Wake>,
 }
 
 impl Global for Collection {}
@@ -33,6 +39,7 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         timer: None,
         quick_timer: None,
         wake: None,
+        worker_wake: None,
     });
     cx.on_app_quit(|cx| {
         let collection = cx.global_mut::<Collection>();
@@ -43,9 +50,10 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         if let Some(timer) = collection.quick_timer.take() {
             timer.set_running(false);
         }
-        // Dropping the wake takes its source off the run loop, so no publication ticks the page
-        // once the session is detached.
+        // Dropping the wakes takes their sources off the run loop, so no publication of the Store
+        // or the worker ticks the page once the session is detached.
         drop(collection.wake.take());
+        drop(collection.worker_wake.take());
         collection.session.detach();
         std::future::ready(())
     })
@@ -61,15 +69,22 @@ pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Resul
     let wake_application = application.clone();
     let wake = Wake::start(move || {
         wake_application.update(|cx| {
-            if wake_page.update(cx, |page, _| page.mark_woken()).is_ok() {
-                tick(&wake_page, cx);
+            // A page whose window let go of it has no View to take.
+            if let Some(page) = wake_page.upgrade() {
+                page.update(cx, LiveDashboard::wake_from_store);
             }
         });
     })?;
-    let signal = wake.signal();
-    entity.update(cx, |page, cx| {
-        page.wake_with(Box::new(move || signal.signal()), cx);
-    });
+    let worker_page = page.clone();
+    let worker_application = application.clone();
+    let worker_wake = Wake::start(move || {
+        worker_application.update(|cx| {
+            // A page whose window let go of it has no update to take.
+            if let Some(page) = worker_page.upgrade() {
+                page.update(cx, LiveDashboard::wake_from_worker);
+            }
+        });
+    })?;
     let timer = Timer::start(move || {
         application.update(|cx| tick(&page, cx));
     })?;
@@ -77,10 +92,20 @@ pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Resul
         quick_application.update(|cx| quick_tick(&quick_page, cx));
     })?;
     quick_timer.set_running(false);
+    // The page and the worker get their signals only once every wake and timer has started, so
+    // a start that fails leaves no page watching for a wake that was dropped.
+    let signal = wake.signal();
+    let worker_signal = worker_wake.signal();
+    entity.update(cx, |page, cx| {
+        page.wake_with(Box::new(move || signal.signal()), cx);
+        page.worker
+            .wake_page_with(Box::new(move || worker_signal.signal()));
+    });
     let collection = cx.global_mut::<Collection>();
     collection.timer = Some(timer);
     collection.quick_timer = Some(quick_timer);
     collection.wake = Some(wake);
+    collection.worker_wake = Some(worker_wake);
     // Every change that sends the worker a request notifies the page, so watching the page here
     // takes each answer within a frame, whichever change sent its request.
     cx.observe(entity, |dashboard, cx| {

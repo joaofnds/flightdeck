@@ -757,21 +757,25 @@ fn open(copy: &Path, app: &mut TestAppContext) -> (Entity<LiveDashboard>, Visual
     )
 }
 
-/// The app's two timers, its wake and the display, which a test window has none of: the page's
-/// quarter-second tick, the quick poll that runs while the worker owes an answer, the tick the
-/// store wakes the page for as it hands over a View, and a 120 Hz display's frames, each timer
-/// at its own interval on the wall clock. Each timer's field is when it fires next.
+/// The app's two timers, its two wakes and the display, which a test window has none of: the
+/// page's quarter-second tick, the quick poll that runs while the worker owes an answer, the
+/// store's wake as it hands over a View, which ticks the page where no reading is on its way, the
+/// worker's wake as it leaves an update or ends a keyed question with no reading, whose tick
+/// takes the update and any View, and a 120 Hz display's frames, each timer at its own interval
+/// on the wall clock. Each timer's field is when it fires next.
 struct AppClock {
     tick: Instant,
     quick_poll: Option<Instant>,
     frame: Instant,
     /// Whether the store has woken the page since its last wake ran.
     woken: Arc<AtomicBool>,
+    /// Whether the worker has woken the page since its last wake ran.
+    updated: Arc<AtomicBool>,
 }
 
 impl AppClock {
-    /// Starts the clock and has the store wake the page in `window`, on this thread, as the app's
-    /// wake signals its run loop.
+    /// Starts the clock and has the store and the worker wake the page in `window`, on this thread,
+    /// as the app's wakes signal its run loop.
     fn start(dashboard: &Entity<LiveDashboard>, window: &mut VisualTestContext) -> Self {
         let now = Instant::now();
         let woken = Arc::new(AtomicBool::new(false));
@@ -781,21 +785,33 @@ impl AppClock {
             signal.store(true, Ordering::Release);
             thread.unpark();
         };
+        let updated = Arc::new(AtomicBool::new(false));
+        let update_signal = Arc::clone(&updated);
+        let update_thread = std::thread::current();
+        let update_wake = move || {
+            update_signal.store(true, Ordering::Release);
+            update_thread.unpark();
+        };
 
         dashboard.update(window, |dashboard, cx| {
             dashboard.wake_with(Box::new(wake), cx);
+            dashboard.worker.wake_page_with(Box::new(update_wake));
         });
         Self {
             tick: now + TICK_INTERVAL,
             quick_poll: None,
             frame: now + FRAME_INTERVAL,
             woken,
+            updated,
         }
     }
 
-    /// Waits until `next`, or until the store wakes the page before it.
+    /// Waits until `next`, or until the store or the worker wakes the page before it.
     fn wait_until(&self, next: Instant) {
-        if !self.woken.load(Ordering::Acquire) {
+        if self.woken.load(Ordering::Acquire) {
+            return;
+        }
+        if !self.updated.load(Ordering::Acquire) {
             std::thread::park_timeout(next.saturating_duration_since(Instant::now()));
         }
     }
@@ -813,10 +829,10 @@ impl AppClock {
             self.quick_poll = Some(now + QUICK_POLL_INTERVAL);
         }
         if self.woken.swap(false, Ordering::AcqRel) {
-            dashboard.update(window, |dashboard, cx| {
-                dashboard.mark_woken();
-                dashboard.tick(cx);
-            });
+            dashboard.update(window, LiveDashboard::wake_from_store);
+        }
+        if self.updated.swap(false, Ordering::AcqRel) {
+            dashboard.update(window, LiveDashboard::wake_from_worker);
         }
         if self.quick_poll.is_some_and(|due| due <= now) {
             dashboard.update(window, LiveDashboard::tick);

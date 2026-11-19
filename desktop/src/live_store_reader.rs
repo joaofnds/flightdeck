@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use viewer::LiveSession;
 use viewer::store::{
-    ChartPoints, QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReadiness,
+    ChartPoints, QueryContext, QueryHandle, QueryKey, QueryNeedsLoad, QueryOutcome, QueryReadiness,
     QueryRequest, QuerySelection, QueryToken, QueryUnavailable, RankedSeconds,
 };
 
@@ -30,6 +30,14 @@ const _: () = assert!(
         .as_millis()
         == 10_000
 );
+/// Steps, five seconds of them, that a page in the steady state waits on its keyed question
+/// before it asks a plain one, which a Store that serves answers at once, so a page whose Store
+/// stops serving still reaches `STORE_WAITS_MAX` and the saved minutes.
+const STORE_WAITS_KEYED_MAX: u32 = STORE_WAITS_MAX / 2;
+const _: () = {
+    assert!(STORE_WAITS_KEYED_MAX > 0);
+    assert!(STORE_WAITS_KEYED_MAX * 2 == STORE_WAITS_MAX);
+};
 
 /// What one step of the reader found.
 enum Answer {
@@ -43,13 +51,39 @@ enum Answer {
 pub(super) struct StoreReader {
     handle: QueryHandle,
     context: Option<Arc<QueryContext>>,
-    pending: Option<(u64, QueryToken)>,
+    pending: Option<Question>,
+    /// The key of the last answer the page shows, or of a repeat of it the reader took since, which
+    /// a keyed question names. A new page, a rest and an answer that is not a reading clear it. It
+    /// is kept apart from the context the page shows, since a repeat answer is dropped and leaves
+    /// that context, whose key is older.
+    taken_key: Option<QueryKey>,
     generation: u64,
     published: u64,
     /// The page's older readings come with a later step's reading.
     tail_pending: bool,
     store_waits: u32,
     reused: Reused,
+}
+
+/// A question the reader put to the Store whose answer it has not taken.
+#[derive(Clone, Copy)]
+struct Question {
+    generation: u64,
+    token: QueryToken,
+    /// Whether the question names the answer the page shows, which the Store keeps until it holds
+    /// something new.
+    keyed: bool,
+}
+
+impl Question {
+    /// Whether the answer `token` to a question of the page of `generation` answers this one.
+    fn answered_by(self, generation: u64, token: QueryToken) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+
+        self.token == token
+    }
 }
 
 /// What a reading of the Store leaves that the next reading shares, whichever page asks.
@@ -71,6 +105,7 @@ impl StoreReader {
             handle,
             context: None,
             pending: None,
+            taken_key: None,
             generation: 0,
             published: 0,
             tail_pending: false,
@@ -89,15 +124,46 @@ impl StoreReader {
         self.forget_page();
     }
 
-    /// The handle whose answer ends the worker's pause, while a page shows nothing until its first
-    /// reading comes. A page that shows its readings asks again at the worker's pace, however soon
-    /// the Store answers.
+    /// The handle whose answer ends the worker's pause: while a page shows nothing until its first
+    /// reading comes, and while a page in the steady state asks a keyed question, which the Store
+    /// answers once it holds something new. Any other question of a page that shows its readings
+    /// is looked for at the worker's pace, however soon the Store answers.
     pub(super) fn answer_awaited(&self) -> Option<&QueryHandle> {
-        if self.published == self.generation {
-            return None;
+        if self.first_reading_awaited() {
+            return Some(&self.handle);
+        }
+        if self.keyed_question().is_some() {
+            return Some(&self.handle);
         }
 
-        Some(&self.handle)
+        None
+    }
+
+    /// The token of the keyed question the reader has out, which the Store answers once it holds
+    /// something new.
+    pub(super) fn keyed_question(&self) -> Option<QueryToken> {
+        let question = self.pending?;
+        if question.keyed {
+            return Some(question.token);
+        }
+
+        None
+    }
+
+    /// Whether the reading of the Store's next second is on its way to the page of `command`: a
+    /// keyed question is out, which the Store answers once it takes that second, and the page
+    /// shows a reading of it.
+    pub(super) fn reading_on_its_way(&self, command: &Command) -> bool {
+        if self.keyed_question().is_some() {
+            return !super::route_shows_no_reading(&command.request.route);
+        }
+
+        false
+    }
+
+    /// Whether the page shows nothing until its first reading comes.
+    fn first_reading_awaited(&self) -> bool {
+        self.published != self.generation
     }
 
     /// Whether the Store published a page of `generation`.
@@ -126,6 +192,7 @@ impl StoreReader {
 
     /// What the reader knows of the page it read, which a new page or a rest starts over.
     fn forget_page(&mut self) {
+        self.taken_key = None;
         self.published = 0;
         self.tail_pending = false;
         self.store_waits = 0;
@@ -264,7 +331,11 @@ impl StoreReader {
                     },
                 })
                 .map_err(|error| format!("Store kept query: {error:?}"))?;
-            self.pending = Some((command.generation, token));
+            self.pending = Some(Question {
+                generation: command.generation,
+                token,
+                keyed: false,
+            });
             return Ok(self.asked());
         }
 
@@ -272,7 +343,10 @@ impl StoreReader {
             return Ok(self.waited());
         };
 
-        if self.pending != Some((command.generation, reply.token)) {
+        if !self
+            .pending
+            .is_some_and(|question| question.answered_by(command.generation, reply.token))
+        {
             return Ok(Answer::Waiting);
         }
 
@@ -284,6 +358,7 @@ impl StoreReader {
                     return Ok(Answer::Waiting);
                 }
 
+                self.taken_key = Some(context.key());
                 self.context = Some(context);
                 self.snapshot_kept_present(command, shared)
             }
@@ -294,7 +369,7 @@ impl StoreReader {
 
     fn snapshot_query(&mut self, command: &mut Command, shared: &Shared) -> Result<Answer, String> {
         if self.pending.is_none() {
-            let selection = self.query_selection(command)?;
+            let selection = self.snapshot_query_selection(command)?;
             if self.published == 0 {
                 self.context = None;
             }
@@ -302,9 +377,12 @@ impl StoreReader {
             return Ok(self.asked());
         }
         let Some(reply) = self.handle.take() else {
-            return Ok(self.waited());
+            return self.snapshot_query_waited(command);
         };
-        if self.pending != Some((command.generation, reply.token)) {
+        if !self
+            .pending
+            .is_some_and(|question| question.answered_by(command.generation, reply.token))
+        {
             return Ok(Answer::Waiting);
         }
         self.pending = None;
@@ -316,6 +394,8 @@ impl StoreReader {
         self.store_waits = 0;
         if self.published == command.generation {
             if self.repeats_selection(&context) {
+                self.taken_key = Some(context.key());
+                self.snapshot_query_repeated(command)?;
                 return Ok(Answer::Waiting);
             }
         }
@@ -342,22 +422,59 @@ impl StoreReader {
                         },
                     })
                     .map_err(|error| format!("Store exact query: {error:?}"))?;
-                self.pending = Some((command.generation, token));
+                self.pending = Some(Question {
+                    generation: command.generation,
+                    token,
+                    keyed: false,
+                });
                 return Ok(self.asked());
             }
         }
         let snapshot = payload::snapshot(&context, command, shared, None, &mut self.reused)?;
+        self.taken_key = Some(context.key());
         self.context = Some(context);
 
         Ok(Answer::Ready(snapshot))
     }
 
+    /// What a step whose question the Store has not answered does: it waits, up to the bound, and
+    /// half the bound into the wait replaces a keyed question with a plain one, which a Store that
+    /// serves answers at its next serve, whatever it holds.
+    fn snapshot_query_waited(&mut self, command: &Command) -> Result<Answer, String> {
+        let waited = self.waited();
+        if self.keyed_question().is_some() {
+            if self.store_waits >= STORE_WAITS_KEYED_MAX {
+                let selection = self.snapshot_query_selection(command)?;
+                self.snapshot_query_submit(command, selection)?;
+            }
+        }
+
+        Ok(waited)
+    }
+
+    /// What a step whose answer repeats what the page shows does: it shows nothing new, and a page
+    /// in the steady state puts its next keyed question out at once, naming that answer, so the
+    /// Store keeps it until it holds something new. Any other page asks again at its next step.
+    fn snapshot_query_repeated(&mut self, command: &Command) -> Result<(), String> {
+        let selection = self.snapshot_query_selection(command)?;
+        if let QuerySelection::FollowLatestAfter(_) = selection {
+            self.snapshot_query_submit(command, selection)?;
+        }
+
+        Ok(())
+    }
+
+    /// The next question the page of `command` asks the Store, keyed in the steady state.
+    fn snapshot_query_selection(&self, command: &Command) -> Result<QuerySelection, String> {
+        Ok(self.query_keyed(command, self.query_selection(command)?))
+    }
+
     /// What a step that asks the Store does. While the page shows nothing yet, the answer ends the
     /// pause after it, so the step counts nothing, and that answer may be the one that says why
-    /// the page cannot be read. A page that shows its readings waits out the step for the answer,
-    /// so the step counts toward the bound and the wait lasts as long as the first page's.
+    /// the page cannot be read. A page that shows its readings counts the step toward the bound,
+    /// whether its question waits for the worker's pace or for the Store to hold something new.
     fn asked(&mut self) -> Answer {
-        if self.answer_awaited().is_some() {
+        if self.first_reading_awaited() {
             return Answer::Waiting;
         }
 
@@ -376,6 +493,9 @@ impl StoreReader {
 
     /// What a step does with a query the Store could not yet or cannot answer from what it holds.
     fn needs_load(&mut self, reason: QueryNeedsLoad) -> Answer {
+        // An answer that is not a reading leaves the page with no key, so its next question is
+        // plain, which the Store answers at its next serve.
+        self.taken_key = None;
         match reason {
             QueryNeedsLoad::AppsPending
             | QueryNeedsLoad::UncheckedCoverage
@@ -393,6 +513,8 @@ impl StoreReader {
     /// The window lets go of the context it shows once it takes the reading the reader published,
     /// so a limit that lasts means something else keeps a context.
     fn unavailable(&mut self, reason: QueryUnavailable) -> Result<Answer, String> {
+        // As in `needs_load`, the next question asks with no key.
+        self.taken_key = None;
         match reason {
             QueryUnavailable::NoReadings | QueryUnavailable::NoObservation => Ok(Answer::Saved),
             QueryUnavailable::ContextLimit if self.store_waits < STORE_WAITS_MAX => {
@@ -409,7 +531,7 @@ impl StoreReader {
         selection: QuerySelection,
     ) -> Result<(), String> {
         let source = match selection {
-            QuerySelection::FollowLatest => None,
+            QuerySelection::FollowLatest | QuerySelection::FollowLatestAfter(_) => None,
             QuerySelection::Second { .. } | QuerySelection::Exact { .. } => {
                 self.context.as_ref().map(|context| context.source)
             }
@@ -422,9 +544,15 @@ impl StoreReader {
                 selection,
             })
             .map_err(|error| format!("Store query: {error:?}"))?;
-        self.pending = Some((command.generation, token));
-        if let Some(handle) = self.answer_awaited() {
-            handle.wake_store();
+        self.pending = Some(Question {
+            generation: command.generation,
+            token,
+            keyed: matches!(selection, QuerySelection::FollowLatestAfter(_)),
+        });
+        // Only a page that shows nothing yet wakes the Store's wait on its ring, since that wake
+        // reaches every reader of the ring. A keyed question waits for the Store's own turn.
+        if self.first_reading_awaited() {
+            self.handle.wake_store();
         }
 
         Ok(())
@@ -445,6 +573,34 @@ impl StoreReader {
         }
 
         previous.selected().observation == context.selected().observation
+    }
+
+    /// The question a page asks with `selection`: in the steady state, where the page shows a
+    /// complete reading of the Store and follows the newest second, a follow question names the
+    /// answer the reader took last, so the Store keeps it until it holds something new. Before
+    /// that, as at launch, and half the bound into a wait, it asks with no key, so the Store
+    /// answers at its next serve.
+    fn query_keyed(&self, command: &Command, selection: QuerySelection) -> QuerySelection {
+        if selection != QuerySelection::FollowLatest {
+            return selection;
+        }
+        if self.first_reading_awaited() {
+            return selection;
+        }
+        let complete = self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.readiness() == QueryReadiness::Complete);
+        if !complete {
+            return selection;
+        }
+        if self.store_waits >= STORE_WAITS_KEYED_MAX {
+            return selection;
+        }
+        assert_eq!(self.published, command.generation);
+
+        self.taken_key
+            .map_or(selection, QuerySelection::FollowLatestAfter)
     }
 
     fn query_selection(&self, command: &Command) -> Result<QuerySelection, String> {

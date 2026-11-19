@@ -954,6 +954,97 @@ fn a_failed_read_of_a_pages_app_histories_pauses_before_its_retry() {
     assert_eq!(reader.pause(), super::POLL_INTERVAL);
 }
 
+#[test]
+fn an_update_the_worker_leaves_wakes_the_page_once() {
+    // Goal: each update the worker leaves for the window wakes the page once, so the page takes
+    // it as it lands rather than at its next tick.
+    // Method: give a worker's shared state a waker that counts, publish one update for the
+    // window's command, and count the wakes.
+    let shared = std::sync::Arc::new(super::Shared::new());
+    let (woken, _) = an_update_the_worker_leaves_counted(&shared);
+    let generation = an_update_the_worker_leaves_generation(&shared);
+
+    super::worker_publish(
+        &shared,
+        generation,
+        an_update_the_worker_leaves_failure(generation),
+    );
+
+    assert_eq!(woken.load(std::sync::atomic::Ordering::Acquire), 1);
+}
+
+#[test]
+fn an_update_the_worker_leaves_wakes_the_page_with_the_mailbox_let_go() {
+    // Goal: the page's wake runs once the worker lets go of the mailbox, so a page that takes the
+    // update at once never waits on the lock the worker holds.
+    // Method: give a worker's shared state a waker that counts the wakes that find the mailbox
+    // free, publish one update for the window's command, and count them.
+    let shared = std::sync::Arc::new(super::Shared::new());
+    let (_, free) = an_update_the_worker_leaves_counted(&shared);
+    let generation = an_update_the_worker_leaves_generation(&shared);
+
+    super::worker_publish(
+        &shared,
+        generation,
+        an_update_the_worker_leaves_failure(generation),
+    );
+
+    assert_eq!(free.load(std::sync::atomic::Ordering::Acquire), 1);
+}
+
+#[test]
+fn an_update_for_another_command_wakes_no_page() {
+    // Goal: an update the mailbox refuses, since it answers a command other than the window's
+    // last, leaves the page nothing to take and so wakes it for nothing.
+    // Method: give a worker's shared state a waker that counts, publish one update for a command
+    // other than the window's last, and count the wakes.
+    let shared = std::sync::Arc::new(super::Shared::new());
+    let (woken, _) = an_update_the_worker_leaves_counted(&shared);
+    let other = an_update_the_worker_leaves_generation(&shared) + 1;
+
+    super::worker_publish(&shared, other, an_update_the_worker_leaves_failure(other));
+
+    assert_eq!(woken.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// Has `shared` wake a page that counts its wakes, and the wakes that found the mailbox free.
+fn an_update_the_worker_leaves_counted(
+    shared: &std::sync::Arc<super::Shared>,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let woken = Arc::new(AtomicU32::new(0));
+    let free = Arc::new(AtomicU32::new(0));
+    let (counted, counted_free) = (Arc::clone(&woken), Arc::clone(&free));
+    let mailbox = Arc::downgrade(shared);
+    shared.wake_page_with(Box::new(move || {
+        counted.fetch_add(1, Ordering::AcqRel);
+        let shared = mailbox.upgrade().unwrap();
+        if shared.mailbox.try_lock().is_ok() {
+            counted_free.fetch_add(1, Ordering::AcqRel);
+        }
+    }));
+
+    (woken, free)
+}
+
+/// The generation of the window's last command, which `shared`'s mailbox holds.
+fn an_update_the_worker_leaves_generation(shared: &super::Shared) -> u64 {
+    shared.mailbox.lock().unwrap().generation
+}
+
+/// An update answering the window's command of `generation`.
+fn an_update_the_worker_leaves_failure(generation: u64) -> Update {
+    Update::Failed {
+        generation,
+        message: "the test's update".to_owned(),
+    }
+}
+
 /// Whether the snapshot carries the Overview's App histories, each read rather than failed.
 pub(crate) fn overview_ready(snapshot: &super::Snapshot) -> bool {
     use crate::live_app_attribution_history::AppAttributionHistory;
@@ -1001,32 +1092,20 @@ impl SnapshotReader {
                 retry_after: std::time::Instant::now(),
             },
             command: Self::command(),
-            shared: Arc::new(Shared {
-                measurement_staged: AtomicBool::new(false),
-                measurement_taken: AtomicBool::new(false),
-                measurement_gate: Mutex::new(None),
-                measurement_wake: Condvar::new(),
-                #[cfg(feature = "automation")]
-                requests: std::sync::atomic::AtomicU64::new(0),
-                mailbox: Mutex::new(Mailbox {
-                    frozen_payloads: std::collections::BTreeMap::new(),
-                    taken_payloads: std::collections::BTreeMap::new(),
-                    output_complete: false,
-                    sent: None,
-                    sent_app_chart_source: None,
-                    generation: 1,
-                    request: None,
-                    output: None,
-                    rest: false,
-                    resting: false,
-                    pause_end: crate::live_source::PauseEnd::Time,
-                }),
-                wake: Condvar::new(),
-                stopped: AtomicBool::new(false),
-                cancellation: Arc::new(Cancellation::default()),
-                app_chart_from_view: AtomicBool::new(false),
-            }),
+            shared: Arc::new(Self::shared()),
         }
+    }
+
+    /// A worker's shared state whose window sent the command of generation 1, which the worker
+    /// reads rather than resting.
+    fn shared() -> Shared {
+        let shared = Shared::new();
+        let mut mailbox = shared.mailbox.lock().unwrap();
+        mailbox.generation = 1;
+        mailbox.resting = false;
+        drop(mailbox);
+
+        shared
     }
 
     fn command() -> super::Command {
@@ -1569,13 +1648,12 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
     assert_eq!(request.app.unwrap().bytes_hex, "41");
 }
 
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    Cancellation, Mailbox, Request, Shared, Update, Worker, app_key_bytes, identity_signature,
-    identity_validate, selection_alternative, worker_pause_for, worker_publish,
+    Request, Shared, Update, Worker, app_key_bytes, identity_signature, identity_validate,
+    selection_alternative, worker_pause_for, worker_publish,
 };
 
 #[test]

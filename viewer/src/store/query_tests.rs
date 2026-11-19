@@ -5,6 +5,7 @@ use super::{
     QueryUnavailable, SourceGeneration,
 };
 use crate::live::identity_fixture::Fixture;
+use crate::store::chart_fixture::{Charted, FIRST_SECOND};
 use crate::store::{ByteBudget, Held};
 
 #[test]
@@ -702,6 +703,211 @@ fn a_canceled_query_tells_the_consumer_nothing() {
     queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
 
     assert!(telling.try_recv().is_err());
+}
+
+#[test]
+fn a_follow_question_with_the_stores_key_waits_while_the_store_takes_nothing() {
+    // Goal: a reader that shows what the Store holds costs the Store no answer until it holds
+    // something new.
+    // Method: answer a follow question, then ask again with the answer's key and serve with
+    // nothing taken in between.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let shown = a_follow_question_answered(&queries, &handle, &held, &fixture, &budget);
+    handle
+        .submit(request(QuerySelection::FollowLatestAfter(shown.key())))
+        .unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    assert!(handle.take().is_none());
+}
+
+#[test]
+fn a_follow_question_with_the_stores_key_is_answered_once_the_store_takes_a_second() {
+    // Goal: the answer a reader waits on leaves in the Store's turn that took the next second.
+    // Method: leave a question with the shown answer's key in place, take a second in, serve
+    // again and read the second the answer selects.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (mut held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    a_follow_question_left_in_place(&queries, &handle, &held, &fixture, &budget);
+
+    take(&mut held, &fixture, 2, 101);
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    let answer = ready(handle.take().unwrap().outcome);
+    assert_eq!(answer.selected_second(), 101);
+}
+
+#[test]
+fn a_follow_question_with_the_stores_key_is_answered_once_the_store_publishes_a_view() {
+    // Goal: a change that takes no second, which reaches the page in a View, also ends the wait,
+    // so the key misses no change a View shows.
+    // Method: leave a question with the shown answer's key in place, publish a View of the same
+    // seconds, serve again and compare the answer's key with the shown one.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (mut held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let (shown, _) = a_follow_question_left_in_place(&queries, &handle, &held, &fixture, &budget);
+
+    held.publish(&crate::store::Mailbox::new());
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    let answer = ready(handle.take().unwrap().outcome);
+    assert_ne!(answer.key(), shown.key());
+}
+
+#[test]
+fn a_follow_question_with_no_key_is_answered_at_once() {
+    // Goal: a reader that asks with no key, as at launch, is answered at the Store's next serve
+    // whether or not the Store holds anything new.
+    // Method: answer a follow question, then ask again with no key and serve with nothing taken.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    a_follow_question_answered(&queries, &handle, &held, &fixture, &budget);
+    handle
+        .submit(request(QuerySelection::FollowLatest))
+        .unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    assert!(handle.take().is_some());
+}
+
+#[test]
+fn a_later_request_replaces_a_follow_question_left_in_place() {
+    // Goal: a question the Store leaves in place holds up no request that comes after it.
+    // Method: leave a question with the shown answer's key in place, ask for a fixed second and
+    // serve.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    a_follow_question_left_in_place(&queries, &handle, &held, &fixture, &budget);
+    let later = handle
+        .submit(request(QuerySelection::Second {
+            second: 100,
+            alternative: 0,
+        }))
+        .unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    assert_eq!(handle.take().unwrap().token, later);
+}
+
+#[test]
+fn closing_answers_a_follow_question_left_in_place() {
+    // Goal: a reader whose question the Store left in place learns that the Store stopped.
+    // Method: leave a question with the shown answer's key in place and close the producer.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let (_, left) = a_follow_question_left_in_place(&queries, &handle, &held, &fixture, &budget);
+
+    queries.close();
+
+    let reply = handle.take().unwrap();
+    assert_eq!(reply.token, left);
+    assert!(matches!(
+        reply.outcome,
+        QueryOutcome::Unavailable(QueryUnavailable::Closed)
+    ));
+}
+
+#[test]
+fn cancelling_clears_a_follow_question_left_in_place() {
+    // Goal: a reader that cancels leaves the Store no question to keep, so nothing it held back
+    // is built later for a reader that no longer waits.
+    // Method: leave a question with the shown answer's key in place, cancel, and ask whether
+    // any question or answer of the handle remains.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    a_follow_question_left_in_place(&queries, &handle, &held, &fixture, &budget);
+
+    handle.cancel().unwrap();
+
+    assert!(!handle.pending());
+}
+
+#[test]
+fn a_follow_question_with_the_stores_key_is_answered_once_a_restarted_collector_publishes() {
+    // Goal: the first second of the collector's next run ends the wait, also where its
+    // publication repeats the one the reader shows, since the key names the run.
+    // Method: show the one second a run published, restart the collector, take in the next
+    // run's first second, whose publication is the same, then serve a question with the shown
+    // key and look for its answer.
+    let mut store = Charted::new();
+    store.take(FIRST_SECOND);
+    let shown = store.followed();
+    let handle = store.handle();
+    store.restart();
+    store.take(FIRST_SECOND + 1);
+    handle
+        .submit(request(QuerySelection::FollowLatestAfter(shown.key())))
+        .unwrap();
+
+    store.serve();
+
+    assert!(handle.take().is_some());
+}
+
+/// A follow question naming the context a reader shows, which `held` answered, left in place by
+/// the Store's serve, with that context and the question's token.
+fn a_follow_question_left_in_place(
+    queries: &Queries,
+    handle: &super::QueryHandle,
+    held: &Held,
+    fixture: &Fixture,
+    budget: &Arc<ByteBudget>,
+) -> (Arc<super::QueryContext>, super::QueryToken) {
+    let shown = a_follow_question_answered(queries, handle, held, fixture, budget);
+    let left = handle
+        .submit(request(QuerySelection::FollowLatestAfter(shown.key())))
+        .unwrap();
+    queries.serve(held, Some(&coverage(fixture, 0)), budget);
+
+    (shown, left)
+}
+
+/// The context a follow question with no key gets from `held`, which a reader then shows.
+fn a_follow_question_answered(
+    queries: &Queries,
+    handle: &super::QueryHandle,
+    held: &Held,
+    fixture: &Fixture,
+    budget: &Arc<ByteBudget>,
+) -> Arc<super::QueryContext> {
+    handle
+        .submit(request(QuerySelection::FollowLatest))
+        .unwrap();
+    queries.serve(held, Some(&coverage(fixture, 0)), budget);
+
+    ready(handle.take().unwrap().outcome)
 }
 
 fn take(held: &mut Held, fixture: &Fixture, publication: u64, second: u64) {

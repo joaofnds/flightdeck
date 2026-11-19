@@ -114,6 +114,14 @@ impl MailboxWatch {
         }
     }
 
+    /// The watch once a wake says the store may have left a View.
+    pub(super) fn after_wake(self) -> Self {
+        match self {
+            Self::EveryTick => Self::EveryTick,
+            Self::FromWake { .. } => Self::FromWake { woken: true },
+        }
+    }
+
     pub(super) fn after_view(self) -> Self {
         match self {
             Self::EveryTick => Self::EveryTick,

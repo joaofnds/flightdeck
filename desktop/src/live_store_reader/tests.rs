@@ -1295,18 +1295,60 @@ fn request(route: &str) -> Request {
     }
 }
 
+/// A root the saved minutes refuse before they read anything, since a glob in a path is refused
+/// as it is checked, so a reading the saved minutes answer fails at once.
+const NO_RECORDING: &str = "no-recording-[here]";
+
+/// A worker's reader whose Store reader asks `store`, which answers only when the test serves it,
+/// and whose page of generation 1 the Store has not yet answered.
+fn reader(store: &viewer::store::chart_fixture::Charted) -> crate::live_source::Reader {
+    let mut store_reader = crate::live_source::store_reader::StoreReader::new(store.handle());
+    store_reader.generation = 1;
+    crate::live_source::Reader {
+        session: None,
+        store: Some(store_reader),
+        last_catalog: None,
+        last_generation: 1,
+        last_route: String::from("network"),
+        pending: Some(crate::live_source::Pending {
+            generation: 1,
+            histories: crate::live_source::Histories::Defer,
+        }),
+        deferred_listing_last_second: None,
+        page_caches_unread_since: None,
+        retry_after: Instant::now(),
+    }
+}
+
+/// The worker's step that reads `command` through `reader`.
+fn reader_step(
+    reader: &mut crate::live_source::Reader,
+    command: &mut crate::live_source::Command,
+) -> Option<Update> {
+    crate::live_source::store_reader::read(
+        reader,
+        std::path::Path::new(NO_RECORDING),
+        command,
+        &crate::live_source::Shared::new(),
+    )
+}
+
+/// Whether `update` is the failure of a reading the saved minutes answered.
+fn reader_step_failed_saved(update: Option<Update>) -> bool {
+    matches!(
+        update,
+        Some(Update::Failed { message, .. }) if message.contains("query path glob")
+    )
+}
+
 mod the_chart_points_of_each_second {
     use super::*;
     use crate::live_source::store_reader::{Reused, STORE_WAITS_MAX, StoreReader, payload};
-    use crate::live_source::{Command, Context, Histories, Pending, Reader, Shared};
+    use crate::live_source::{Command, Context, Reader, Shared};
     use viewer::CHARTED_SECONDS;
     use viewer::store::chart_fixture::{
         Charted, FIRST_SECOND, charted, charted_point_count, shared_count,
     };
-
-    /// A root the saved minutes refuse before they read anything, since a glob in a path is
-    /// refused as it is checked, so a reading the saved minutes answer fails at once.
-    const NO_RECORDING: &str = "no-recording-[here]";
 
     /// The reading of `route` that follows the newest second `store` holds, sharing what
     /// `reused` holds.
@@ -1328,48 +1370,9 @@ mod the_chart_points_of_each_second {
         .unwrap()
     }
 
-    /// A worker's reader whose Store reader asks a store of its own, which answers nothing,
-    /// and whose page of generation 1 the Store has not yet answered.
-    fn reader(store: &Charted) -> Reader {
-        let mut store_reader = StoreReader::new(store.handle());
-        store_reader.generation = 1;
-        Reader {
-            session: None,
-            store: Some(store_reader),
-            last_catalog: None,
-            last_generation: 1,
-            last_route: String::from("network"),
-            pending: Some(Pending {
-                generation: 1,
-                histories: Histories::Defer,
-            }),
-            deferred_listing_last_second: None,
-            page_caches_unread_since: None,
-            retry_after: Instant::now(),
-        }
-    }
-
     /// What `reader`'s Store reader reuses from the reading before.
     fn reused(reader: &mut Reader) -> &mut Reused {
         &mut reader.store.as_mut().unwrap().reused
-    }
-
-    /// The worker's step that reads `command` through `reader`.
-    fn reader_step(reader: &mut Reader, command: &mut Command) -> Option<Update> {
-        crate::live_source::store_reader::read(
-            reader,
-            std::path::Path::new(NO_RECORDING),
-            command,
-            &Shared::new(),
-        )
-    }
-
-    /// Whether `update` is the failure of a reading the saved minutes answered.
-    fn reader_step_failed_saved(update: Option<Update>) -> bool {
-        matches!(
-            update,
-            Some(Update::Failed { message, .. }) if message.contains("query path glob")
-        )
     }
 
     #[test]
@@ -1537,5 +1540,659 @@ mod the_chart_points_of_each_second {
         store_reader.rest();
 
         assert!(store_reader.reused.chart_points.is_empty());
+    }
+}
+
+mod when_a_page_follows_the_newest_second {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+    use crate::live_source::store_reader::{STORE_WAITS_KEYED_MAX, STORE_WAITS_MAX};
+    use crate::live_source::{Command, Context, Reader, Shared};
+    use viewer::CHARTED_SECONDS;
+    use viewer::store::chart_fixture::{Charted, FIRST_SECOND, charted};
+
+    #[test]
+    fn a_second_the_store_takes_is_published_without_waiting_out_the_workers_poll() {
+        // Goal: on a page in the steady state, the answer to the follow question ends the
+        // worker's pause, so the reading of a second follows the Store's turn that took it.
+        // Method: run the real worker over a store the test serves. Each round, take a second in,
+        // and once the worker's question is out, serve and time the reading that carries it, so
+        // nothing but the serve runs between the question and the clock. A pause the answer does
+        // not end costs every round nearly the whole poll interval, and one quick round among
+        // these shows it ended, however busy the machine is for the others.
+        let mut store = charted();
+        let handle = store.handle();
+        let mut worker =
+            Worker::start_from_store(std::path::PathBuf::from(NO_RECORDING), store.handle())
+                .unwrap();
+        worker.request(request("network")).unwrap();
+        worker_round(&mut store, &handle, &mut worker, None);
+
+        let quickest = (1..=5)
+            .map(|round| {
+                let second = FIRST_SECOND + CHARTED_SECONDS - 1 + round;
+                worker_round(&mut store, &handle, &mut worker, Some(second))
+            })
+            .min()
+            .unwrap();
+
+        assert!(quickest < crate::live_source::POLL_INTERVAL / 2);
+    }
+
+    #[test]
+    fn a_second_the_store_takes_wakes_the_page_once() {
+        // Goal: in the steady state, the reading of one second the Store takes wakes the page
+        // once, so the page takes it as it lands and is woken for nothing else.
+        // Method: run the real worker over a store the test serves to its first reading, have
+        // the worker wake a page that counts, take one second in and serve, and count the wakes
+        // once the worker has put its next question out, which it does after the wake.
+        let mut store = charted();
+        let handle = store.handle();
+        let mut worker =
+            Worker::start_from_store(std::path::PathBuf::from(NO_RECORDING), store.handle())
+                .unwrap();
+        worker.request(request("network")).unwrap();
+        worker_round(&mut store, &handle, &mut worker, None);
+        let woken = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&woken);
+        worker.wake_page_with(Box::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+        }));
+
+        worker_round(
+            &mut store,
+            &handle,
+            &mut worker,
+            Some(FIRST_SECOND + CHARTED_SECONDS),
+        );
+        worker_round_asked(&handle, Instant::now() + Duration::from_secs(10));
+
+        assert_eq!(woken.load(Ordering::Acquire), 1);
+    }
+
+    /// Takes `second` in where there is one, waits for the worker's question, serves, and returns
+    /// how long the worker then took to publish a reading of the newest second the store holds.
+    fn worker_round(
+        store: &mut Charted,
+        handle: &viewer::store::QueryHandle,
+        worker: &mut Worker,
+        second: Option<u64>,
+    ) -> Duration {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        if let Some(second) = second {
+            store.take(second);
+        }
+        let newest = store.followed().selected().observation.stamp.publication;
+        worker_round_asked(handle, deadline);
+        let started = Instant::now();
+        store.serve();
+        for _attempt in 0..10_000 {
+            if let Some(Update::Ready(snapshot)) = worker.take().unwrap() {
+                if snapshot.selection["selected"]["publication"] == newest {
+                    return started.elapsed();
+                }
+            }
+            assert!(Instant::now() < deadline, "the worker published no reading");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the worker published no reading within its attempts");
+    }
+
+    /// Waits, until `deadline`, for the worker to put a question to the store of `handle`.
+    fn worker_round_asked(handle: &viewer::store::QueryHandle, deadline: Instant) {
+        for _attempt in 0..10_000 {
+            if handle.pending() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the worker asked nothing");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the worker asked nothing within its attempts");
+    }
+
+    #[test]
+    fn a_store_that_takes_nothing_gives_no_answer_for_half_the_bound() {
+        // Goal: a page that shows what the Store holds costs the Store no answer while it holds
+        // nothing new, where today it costs about two answers a second.
+        // Method: bring a reader to the steady state, then step it and serve one step short of
+        // half the bound with no second taken, and count the Store's answers.
+        let store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+
+        for _ in 1..STORE_WAITS_KEYED_MAX {
+            steady_step(&store, &mut reader, &mut command);
+        }
+
+        assert_eq!(answers.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_store_that_takes_nothing_answers_one_plain_question_at_half_the_bound() {
+        // Goal: half the bound into a wait, the reader asks a plain question, which a Store that
+        // serves answers at once, so the page learns the Store still serves.
+        // Method: bring a reader to the steady state, then step it and serve half the bound with
+        // no second taken, and count the Store's answers.
+        let store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+
+        for _ in 0..STORE_WAITS_KEYED_MAX {
+            steady_step(&store, &mut reader, &mut command);
+        }
+
+        assert_eq!(answers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_store_that_takes_nothing_keeps_the_page_on_its_reading() {
+        // Goal: a Store that serves and holds nothing new never sends the page to the saved
+        // minutes, since the plain question's answer resets the bound.
+        // Method: bring a reader to the steady state, step it and serve twice the bound with no
+        // second taken, and count the updates the steps publish.
+        let store = charted();
+        let (mut reader, mut command, _) = steady(&store);
+
+        let updates = (0..2 * STORE_WAITS_MAX)
+            .filter_map(|_| steady_step(&store, &mut reader, &mut command))
+            .count();
+
+        assert_eq!(updates, 0);
+    }
+
+    #[test]
+    fn a_repeat_answer_brings_no_further_answer_until_the_plain_question() {
+        // Goal: a View with no new second answers the follow question once, with what the page
+        // already shows, and the next question names that answer, so the Store keeps it.
+        // Method: bring a reader to the steady state, put its question out, publish a View and
+        // serve, then step it and serve until just before the plain question, and count the
+        // Store's answers.
+        let mut store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        steady_step(&store, &mut reader, &mut command);
+        store.publish();
+        store.serve();
+
+        for _ in 1..STORE_WAITS_KEYED_MAX {
+            steady_step(&store, &mut reader, &mut command);
+        }
+
+        assert_eq!(answers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_store_that_stops_serving_sends_the_page_to_the_saved_minutes_at_the_bound() {
+        // Goal: the keyed question leaves the bound as it was, so a Store that answers nothing
+        // sends the page to the saved minutes after ten seconds and no sooner.
+        // Method: bring a reader to the steady state, step it the bound with no serve, then step
+        // it once more.
+        let store = charted();
+        let (mut reader, mut command, _) = steady(&store);
+        let waited = (0..STORE_WAITS_MAX)
+            .filter_map(|_| reader_step(&mut reader, &mut command))
+            .count();
+        assert_eq!(waited, 0);
+
+        let update = reader_step(&mut reader, &mut command);
+
+        assert!(reader_step_failed_saved(update));
+    }
+
+    #[test]
+    fn a_page_opened_next_is_answered_at_the_stores_next_serve() {
+        // Goal: a page that has not yet shown a reading of the Store asks with no key, so it opens
+        // at the Store's next serve, also where the Store takes no second.
+        // Method: bring a reader to the steady state, have the window ask for another page, step
+        // and serve once with no second taken, and count the Store's answers.
+        let store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        command.generation = 2;
+        command.request = request("memory");
+
+        steady_step(&store, &mut reader, &mut command);
+
+        assert_eq!(answers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_page_told_the_store_needs_a_load_asks_its_next_question_with_no_key() {
+        // Goal: after an answer that is not a reading, the page asks with no key, so the Store
+        // answers at its next serve rather than holding the question on the last reading's key.
+        // Method: bring a reader to the steady state, give it the Store's answer that its ring is
+        // incomplete, then step it and serve once with no second taken, and count the answers.
+        let store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        reader
+            .store
+            .as_mut()
+            .unwrap()
+            .needs_load(viewer::store::QueryNeedsLoad::IncompleteRing);
+
+        steady_step(&store, &mut reader, &mut command);
+
+        assert_eq!(answers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_page_told_the_store_holds_too_many_contexts_asks_its_next_question_with_no_key() {
+        // Goal: after the Store's limit on contexts refuses an answer, the page asks with no key,
+        // so the Store answers at its next serve rather than holding the question.
+        // Method: bring a reader to the steady state, give it the Store's refusal at its limit on
+        // contexts, then step it and serve once with no second taken, and count the answers.
+        let store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        reader
+            .store
+            .as_mut()
+            .unwrap()
+            .unavailable(viewer::store::QueryUnavailable::ContextLimit)
+            .unwrap();
+
+        steady_step(&store, &mut reader, &mut command);
+
+        assert_eq!(answers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_plain_question_at_half_the_bound_leaves_the_pause_to_run() {
+        // Goal: the plain question a page asks half the bound into a wait is looked for at the
+        // worker's pace, so a Store that answers it at once costs the page no extra step.
+        // Method: bring a reader to the steady state, step it half the bound with no serve, which
+        // puts the plain question out, and ask whether an answer would end the worker's pause.
+        let store = charted();
+        let (mut reader, mut command, _) = steady(&store);
+
+        for _ in 0..STORE_WAITS_KEYED_MAX {
+            reader_step(&mut reader, &mut command);
+        }
+
+        assert!(reader.store.as_ref().unwrap().answer_awaited().is_none());
+    }
+
+    #[test]
+    fn a_repeat_answer_puts_the_next_keyed_question_out_in_its_step() {
+        // Goal: the step that takes a repeat answer leaves its next question with the Store, so
+        // the next second the Store takes is answered in that Store's turn, with no step between.
+        // Method: bring a reader to the steady state, have the Store publish a View and answer
+        // with a repeat, take that answer in one step, then take a second in and serve with no
+        // further step, and count the Store's answers.
+        let mut store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        steady_step(&store, &mut reader, &mut command);
+        store.publish();
+        store.serve();
+        assert!(reader_step(&mut reader, &mut command).is_none());
+
+        store.take(FIRST_SECOND + CHARTED_SECONDS);
+        store.serve();
+
+        assert_eq!(answers.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn a_page_whose_reading_failed_asks_again_at_the_stores_next_serve() {
+        // Goal: an answer whose reading the page could not build leaves the page on the key of
+        // the reading it shows, so its next question is answered at the Store's next serve rather
+        // than held until the plain question.
+        // Method: bring a reader to the steady state, take a second in, and have the step that
+        // takes its answer fail to build the reading, by asking it for a page that ranks Apps,
+        // which the store's seconds lack. Then step the page again and serve with no second
+        // taken, and count the Store's answers.
+        let mut store = charted();
+        let (mut reader, mut command, answers) = steady(&store);
+        store.take(FIRST_SECOND + CHARTED_SECONDS);
+        steady_step(&store, &mut reader, &mut command);
+        command.request = request("memory");
+        let failed = reader_step(&mut reader, &mut command);
+        assert!(matches!(failed, Some(Update::Failed { .. })));
+        command.request = request("network");
+        reader.retry_after = Instant::now();
+
+        steady_step(&store, &mut reader, &mut command);
+
+        assert_eq!(answers.load(Ordering::Acquire), 2);
+    }
+
+    /// A worker's reader that shows the Network page's reading of the newest second `store`
+    /// holds, which it took from the Store, the command of that page, and the count of the
+    /// answers the Store gives from then on.
+    fn steady(store: &Charted) -> (Reader, Command, Arc<AtomicU32>) {
+        let mut reader = reader(store);
+        let mut command = Command {
+            generation: 1,
+            epoch: 0,
+            request: request("network"),
+            context: Context::Select,
+        };
+        assert!(steady_step(store, &mut reader, &mut command).is_none());
+        let shown = reader_step(&mut reader, &mut command);
+        assert!(matches!(shown, Some(Update::Ready(_))));
+        let answers = Arc::new(AtomicU32::new(0));
+        store.handle().on_reply({
+            let answers = Arc::clone(&answers);
+            move || {
+                answers.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+
+        (reader, command, answers)
+    }
+
+    /// One step of the worker, then one turn of the Store, which serves what the step asked.
+    fn steady_step(store: &Charted, reader: &mut Reader, command: &mut Command) -> Option<Update> {
+        let update = reader_step(reader, command);
+        store.serve();
+
+        update
+    }
+
+    /// The real worker over a store the test serves, run to its first reading of `route`. It
+    /// waits for any reading rather than through `worker_round`, which waits for a reading of
+    /// the selected second that the Self page's reading does not name.
+    fn worker_showing(route: &str) -> (Charted, Worker) {
+        let store = charted();
+        let handle = store.handle();
+        let mut worker =
+            Worker::start_from_store(std::path::PathBuf::from(NO_RECORDING), store.handle())
+                .unwrap();
+        worker.request(request(route)).unwrap();
+        worker_round_asked(&handle, Instant::now() + Duration::from_secs(10));
+        store.serve();
+        for _attempt in 0..10_000 {
+            if let Some(Update::Ready(_)) = worker.take().unwrap() {
+                return (store, worker);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the worker published no reading");
+    }
+
+    /// Whether the worker comes, within ten seconds, to say `on_its_way` of whether a reading is
+    /// on its way.
+    fn worker_comes_to_say(worker: &Worker, on_its_way: bool) -> bool {
+        for _attempt in 0..10_000 {
+            if worker.reading_on_its_way() == on_its_way {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        false
+    }
+
+    /// The count of the worker's wakes of the page from now on.
+    fn worker_wakes_counted(worker: &Worker) -> Arc<AtomicU32> {
+        let wakes = Arc::new(AtomicU32::new(0));
+        worker.wake_page_with({
+            let wakes = Arc::clone(&wakes);
+            Box::new(move || {
+                wakes.fetch_add(1, Ordering::AcqRel);
+            })
+        });
+
+        wakes
+    }
+
+    mod when_the_reader_says_whether_a_reading_is_on_its_way {
+        use super::*;
+        use crate::live_source::measurement::Stage;
+
+        #[test]
+        fn a_keyed_question_out_says_a_reading_is_on_its_way() {
+            // Goal: the worker says a reading is on its way while its keyed question is out for a
+            // page that shows a reading, so the store's wake leaves the View to that reading.
+            // Method: run the real worker to its first reading over a store the test serves, let
+            // it put its keyed question out, and read what it says.
+            let (_store, worker) = worker_showing("network");
+
+            assert!(worker_comes_to_say(&worker, true));
+        }
+
+        #[test]
+        fn the_self_page_has_no_reading_on_its_way() {
+            // Goal: the Self page shows no reading, so the store's wake takes its View at once,
+            // although the page asks keyed questions. Method: run the real worker to the Self
+            // page's first reading, hold it at the start of a step once its next question is out,
+            // and read what it said after the step before.
+            let (store, worker) = worker_showing("self");
+            worker_round_asked(&store.handle(), Instant::now() + Duration::from_secs(10));
+
+            assert!(!worker_said(&worker));
+        }
+
+        #[test]
+        fn a_rested_worker_has_no_reading_on_its_way() {
+            // Goal: a worker no window reads sends the page no reading. Method: bring the real
+            // worker to its keyed question, hand it over as a closed window does, and read what
+            // it says.
+            let (_store, mut worker) = worker_showing("network");
+            assert!(worker_comes_to_say(&worker, true));
+
+            let rested = worker.hand_over().unwrap().unwrap();
+
+            assert!(worker_comes_to_say(&rested, false));
+        }
+
+        #[test]
+        fn a_request_that_cancels_the_keyed_question_leaves_no_reading_on_its_way() {
+            // Goal: a new request cancels the keyed question of the page before it, and the new
+            // page shows nothing until its first reading. Method: bring the real worker to its
+            // keyed question, ask it for another page, and read what it says while the store
+            // answers nothing.
+            let (_store, mut worker) = worker_showing("network");
+            assert!(worker_comes_to_say(&worker, true));
+
+            worker.request(request("memory")).unwrap();
+
+            assert!(worker_comes_to_say(&worker, false));
+        }
+
+        #[test]
+        fn a_plain_question_at_half_the_bound_has_no_reading_on_its_way() {
+            // Goal: the plain question half the bound into a wait is answered at the Store's next
+            // serve whatever it holds, so no reading of a new second is on its way. Method: bring
+            // a reader to the steady state, step it half the bound with no serve, and ask it. The
+            // reader is stepped by hand, since the real worker takes five seconds to get there.
+            let store = charted();
+            let (mut reader, mut command, _) = steady(&store);
+
+            for _ in 0..STORE_WAITS_KEYED_MAX {
+                reader_step(&mut reader, &mut command);
+            }
+
+            let store_reader = reader.store.as_ref().unwrap();
+            assert!(!store_reader.reading_on_its_way(&command));
+        }
+
+        #[test]
+        fn a_stopped_worker_has_no_reading_on_its_way() {
+            // Goal: a worker that stopped sends nothing, so the store's wake takes its View at
+            // once. Method: bring the real worker to its keyed question, stop it, and read what it
+            // says.
+            let (_store, mut worker) = worker_showing("network");
+            assert!(worker_comes_to_say(&worker, true));
+
+            worker.stop();
+
+            assert!(!worker.reading_on_its_way());
+        }
+
+        /// What the worker said after its last step, read while it waits at the start of its next.
+        fn worker_said(worker: &Worker) -> bool {
+            let hold = worker.hold_measurement_stage(Stage::Reading);
+            hold.entered();
+
+            worker.reading_on_its_way()
+        }
+    }
+
+    mod when_a_step_publishes_no_reading {
+        use super::*;
+        use crate::live_source::measurement::Stage;
+
+        #[test]
+        fn a_keyed_answer_dropped_as_a_repeat_wakes_the_page_once() {
+            // Goal: the View that comes with a keyed answer the reader drops as a repeat is drawn
+            // within the worker's step, not at the timer, since the store's wake left it to the
+            // reading that never comes. Method: bring the real worker to its keyed question and
+            // hold it at the start of a step, count its wakes of the page, have the store publish
+            // a View with no new second and answer, then let that step run, and count the wakes
+            // and look for an update once the worker reaches the start of the next.
+            let (mut store, mut worker) = worker_showing("network");
+            assert!(worker_comes_to_say(&worker, true));
+            let held = worker.hold_measurement_stage(Stage::Reading);
+            held.entered();
+            let wakes = worker_wakes_counted(&worker);
+            store.publish();
+            store.serve();
+
+            held.release();
+            drop(held);
+            let next = worker.hold_measurement_stage(Stage::Reading);
+            next.entered();
+
+            assert_eq!(wakes.load(Ordering::Acquire), 1);
+            assert!(matches!(worker.take(), Ok(None)));
+        }
+
+        #[test]
+        fn a_keyed_answer_the_store_refuses_wakes_the_page_once() {
+            // Goal: a keyed answer that brings no reading, as the Store's refusal at its limit on
+            // contexts, still wakes the page, so the View the store's wake left to the reading is
+            // drawn within the step. Method: bring a reader to the steady state and keep its
+            // context, so the page holds two once it takes the next second's. Put its keyed
+            // question out, take a second in and serve, which refuses a third context. Then run
+            // the worker's step by hand on a page told a reading is on its way, and count the
+            // wakes and look for an update. The reader is stepped by hand, since the store the
+            // test serves gives no answer that the Store needs a load.
+            let mut store = charted();
+            let (mut reader, mut command, _) = steady(&store);
+            let kept = reader.store.as_ref().unwrap().context.clone();
+            assert!(kept.is_some());
+            reader_step(&mut reader, &mut command);
+            store.take(FIRST_SECOND + CHARTED_SECONDS);
+            store.serve();
+            assert!(matches!(
+                reader_step(&mut reader, &mut command),
+                Some(Update::Ready(_))
+            ));
+            reader_step(&mut reader, &mut command);
+            store.take(FIRST_SECOND + CHARTED_SECONDS + 1);
+            store.serve();
+            let (shared, wakes) = worker_shared_told(&command);
+            let mut command = Some(command);
+
+            worker_step_by_hand(&shared, &mut reader, &mut command);
+
+            assert_eq!(wakes.load(Ordering::Acquire), 1);
+            assert!(shared.mailbox.lock().unwrap().output.is_none());
+        }
+
+        #[test]
+        fn a_plain_questions_repeat_wakes_nothing() {
+            // Goal: the page leaves a View to a reading only while a keyed question is out, so an
+            // answer to a plain question that repeats what the page shows wakes nothing. Method:
+            // bring a reader to the steady state and step it half the bound with no serve, so its
+            // plain question is out, then have the store publish a View with no new second and
+            // answer, run the worker's step by hand, and count the wakes. The reader is stepped
+            // by hand, since the real worker takes five seconds to ask the plain question.
+            let mut store = charted();
+            let (mut reader, command, _) = steady(&store);
+            let (shared, wakes) = worker_shared_told(&command);
+            let mut command = Some(command);
+            for _ in 0..STORE_WAITS_KEYED_MAX {
+                worker_step_by_hand(&shared, &mut reader, &mut command);
+            }
+            assert!(reader.store.as_ref().unwrap().keyed_question().is_none());
+            wakes.store(0, Ordering::Release);
+            store.publish();
+            store.serve();
+
+            worker_step_by_hand(&shared, &mut reader, &mut command);
+
+            assert_eq!(wakes.load(Ordering::Acquire), 0);
+            assert!(shared.mailbox.lock().unwrap().output.is_none());
+        }
+
+        #[test]
+        fn a_request_that_cancels_the_keyed_question_wakes_the_page_once() {
+            // Goal: a new request cancels the keyed question the page left its View to, so the
+            // step that cancels it wakes the page, which takes that View at once. Method: bring
+            // the real worker to its keyed question, count its wakes of the page, ask it for
+            // another page while the store answers nothing, and count the wakes and look for an
+            // update once the worker says no reading is on its way and reaches its next step.
+            let (_store, mut worker) = worker_showing("network");
+            assert!(worker_comes_to_say(&worker, true));
+            let wakes = worker_wakes_counted(&worker);
+
+            worker.request(request("memory")).unwrap();
+
+            assert!(worker_comes_to_say(&worker, false));
+            let next = worker.hold_measurement_stage(Stage::Reading);
+            next.entered();
+            assert_eq!(wakes.load(Ordering::Acquire), 1);
+            assert!(matches!(worker.take(), Ok(None)));
+        }
+
+        #[test]
+        fn a_step_that_still_waits_for_its_keyed_answer_wakes_nothing() {
+            // Goal: the page is woken only once its keyed question ends, so the worker's steps
+            // that wait for a second cost the page no tick. Method: bring a reader to the steady
+            // state, run the worker's step by hand to put its keyed question out, then run more
+            // steps with no serve, short of the plain question half the bound brings, and count
+            // the wakes. The reader is stepped by hand, so that the test controls when the store
+            // answers.
+            let store = charted();
+            let (mut reader, command, _) = steady(&store);
+            let (shared, wakes) = worker_shared_told(&command);
+            let mut command = Some(command);
+            worker_step_by_hand(&shared, &mut reader, &mut command);
+            assert!(shared.reading_on_its_way.load(Ordering::Acquire));
+            let asked = reader.store.as_ref().unwrap().keyed_question();
+            wakes.store(0, Ordering::Release);
+
+            for _ in 2..STORE_WAITS_KEYED_MAX {
+                worker_step_by_hand(&shared, &mut reader, &mut command);
+            }
+
+            assert_eq!(reader.store.as_ref().unwrap().keyed_question(), asked);
+            assert_eq!(wakes.load(Ordering::Acquire), 0);
+        }
+
+        /// The worker's shared state for the page of `command`, told a reading is on its way, and
+        /// the count of its wakes of the page.
+        fn worker_shared_told(command: &Command) -> (Shared, Arc<AtomicU32>) {
+            let shared = Shared::new();
+            shared.mailbox.lock().unwrap().generation = command.generation;
+            shared.reading_on_its_way.store(true, Ordering::Release);
+            let wakes = Arc::new(AtomicU32::new(0));
+            shared.wake_page_with({
+                let wakes = Arc::clone(&wakes);
+                Box::new(move || {
+                    wakes.fetch_add(1, Ordering::AcqRel);
+                })
+            });
+
+            (shared, wakes)
+        }
+
+        /// One step of the worker over `reader`, after which it says, as the worker does, whether
+        /// a reading is on its way.
+        fn worker_step_by_hand(
+            shared: &Shared,
+            reader: &mut Reader,
+            command: &mut Option<Command>,
+        ) {
+            crate::live_source::worker_step_read(
+                std::path::Path::new(NO_RECORDING),
+                shared,
+                reader,
+                command,
+            );
+            let on_its_way =
+                crate::live_source::worker_lease_reading_on_its_way(reader, command.as_ref());
+            shared
+                .reading_on_its_way
+                .store(on_its_way, Ordering::Release);
+        }
     }
 }

@@ -435,6 +435,12 @@ impl LiveRecording {
         self.publication += 1;
     }
 
+    /// The publication of the newest second the recording published, which counts the seconds it
+    /// published.
+    pub(crate) fn publication(&self) -> u64 {
+        self.publication
+    }
+
     pub(crate) fn publish_resources(&mut self) {
         self.publish_resources_with_processes(&[]);
     }

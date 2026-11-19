@@ -29,8 +29,8 @@ pub struct Charted {
     /// The budget the contexts the store answers and their readings are charged to, apart from
     /// the store's own, so a test reads what the readings alone hold.
     responses: Arc<ByteBudget>,
-    /// The queues of the store's queries, which no thread answers, kept so a reader's query
-    /// waits as it does on a store that has yet to answer it.
+    /// The queues of the store's queries, which only `serve` answers, so a reader's query waits
+    /// as it does on a store that has yet to answer it until the test plays the store's turn.
     queries: Queries,
     run: RunIdentity,
     publication: u64,
@@ -145,10 +145,23 @@ impl Charted {
         })
     }
 
-    /// A handle on the store's queries, which no thread answers, so a reader's query waits.
+    /// A handle on the store's queries, which only `serve` answers, so a reader's query waits.
     #[must_use]
     pub fn handle(&self) -> QueryHandle {
         self.queries.handle(std::thread::current())
+    }
+
+    /// Answers the query a reader of `handle` left, or leaves it in place where the store would,
+    /// as the store's turn does once it has taken in what the ring published.
+    pub fn serve(&self) {
+        self.queries
+            .serve(&self.held, Some(&coverage()), &self.responses);
+    }
+
+    /// Hands a View of what the store holds to a main thread that lets go of it at once, which
+    /// moves the store's version as every View does, with no second taken.
+    pub fn publish(&mut self) {
+        self.held.publish(&super::Mailbox::new());
     }
 
     fn take_machine(&mut self, second: u64) -> MachineSecond {
@@ -185,18 +198,8 @@ impl Charted {
         if let Err(error) = submitted {
             panic!("the store refused a query of a context: {error:?}");
         }
-        let coverage = CheckedCoverage::new(
-            SourceGeneration {
-                recording: RECORDING,
-                generation: 0,
-            },
-            ContextRange {
-                first_ns: 0,
-                end_ns: 10_000_000 * NS,
-            },
-        );
 
-        queries.serve(&self.held, Some(&coverage), &self.responses);
+        queries.serve(&self.held, Some(&coverage()), &self.responses);
 
         let Some(reply) = handle.take() else {
             panic!("the store answered no query of a context");
@@ -244,6 +247,20 @@ pub fn shared_count(earlier: &Selection, later: &Selection) -> usize {
         .iter()
         .filter(|point| earlier.iter().any(|other| point.shares_point_with(other)))
         .count()
+}
+
+/// What the store has checked it holds, every second a test takes in.
+fn coverage() -> CheckedCoverage {
+    CheckedCoverage::new(
+        SourceGeneration {
+            recording: RECORDING,
+            generation: 0,
+        },
+        ContextRange {
+            first_ns: 0,
+            end_ns: 10_000_000 * NS,
+        },
+    )
 }
 
 /// The CPU share of the complete reading `Charted::take` gives the wall second `second`.

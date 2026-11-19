@@ -5,7 +5,9 @@ use std::thread::Thread;
 
 use collector::ring::RingWaker;
 
-use super::{ByteBudget, CheckedCoverage, Held, QueryOutcome, QueryUnavailable, SourceGeneration};
+use super::{
+    ByteBudget, CheckedCoverage, Held, QueryKey, QueryOutcome, QueryUnavailable, SourceGeneration,
+};
 
 #[derive(Clone)]
 pub struct QueryHandle {
@@ -23,6 +25,9 @@ pub struct QueryRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuerySelection {
     FollowLatest,
+    /// Follows the newest second as `FollowLatest` does, once the Store holds other than what
+    /// the key names, the key of the answer the asker took last.
+    FollowLatestAfter(QueryKey),
     Second {
         second: u64,
         alternative: u32,
@@ -119,6 +124,15 @@ impl Queries {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, request)) = &state.request {
+            if let QuerySelection::FollowLatestAfter(key) = request.selection {
+                // The asker shows what the Store holds, so the question waits in place for a
+                // later serve, which a submit, a cancel or a close may replace or answer first.
+                if key == QueryKey::of(held) {
+                    return;
+                }
+            }
+        }
         let request = state.request.take();
         let Some((token, request)) = request else {
             return;

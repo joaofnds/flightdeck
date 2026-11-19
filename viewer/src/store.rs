@@ -83,7 +83,7 @@ pub use native::AppMetadata;
 pub use payload::packed::KeptPlain;
 pub use payload::{AppDetails, Payload, ProcessAt, ProcessName, ProcessRow};
 pub use query::{
-    HistoryError, HistoryResult, QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome,
+    HistoryError, HistoryResult, QueryContext, QueryHandle, QueryKey, QueryNeedsLoad, QueryOutcome,
     QueryReadiness, QueryReply, QueryRequest, QuerySecond, QuerySelection, QuerySubmitError,
     QueryToken, QueryUnavailable, SourceGeneration,
 };
@@ -521,7 +521,7 @@ impl Newest {
 }
 
 /// A second by the run that published it and its publication in that run.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Published {
     run: RunIdentity,
     publication: u64,
@@ -552,6 +552,14 @@ enum StartupState {
     Loading,
     Primary,
     Complete,
+}
+
+impl Held {
+    /// The run and publication of the newest second the store took in.
+    fn newest_published(&self) -> Option<Published> {
+        self.newest
+            .map(|newest| Published::of(&newest.run, newest.publication))
+    }
 }
 
 impl Held {
@@ -1322,7 +1330,7 @@ fn startup_staged_native(
 #[derive(PartialEq, Eq)]
 struct StartupCapacity {
     bytes: usize,
-    newest: Option<(RunIdentity, u64)>,
+    newest: Option<Published>,
 }
 
 impl StartupCapacity {
@@ -1338,7 +1346,7 @@ impl StartupCapacity {
 fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
     StartupCapacity {
         bytes: budget.used(),
-        newest: held.newest.map(|newest| (newest.run, newest.publication)),
+        newest: held.newest_published(),
     }
 }
 

@@ -200,9 +200,41 @@ struct Shared {
     /// before each request and at each tick, so the step that reads the page next takes what the
     /// window draws then. A request alone would carry it only while that request stands.
     app_chart_from_view: AtomicBool,
+    /// Whether the reader has a keyed question out for a page that shows a reading, so the
+    /// reading of the Store's next second is on its way and the page takes that second's View
+    /// with it. The worker says it once a step, after the step's work.
+    reading_on_its_way: AtomicBool,
+    /// Wakes the page each time the worker leaves it an update, so the page takes it as it lands
+    /// rather than at its next tick, and when the worker drops a keyed answer as a repeat, so the
+    /// page takes the View that came with it. It goes with the worker when a window hands it
+    /// over, and the next window's page puts its own in place.
+    page_waker: Mutex<Option<PageWaker>>,
 }
 
+/// What the worker calls, on its own thread, each time it wakes the page.
+type PageWaker = Box<dyn Fn() + Send + Sync>;
+
 impl Shared {
+    /// Has each wake of the page go through `waker`, in place of any earlier.
+    fn wake_page_with(&self, waker: PageWaker) {
+        match self.page_waker.lock() {
+            Ok(mut page_waker) => *page_waker = Some(waker),
+            Err(error) => eprintln!("flightdeck GPUI reader page waker: {error}"),
+        }
+    }
+
+    /// Wakes the page, so it takes at once what the worker or the store left it.
+    fn wake_page(&self) {
+        match self.page_waker.lock() {
+            Ok(page_waker) => {
+                if let Some(page_waker) = page_waker.as_ref() {
+                    page_waker();
+                }
+            }
+            Err(error) => eprintln!("flightdeck GPUI reader page waker: {error}"),
+        }
+    }
+
     fn app_chart_source(&self) -> AppChartSource {
         if self.app_chart_from_view.load(Ordering::Acquire) {
             AppChartSource::View
@@ -446,6 +478,22 @@ impl Worker {
         self.submit(request, Context::Select)
     }
 
+    /// Has each update the reader leaves for the window, and each keyed answer it drops as a
+    /// repeat, wake the page through `waker`, so the page takes what landed as it lands.
+    pub(crate) fn wake_page_with(&self, waker: PageWaker) {
+        self.shared.wake_page_with(waker);
+    }
+
+    /// Whether the reading of the Store's next second is on its way to the page, so the page
+    /// takes that second's View when the reading lands. A reader that stopped sends none.
+    pub(crate) fn reading_on_its_way(&self) -> bool {
+        if !self.running() {
+            return false;
+        }
+
+        self.shared.reading_on_its_way.load(Ordering::Acquire)
+    }
+
     /// Tells the reader what draws the page's chart by App, `source`, so a reading of a page
     /// whose chart the Store's View draws builds no App history of it. The reader takes it at its
     /// next step, under the request it follows, with no new request and no context read again.
@@ -673,6 +721,8 @@ impl Shared {
             stopped: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
             app_chart_from_view: AtomicBool::new(false),
+            reading_on_its_way: AtomicBool::new(false),
+            page_waker: Mutex::new(None),
         }
     }
 }
@@ -737,13 +787,37 @@ fn worker_lease(
             Received::Broken => return Lease::Ended,
         }
         let pause = worker_step(root, shared, reader, command, Instant::now());
+
+        let on_its_way = worker_lease_reading_on_its_way(reader, command.as_ref());
+        shared
+            .reading_on_its_way
+            .store(on_its_way, Ordering::Release);
+
         let answer = reader
             .store
             .as_ref()
             .and_then(store_reader::StoreReader::answer_awaited);
+        // The page leaves a View to the reading on its way, so the answer that brings it must
+        // end the pause.
+        if on_its_way {
+            assert!(answer.is_some());
+        }
         worker_pause_for(shared, pause, answer);
     }
     Lease::Renewed
+}
+
+/// Whether the reading of the Store's next second is on its way to the page of `command`, which
+/// the worker says once a step, after the step's work.
+fn worker_lease_reading_on_its_way(reader: &Reader, command: Option<&Command>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+    let Some(store) = &reader.store else {
+        return false;
+    };
+
+    store.reading_on_its_way(command)
 }
 
 /// What the worker found in its mailbox at the top of a step.
@@ -820,6 +894,8 @@ fn worker_step_read(
         if reader_pending(reader, command.generation) {
             measurement::checkpoint(shared, command.generation, measurement::Stage::Pending);
         }
+        let told = shared.reading_on_its_way.load(Ordering::Acquire);
+        let asked = worker_step_read_keyed_question(reader);
         if let Some(output) = reader_read(reader, root, command, shared) {
             #[cfg(test)]
             shared.measurement_staged.store(
@@ -829,11 +905,23 @@ fn worker_step_read(
             #[cfg(test)]
             measurement::finished(shared, command.generation);
             worker_publish(shared, command.generation, output);
+        } else if told {
+            // The page left the store's View to the reading of the keyed question it was told
+            // of. Where the step ended that question with no reading, the page takes the View
+            // now rather than at its next tick.
+            if worker_step_read_keyed_question(reader) != asked {
+                shared.wake_page();
+            }
         }
         worker_pause(reader, command)
     } else {
         POLL_INTERVAL
     }
+}
+
+/// The token of the keyed question the reader has out to the Store, if any.
+fn worker_step_read_keyed_question(reader: &Reader) -> Option<viewer::store::QueryToken> {
+    reader.store.as_ref()?.keyed_question()
 }
 
 /// Lists the saved minutes a step left until it was over, where its context has moved far enough
@@ -898,8 +986,9 @@ fn worker_pause(reader: &Reader, command: &Command) -> Duration {
 }
 
 /// Pauses the worker for `pause`, or until a request, a rest or a stop arrives or the Store gives
-/// the `answer` a page waits for, so a page the reader asks for is read with no pause. With no
-/// answer awaited, what the Store says waits for the next step.
+/// the `answer` a page waits for, so a page that shows nothing yet, and a followed page whose Store
+/// holds something new, is read with no pause. With no answer awaited, what the Store says waits
+/// for the next step.
 fn worker_pause_for(shared: &Shared, pause: Duration, answer: Option<&viewer::store::QueryHandle>) {
     match shared.mailbox.lock() {
         Ok(mut mailbox) => {
@@ -952,24 +1041,29 @@ fn worker_answer_wakes(shared: &Arc<Shared>, handle: &viewer::store::QueryHandle
     });
 }
 
+/// Leaves `output` for the window where it answers the window's last command, and then wakes the
+/// page, with the mailbox let go, so the page takes it as it lands.
 fn worker_publish(shared: &Shared, generation: u64, output: Update) {
     match shared.mailbox.lock() {
         Ok(mut mailbox) => {
             // Publishing and accepting requests use one lock, so supersession is atomic.
-            if generation == mailbox.generation {
-                #[cfg(test)]
-                {
-                    mailbox.output_complete = shared.measurement_staged.load(Ordering::Acquire);
-                    mailbox.frozen_payloads = measurement::take_payloads();
-                }
-                mailbox.output = Some(output);
+            if generation != mailbox.generation {
+                return;
             }
+            #[cfg(test)]
+            {
+                mailbox.output_complete = shared.measurement_staged.load(Ordering::Acquire);
+                mailbox.frozen_payloads = measurement::take_payloads();
+            }
+            mailbox.output = Some(output);
         }
         Err(error) => {
             eprintln!("flightdeck GPUI reader publication: {error}");
             shared.stopped.store(true, Ordering::Release);
+            return;
         }
     }
+    shared.wake_page();
 }
 
 /// Drops the page the closed window read, so the next window's page reads as newly opened and

@@ -620,11 +620,33 @@ impl LiveDashboard {
     }
 
     /// Marks that the store left a View, which the next tick takes.
-    pub(crate) fn mark_woken(&mut self) {
+    fn mark_woken(&mut self) {
         let store_view::MailboxWatch::FromWake { woken } = &mut self.mailbox_watch else {
             unreachable!("only a page waiting for wakes is woken");
         };
         *woken = true;
+    }
+
+    /// What the store's wake does: it marks the View the store left, and ticks to take it where
+    /// no reading of its second is on its way. Where one is, the worker's wake takes the View with
+    /// that reading, so the page draws the second once.
+    pub(crate) fn wake_from_store(&mut self, cx: &mut Context<Self>) {
+        self.mark_woken();
+        if self.worker.reading_on_its_way() {
+            return;
+        }
+
+        self.tick(cx);
+    }
+
+    /// What the worker's wake does: its tick takes the update the worker left and any View the
+    /// store left, whichever of the two wakes the run loop ran first. It marks the View only
+    /// where the store left one, so the timer's ticks after it go on asking the store for nothing.
+    pub(crate) fn wake_from_worker(&mut self, cx: &mut Context<Self>) {
+        if store_view::store_pending(cx) {
+            self.mailbox_watch = self.mailbox_watch.after_wake();
+        }
+        self.tick(cx);
     }
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {

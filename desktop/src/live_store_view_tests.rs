@@ -2026,7 +2026,7 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     page.update(cx, LiveDashboard::tick);
 
     assert!(cx.update(|cx| page.read(cx).awaiting_reply()));
-    page.update(cx, |page, _| page.mark_woken());
+    page.update(cx, LiveDashboard::wake_from_store);
     tick_until_settled(cx, &page, 2);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
@@ -2054,8 +2054,11 @@ mod when_the_store_wakes_the_page {
 
     #[gpui::test]
     fn the_wake_takes_the_view_the_store_left(cx: &mut gpui::TestAppContext) {
-        // Goal: the wake that comes with a publication draws it at once. Method: a real store
-        // leaves a second View for a page waiting for wakes, which is then woken.
+        // Goal: a tick after the store's mark takes the View the store left. Method: a real store
+        // leaves a second View for a page waiting for wakes, which is then marked and ticks. The
+        // test marks the page and ticks it itself rather than through the store's wake, which
+        // ticks only where no reading is on its way, and whether one is on this page's way
+        // depends on how far the real worker has got.
         let (mut recording, page) = page_waiting_for_wakes(cx);
         recording.publish();
         wait_for_a_view_left(cx);
@@ -2081,10 +2084,7 @@ mod when_the_store_wakes_the_page {
         page.update(cx, |page, cx| page.pin_second(second, cx));
         recording.publish();
         wait_for_a_view_left(cx);
-        page.update(cx, |page, cx| {
-            page.mark_woken();
-            page.tick(cx);
-        });
+        page.update(cx, LiveDashboard::wake_from_store);
 
         page.update(cx, LiveDashboard::select);
         page.update(cx, LiveDashboard::tick);
@@ -2152,4 +2152,336 @@ fn newer_store_view(cx: &mut gpui::TestAppContext, version: u64) -> Arc<View> {
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!("the Store handed over no newer View");
+}
+
+mod when_the_store_or_the_worker_wakes_the_page {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use gpui::{AppContext, TestAppContext, VisualTestContext, WindowOptions};
+
+    use super::*;
+    use crate::live_dashboard::input_tests::close_dashboard_window;
+    use crate::live_dashboard::input_tests::source_mode::LiveRecording;
+    use crate::live_source::measurement::{Hold, Stage};
+
+    #[gpui::test]
+    fn the_workers_wake_draws_the_view_with_the_reading(cx: &mut TestAppContext) {
+        // Goal: a followed page draws a second once, with the store's View and the worker's
+        // reading of it together, since the reading is on its way when the store wakes the page.
+        // Method: hold the worker at the start of a step, publish a second, wake the page as the
+        // store does, let the worker read the second, wake the page as the worker does, and count
+        // the page's draws.
+        let mut followed = Followed::open(cx, "memory");
+        followed.wait_for_a_keyed_question();
+        let drawn = followed.renders();
+        followed.publish_with_the_worker_held();
+
+        followed.store_wakes();
+        followed.worker_reads();
+        followed.worker_wakes();
+
+        assert_eq!(followed.renders(), drawn + 1);
+        assert_eq!(followed.reading_second(), followed.view_second());
+    }
+
+    #[gpui::test]
+    fn the_stores_wake_takes_the_view_at_once_where_no_reading_is_on_its_way(
+        cx: &mut TestAppContext,
+    ) {
+        // Goal: where no reading is on its way, as at launch and on the Self page, which shows
+        // none, the store's wake takes its View at once, since no worker's wake brings it.
+        // Method: publish a second to the Self page and wake the page as the store does. The
+        // Self page draws nothing from a View, so the test asserts the View it took rather than
+        // a draw.
+        let mut followed = Followed::open(cx, "self");
+        let published = followed.publish();
+
+        followed.store_wakes();
+
+        assert_eq!(followed.view_publication(), Some(published));
+    }
+
+    #[gpui::test]
+    fn the_workers_wake_that_runs_first_takes_the_view_with_the_reading(cx: &mut TestAppContext) {
+        // Goal: the run loop may run the worker's wake before the store's, and the page still
+        // draws the second once, since the worker's tick takes the View too and the store's wake
+        // after it finds nothing new. Method: hold the worker, publish a second, let the worker
+        // read it, wake the page as the worker does and then as the store does, and count the
+        // page's draws.
+        let mut followed = Followed::open(cx, "memory");
+        followed.wait_for_a_keyed_question();
+        let drawn = followed.renders();
+        followed.publish_with_the_worker_held();
+        followed.worker_reads();
+
+        followed.worker_wakes();
+        followed.store_wakes();
+
+        assert_eq!(followed.renders(), drawn + 1);
+        assert_eq!(followed.reading_second(), followed.view_second());
+    }
+
+    #[gpui::test]
+    fn the_timers_tick_takes_a_view_no_reading_came_with(cx: &mut TestAppContext) {
+        // Goal: a View whose reading never comes waits no longer than the page's next tick.
+        // Method: hold the worker so that its reading does not come, publish a second, wake the
+        // page as the store does, which leaves the View to the reading, and tick it as its timer
+        // does, and count the page's draws.
+        let mut followed = Followed::open(cx, "memory");
+        followed.wait_for_a_keyed_question();
+        let earlier = followed.view_publication();
+        let drawn = followed.renders();
+        let published = followed.publish_with_the_worker_held();
+        followed.store_wakes();
+        assert_eq!(followed.view_publication(), earlier);
+        assert_eq!(followed.renders(), drawn);
+
+        followed.timer_ticks();
+
+        assert_eq!(followed.view_publication(), Some(published));
+        assert_eq!(followed.renders(), drawn + 1);
+    }
+
+    #[gpui::test]
+    fn a_held_second_keeps_its_view_across_both_wakes(cx: &mut TestAppContext) {
+        // Goal: a hold keeps the View its charts were drawn from, whichever wake comes. Method:
+        // hold the page's newest second, publish another, and wake the page as the store does and
+        // as the worker does.
+        let mut followed = Followed::open(cx, "memory");
+        followed.hold_the_newest_second();
+        let held = followed.view_publication();
+        followed.publish();
+
+        followed.store_wakes();
+        followed.worker_wakes();
+
+        assert_eq!(followed.view_publication(), held);
+    }
+
+    #[gpui::test]
+    fn the_workers_wake_with_no_view_left_has_the_timer_ask_the_store_for_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        // Goal: a page waiting for the store's wake asks the store's mailbox for nothing at its
+        // timer's ticks, also after a worker's wake that came with no View, as for a hover's
+        // reading. Method: open a followed page, which the store has left no View, wake it as
+        // the worker does, tick it as its timer does, and ask whether its ticks look for a View.
+        let mut followed = Followed::open(cx, "memory");
+        assert!(!followed.store_pending());
+
+        followed.worker_wakes();
+        followed.timer_ticks();
+
+        assert!(!followed.ticks_look_for_a_view());
+    }
+
+    #[gpui::test]
+    fn a_page_of_an_app_with_no_store_takes_the_workers_wake(cx: &mut TestAppContext) {
+        // Goal: the worker's wake leaves a page that looks for the store's View at every tick as
+        // it is, since no store wakes it, and does not panic there. Method: open a page in a test
+        // window with no store installed, have it wait for wakes as the app's page does, and wake
+        // it as the worker does.
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|cx| {
+                    let mut page = opening();
+                    page.wake_with(Box::new(|| {}), cx);
+                    page
+                })
+            })
+            .unwrap()
+        });
+        let page = window.root(cx).unwrap();
+        let mut window = VisualTestContext::from_window(window.into(), cx);
+
+        page.update(&mut window, LiveDashboard::wake_from_worker);
+
+        close_dashboard_window(&mut window, &page);
+    }
+
+    /// A page following the newest second of a real store and worker in a test window, which the
+    /// test wakes by hand where the app's two wakes would, in the order each test chooses.
+    struct Followed {
+        recording: LiveRecording,
+        page: gpui::Entity<LiveDashboard>,
+        window: VisualTestContext,
+        /// Whether the worker has woken the page since the test last looked.
+        worker_woke: Arc<AtomicBool>,
+        /// The hold on the worker at the start of a step, which `worker_reads` lets go of, and
+        /// dropping the page does where no test did.
+        held_worker: Option<Hold>,
+    }
+
+    impl Followed {
+        /// Opens the page of `route` in a test window over a recording of one second. It builds
+        /// its own page rather than through `page_waiting_for_wakes`, which opens Overview with
+        /// no window, since the tests count the page's draws and choose its route.
+        fn open(cx: &mut TestAppContext, route: &str) -> Self {
+            let mut recording = LiveRecording::new();
+            recording.publish();
+            let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+            let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+            let worker_woke = Arc::new(AtomicBool::new(false));
+            let signal = Arc::clone(&worker_woke);
+            worker.wake_page_with(Box::new(move || signal.store(true, Ordering::Release)));
+            cx.update(|cx| super::super::install_store(store, cx));
+            let window = cx.update(|cx| {
+                cx.open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|cx| {
+                        let mut page = LiveDashboard::new(worker, route.into(), None);
+                        // The test wakes the page itself, at the moment each test chooses.
+                        page.wake_with(Box::new(|| {}), cx);
+                        page
+                    })
+                })
+                .unwrap()
+            });
+            let page = window.root(cx).unwrap();
+            let mut window = VisualTestContext::from_window(window.into(), cx);
+            tick_until_settled(&mut window, &page, recording.publication());
+            window.run_until_parked();
+
+            Self {
+                recording,
+                page,
+                window,
+                worker_woke,
+                held_worker: None,
+            }
+        }
+
+        /// Waits until the worker has its keyed question out, which the store answers once it
+        /// takes the next second.
+        fn wait_for_a_keyed_question(&self) {
+            for _attempt in 0..2_000 {
+                if self.reading_on_its_way() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the worker put no keyed question out");
+        }
+
+        fn reading_on_its_way(&self) -> bool {
+            self.page
+                .read_with(&self.window, |page, _| page.worker.reading_on_its_way())
+        }
+
+        fn store_pending(&self) -> bool {
+            TestAppContext::update(&self.window, |cx| super::super::store_pending(cx))
+        }
+
+        fn ticks_look_for_a_view(&self) -> bool {
+            self.page
+                .read_with(&self.window, |page, _| page.mailbox_watch.looks())
+        }
+
+        fn renders(&self) -> u64 {
+            self.page.read_with(&self.window, |page, _| page.renders)
+        }
+
+        fn view_second(&self) -> Option<u64> {
+            self.page.read_with(&self.window, |page, _| {
+                let second = page.store_view.as_ref()?.seconds.last()?;
+                Some(second.wall_ns / super::super::NANOSECONDS_PER_SECOND)
+            })
+        }
+
+        fn view_publication(&self) -> Option<u64> {
+            self.page.read_with(&self.window, |page, _| {
+                Some(page.store_view.as_ref()?.seconds.last()?.publication)
+            })
+        }
+
+        fn reading_second(&self) -> Option<u64> {
+            self.page.read_with(&self.window, |page, _| {
+                page.snapshot.as_ref()?.selection["second"].as_u64()
+            })
+        }
+
+        /// Holds the worker at the start of its next step, then publishes a second, waits until
+        /// the store has left its View of it, and answers that second's publication.
+        fn publish_with_the_worker_held(&mut self) -> u64 {
+            assert!(self.held_worker.is_none());
+            let hold = self.page.read_with(&self.window, |page, _| {
+                page.worker.hold_measurement_stage(Stage::Reading)
+            });
+            hold.entered();
+            self.held_worker = Some(hold);
+
+            self.publish()
+        }
+
+        /// Publishes a second, waits until the store has left its View of it, and answers that
+        /// second's publication.
+        fn publish(&mut self) -> u64 {
+            self.worker_woke.store(false, Ordering::Release);
+            self.recording.publish();
+            for _attempt in 0..2_000 {
+                if self.store_pending() {
+                    return self.recording.publication();
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the store left no View");
+        }
+
+        /// Lets the held worker read the second, and waits until it has woken the page.
+        fn worker_reads(&mut self) {
+            let Some(hold) = self.held_worker.take() else {
+                panic!("the worker is not held");
+            };
+            hold.release();
+            for _attempt in 0..2_000 {
+                if self.worker_woke.swap(false, Ordering::AcqRel) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the worker did not wake the page");
+        }
+
+        /// Holds the newest second the page shows, as a pick on a chart does.
+        fn hold_the_newest_second(&mut self) {
+            self.page.update(&mut self.window, |page, cx| {
+                let second = page.shown_second().unwrap();
+                page.pin_second(second, cx);
+            });
+            self.window.run_until_parked();
+        }
+
+        fn timer_ticks(&mut self) {
+            self.page.update(&mut self.window, LiveDashboard::tick);
+            self.window.run_until_parked();
+        }
+
+        fn store_wakes(&mut self) {
+            self.page
+                .update(&mut self.window, LiveDashboard::wake_from_store);
+            self.window.run_until_parked();
+        }
+
+        fn worker_wakes(&mut self) {
+            self.page
+                .update(&mut self.window, LiveDashboard::wake_from_worker);
+            self.window.run_until_parked();
+        }
+    }
+
+    impl Drop for Followed {
+        fn drop(&mut self) {
+            // The worker stops as the window closes, so it must not wait at a hold.
+            drop(self.held_worker.take());
+            close_dashboard_window(&mut self.window, &self.page);
+            // As in `close_dashboard_window`, a test that failed inside an update leaves its
+            // window taken, so updating it here would panic again during the unwind, which aborts
+            // every test still to run.
+            if std::thread::panicking() {
+                return;
+            }
+            TestAppContext::update(&self.window, |cx| {
+                drop(cx.remove_global::<super::super::LiveStore>());
+            });
+        }
+    }
 }

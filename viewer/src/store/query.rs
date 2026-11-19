@@ -31,6 +31,25 @@ pub struct SourceGeneration {
     pub generation: u64,
 }
 
+/// What the Store held when it built a context: the version of the last View it published and
+/// the newest second it took. A second taken moves the newest second, also while the main thread
+/// holds every View, and every other change of what a context holds moves the version at the
+/// View that shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryKey {
+    version: u64,
+    newest: Option<super::Published>,
+}
+
+impl QueryKey {
+    fn of(held: &Held) -> Self {
+        Self {
+            version: held.version,
+            newest: held.newest_published(),
+        }
+    }
+}
+
 /// A loader/source acceptance certificate. Only the Store producer may construct one.
 #[derive(Clone, Copy)]
 pub(crate) struct CheckedCoverage {
@@ -55,6 +74,7 @@ pub struct QueryContext {
     selected: Observation,
     seconds: Vec<QuerySecond>,
     reservation: ContextReservation,
+    key: QueryKey,
 }
 
 /// Independent facets remain available when another facet was not retained.
@@ -234,6 +254,13 @@ impl QueryContext {
         Arc::clone(&self.reservation.budget)
     }
 
+    /// What the Store held when it built the context, which a follow question that names it
+    /// waits on to change.
+    #[must_use]
+    pub fn key(&self) -> QueryKey {
+        self.key
+    }
+
     #[must_use]
     pub fn selected_second(&self) -> u64 {
         self.selection.second()
@@ -406,9 +433,12 @@ fn build_target(
             return Err(QueryOutcome::NeedsLoad(QueryNeedsLoad::AppsPending));
         }
     }
-    let followed = matches!(request.selection, QuerySelection::FollowLatest);
+    let followed = matches!(
+        request.selection,
+        QuerySelection::FollowLatest | QuerySelection::FollowLatestAfter(_)
+    );
     let mut retention = match request.selection {
-        QuerySelection::FollowLatest => Retention::Followed,
+        QuerySelection::FollowLatest | QuerySelection::FollowLatestAfter(_) => Retention::Followed,
         QuerySelection::Second { .. } | QuerySelection::Exact { .. } => Retention::Fixed,
     };
     let readiness = if held.startup == super::StartupState::Primary {
@@ -434,7 +464,7 @@ fn build_selection(
 ) -> Result<ContextSelection, QueryUnavailable> {
     let newest_second = newest.wall_ns.map(|wall| wall / 1_000_000_000);
     let (second, last) = match selection {
-        QuerySelection::FollowLatest => (
+        QuerySelection::FollowLatest | QuerySelection::FollowLatestAfter(_) => (
             newest_second.ok_or(QueryUnavailable::InvalidSecond)?,
             newest_second,
         ),
@@ -527,7 +557,7 @@ fn build_selected(
     selection: &QuerySelection,
 ) -> Result<Observation, QueryOutcome> {
     let (second, alternative) = match selection {
-        QuerySelection::FollowLatest => return Ok(*newest),
+        QuerySelection::FollowLatest | QuerySelection::FollowLatestAfter(_) => return Ok(*newest),
         QuerySelection::Exact { observation, .. } => {
             return held
                 .apps
@@ -649,6 +679,7 @@ fn build_context(
         selected: target.selected,
         seconds,
         reservation,
+        key: QueryKey::of(held),
     }))
 }
 
