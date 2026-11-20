@@ -185,6 +185,8 @@ jobs:
               run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/Flightdeck.app"]
             end
 
+            uninstall quit: "dev.flightdeck.desktop"
+
             zap trash: [
               "~/Library/Application Support/Flightdeck",
               "~/Library/Preferences/dev.flightdeck.desktop.plist",
