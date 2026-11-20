@@ -46,6 +46,8 @@ pub(super) enum Action {
     Spawn,
     Terminate,
     Kill,
+    /// Asks the recording another build runs to stop, so that a recorder of this build replaces it.
+    StopOtherBuild(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +92,13 @@ pub(super) fn other_build_failure(build: u64) -> String {
     )
 }
 
+fn finishing_failure() -> String {
+    format!(
+        "The last collector did not finish saving within {} seconds; retry to reconnect",
+        FINISHING_LIMIT.as_secs()
+    )
+}
+
 /// The collector this app started is a stale executable, which only a rebuild replaces.
 pub(super) fn owned_build_failure(build: u64) -> String {
     format!(
@@ -124,6 +133,11 @@ pub(super) struct Policy {
     /// waits from.
     stepped: Option<Duration>,
     restart_requested: bool,
+    /// Whether the window is the user's own on the default recording, whose launch replaces
+    /// another build's helpers rather than failing on them.
+    own_default_recording: bool,
+    /// The build whose recording discovery asked to stop, which it asks once until a Retry.
+    other_build_asked: Option<u64>,
 }
 
 impl Policy {
@@ -143,6 +157,17 @@ impl Policy {
             finishing_since: None,
             stepped: None,
             restart_requested: mode == Mode::Explicit,
+            own_default_recording: false,
+            other_build_asked: None,
+        }
+    }
+
+    /// The policy of the user's own window on the default recording, which asks another build's
+    /// recording to stop and starts a recorder of this build once it has.
+    pub fn new_own_default_recording(mode: Mode) -> Self {
+        Self {
+            own_default_recording: true,
+            ..Self::new(mode)
         }
     }
 
@@ -202,8 +227,7 @@ impl Policy {
             return Action::None;
         }
         if let Build::Other(build) = source.build {
-            self.fail(&other_build_failure(build));
-            return Action::None;
+            return self.discover_other_build(now, build, source.recording);
         }
 
         if source.build == Build::Unrecognized {
@@ -212,7 +236,7 @@ impl Policy {
         }
 
         if source.recording == RecordingStatus::Finishing {
-            self.discover_finishing(now);
+            self.discover_finishing(now, &finishing_failure());
             return Action::None;
         }
 
@@ -251,16 +275,40 @@ impl Policy {
         Action::None
     }
 
+    /// Waits on any window for another build's helpers that were asked to stop, since they save
+    /// their last readings as this build's do. The user's own window asks running ones once to
+    /// stop and then waits the same way, and any other window fails on them. Helpers of another
+    /// build that never finish are stopped by hand, with the command the failure names.
+    fn discover_other_build(
+        &mut self,
+        now: Duration,
+        build: u64,
+        recording: RecordingStatus,
+    ) -> Action {
+        if recording == RecordingStatus::Finishing {
+            self.discover_finishing(now, &other_build_failure(build));
+            return Action::None;
+        }
+        if !self.own_default_recording {
+            self.fail(&other_build_failure(build));
+            return Action::None;
+        }
+
+        self.discover_finishing(now, &other_build_failure(build));
+        if self.state == State::Failed || self.other_build_asked.is_some() {
+            return Action::None;
+        }
+        self.other_build_asked = Some(build);
+        Action::StopOtherBuild(build)
+    }
+
     /// Waits for a collector still finishing, which saves its last readings after its app quits,
     /// for as long as its own deadline lets it run, and counts the discovery limit from the
-    /// moment it lets go.
-    fn discover_finishing(&mut self, now: Duration) {
+    /// moment it lets go. A wait past that deadline ends in `failure`.
+    fn discover_finishing(&mut self, now: Duration, failure: &str) {
         let finishing_since = *self.finishing_since.get_or_insert(now);
         if now.saturating_sub(finishing_since) >= FINISHING_LIMIT {
-            self.fail(&format!(
-                "The last collector did not finish saving within {} seconds; retry to reconnect",
-                FINISHING_LIMIT.as_secs()
-            ));
+            self.fail(failure);
             return;
         }
 
@@ -427,6 +475,7 @@ impl Policy {
             self.previous = None;
             self.stopping = false;
             self.finishing_since = None;
+            self.other_build_asked = None;
             self.restart_requested = true;
         }
     }

@@ -1,7 +1,7 @@
 use collector::recording::private::{atomic_write, create_private_dir};
 use collector::recording::{identity_text, random_identity};
 
-use super::{delete_older_recording, start};
+use super::{delete_older_recording, probe_configuration, run_configuration, start};
 use crate::performance::Options;
 use crate::time_range::Range;
 
@@ -34,16 +34,52 @@ fn a_named_recording_stays_where_the_launch_named_it() {
     assert!(older_recording_outlives(&["--recording", "/tmp/unused"]));
 }
 
+#[test]
+fn a_default_window_is_the_users_own_on_the_default_recording() {
+    // Goal: the window a plain launch opens stops its recording at its quit and replaces
+    // another build's helpers.
+    // Method: build the collector configuration of a launch with no argument.
+    assert!(run_configuration_of(&[]).own_default_recording);
+}
+
+#[test]
+fn a_window_on_a_named_recording_is_not_the_users_own() {
+    // Goal: a window on a recording the launch names never stops or replaces its helpers.
+    // Method: build the collector configuration of a launch with --recording.
+    assert!(!run_configuration_of(&["--recording", "/tmp/unused"]).own_default_recording);
+}
+
+#[test]
+fn a_live_check_that_starts_a_collector_is_not_the_users_own_window() {
+    // Goal: a headless check of a development build never stops the user's recording or
+    // replaces its helpers.
+    // Method: build the collector configuration of --live-check --start-collector with neither
+    // --recording nor --seconds.
+    let options = options_of(&["--live-check", "--start-collector"]);
+
+    let configuration = probe_configuration(std::path::Path::new("/tmp/unused"), &options);
+
+    assert!(!configuration.unwrap().own_default_recording);
+}
+
+fn run_configuration_of(arguments: &[&str]) -> super::lifecycle::Configuration {
+    run_configuration(std::path::Path::new("/tmp/unused"), &options_of(arguments)).unwrap()
+}
+
+fn options_of(arguments: &[&str]) -> Options {
+    let arguments: Vec<_> = arguments
+        .iter()
+        .map(|&argument| argument.to_owned())
+        .collect();
+    Options::parse_arguments(&arguments).unwrap()
+}
+
 /// Whether an older recording at the root the launch is given is still there after a launch with
 /// these `arguments`.
 fn older_recording_outlives(arguments: &[&str]) -> bool {
     let parent = older_recording_parent();
     let root = parent.join("flightdeck.recording");
-    let arguments: Vec<_> = arguments
-        .iter()
-        .map(|&argument| argument.to_owned())
-        .collect();
-    let options = Options::parse_arguments(&arguments).unwrap();
+    let options = options_of(arguments);
 
     delete_older_recording(&root, &options);
 

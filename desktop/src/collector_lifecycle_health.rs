@@ -1,7 +1,10 @@
 use std::io;
 use std::path::Path;
 
-use collector::recording::{BUILD, Holder, Registry, holder, identity_text, read_identity};
+use collector::recording::control::Control;
+use collector::recording::{
+    BUILD, Holder, Registry, holder, identity_text, lifetime_lock_held, read_identity,
+};
 use collector::ring::{Identity, RingReader, RunIdentity};
 
 use super::policy::{Build, Observation, RecordingStatus, Source};
@@ -40,8 +43,19 @@ impl Health {
             self.0.readers = [None, None];
             return Ok(source);
         }
+        // The readings of the control file and the lifetime locks describe helpers someone else
+        // runs, which only discovery asks about. A recorder this app started holds its lock
+        // before it replaces the control file another build left, and would read as that build.
+        if owned_pid.is_some() {
+            return self.read_legacy(root, owned_pid);
+        }
+        if let Some(source) = read_other_build(root)? {
+            self.0.readers = [None, None];
+            return Ok(source);
+        }
 
-        self.read_legacy(root, owned_pid)
+        let source = self.read_legacy(root, owned_pid)?;
+        read_unreadable(root, source)
     }
 
     fn read_legacy(&mut self, root: &Path, owned_pid: Option<u32>) -> io::Result<Source> {
@@ -125,6 +139,56 @@ impl Health {
             .as_ref()
             .map(super::recorder::Recorder::notice)
     }
+}
+
+/// Reads a control file another build wrote, whose words this build cannot read but whose stop
+/// and lifetime locks still say whether that build's helpers run. A file that fails the checks
+/// across builds, or names this build after all, is left to the reading from the collector's lock
+/// and announcement.
+fn read_other_build(root: &Path) -> io::Result<Option<Source>> {
+    let written = match Control::read_across_builds(root) {
+        Ok(written) => written,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if written.build == BUILD {
+        return Ok(None);
+    }
+
+    let mut source = Source::default();
+    if !lifetime_lock_held(root)? {
+        source.recording = RecordingStatus::Ready;
+        return Ok(Some(source));
+    }
+
+    // Helpers still saving after they were asked to stop keep their build, so a wait that never
+    // ends names the command that stops them.
+    source.build = Build::Other(written.build);
+    if written.stopping {
+        source.recording = RecordingStatus::Finishing;
+    }
+    Ok(Some(source))
+}
+
+/// Keeps a launch from starting a recorder beside a recorder or persister whose control file it
+/// cannot read. A recording no collector holds reads as ready only when the collector's lock is
+/// free, so a lifetime lock held then is the recorder's or the persister's.
+fn read_unreadable(root: &Path, mut source: Source) -> io::Result<Source> {
+    if source.recording == RecordingStatus::Ready
+        && !source.producer_alive
+        && source.build == Build::Expected
+        && lifetime_lock_held(root)?
+    {
+        source.recording = RecordingStatus::Finishing;
+    }
+    Ok(source)
 }
 
 /// Starts the source from what the holder says, and returns the run it announces when that

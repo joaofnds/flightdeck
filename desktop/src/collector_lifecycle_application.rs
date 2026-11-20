@@ -54,7 +54,9 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         // or the worker ticks the page once the session is detached.
         drop(collection.wake.take());
         drop(collection.worker_wake.take());
-        collection.session.detach();
+        if let Err(error) = collection.session.quit() {
+            eprintln!("Flightdeck could not ask its recording to stop at quit: {error}");
+        }
         std::future::ready(())
     })
     .detach();

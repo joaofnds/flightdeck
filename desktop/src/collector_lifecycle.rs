@@ -21,6 +21,7 @@ mod tests;
 pub(super) mod test_child;
 
 use collector::recording::Registry;
+use collector::recording::control::Control;
 use collector::ring::{Place, previous_generation, unlink_generation};
 use diagnostics::Output;
 pub(super) use policy::Mode;
@@ -35,6 +36,9 @@ pub(super) struct Configuration {
     pub binary: PathBuf,
     pub isolated: bool,
     pub mode: Mode,
+    /// Whether the window is the user's own on the default recording, whose launch replaces
+    /// another build's helpers and whose quit stops the recording.
+    pub own_default_recording: bool,
 }
 
 pub(super) struct CollectorSession(Box<SessionState>);
@@ -68,9 +72,14 @@ const _: () = {
 impl CollectorSession {
     pub fn new(configuration: Configuration) -> Self {
         let mode = configuration.mode;
+        let policy = if configuration.own_default_recording {
+            Policy::new_own_default_recording(mode)
+        } else {
+            Policy::new(mode)
+        };
         Self(Box::new(SessionState {
             configuration,
-            policy: Policy::new(mode),
+            policy,
             child: None,
             standard: None,
             diagnostic: None,
@@ -117,6 +126,31 @@ impl CollectorSession {
         if let Err(error) = self.act(action) {
             self.0.policy.failure = Some(format!("Collector shutdown failed: {error}"));
         }
+    }
+
+    /// Lets go of the recording as the app quits. The user's own window on the default recording
+    /// asks it to stop and does not wait, since its helpers finish on their own and a quit by an
+    /// upgrade has ten seconds. Where no control file this build reads carries the stop, the
+    /// recorder this app started is sent the signal instead, and helpers another build runs are
+    /// left to the launch that replaces them, so neither is an error.
+    pub fn quit(&mut self) -> io::Result<()> {
+        let requested = if self.0.configuration.own_default_recording {
+            match Control::request_recording_stop(&self.0.configuration.root) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+                    ) =>
+                {
+                    self.signal_term()
+                }
+                result => result,
+            }
+        } else {
+            Ok(())
+        };
+        self.detach();
+        requested
     }
 
     pub fn detach(&mut self) {
@@ -243,6 +277,23 @@ impl CollectorSession {
                 Some(child) => child.kill(),
                 None => Ok(()),
             },
+            Action::StopOtherBuild(build) => {
+                self.act_stop_other_build(build);
+                Ok(())
+            }
+        }
+    }
+
+    /// Asks the recording another build runs to stop. A refusal, such as a recording that needs a
+    /// newer writer, leaves its helpers to be stopped by hand, which the failure says how to do.
+    fn act_stop_other_build(&mut self, build: u64) {
+        let root = &self.0.configuration.root;
+        match Control::request_recording_stop_across_builds(root) {
+            Ok(()) => eprintln!("Asked the recording of build {build:016x} to stop"),
+            Err(error) => {
+                eprintln!("Could not ask the recording of build {build:016x} to stop: {error}");
+                self.failed(&policy::other_build_failure(build));
+            }
         }
     }
 

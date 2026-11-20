@@ -42,7 +42,7 @@ pub(crate) fn set_animate_fans(enabled: bool, cx: &mut App) -> Result<(), String
 pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
     let mut collector = if options.source.start_collector {
-        let mut collector = collector_session(&root, options)?;
+        let mut collector = lifecycle::CollectorSession::new(probe_configuration(&root, options)?);
         collector.tick();
         if let Some(failure) = collector.failure() {
             return Err(failure.to_owned().into());
@@ -94,7 +94,7 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let control = control(options)?;
     let root = recording(options)?;
     delete_older_recording(&root, options);
-    let collector = collector_session(&root, options)?;
+    let collector = lifecycle::CollectorSession::new(run_configuration(&root, options)?);
     // A recording opened read-only has no ring to follow, so the store does not hold it yet.
     let mode = if options.source.read_only() {
         crate::live_source_mode::SourceMode::Recorded
@@ -399,11 +399,7 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
 /// recorder's refusal reaches the status line in each of those, as it does for a recording that
 /// fails to go here when the session would start a recorder over it.
 fn delete_older_recording(root: &std::path::Path, options: &Options) {
-    if options.source.recording.is_some() {
-        return;
-    }
-
-    if !personal(options, options.control.is_some()) {
+    if !own_default_recording(options) {
         return;
     }
 
@@ -417,16 +413,46 @@ fn delete_older_recording(root: &std::path::Path, options: &Options) {
     }
 }
 
+/// Whether the window is the user's own on the default recording: not timed, not under the
+/// control socket, and on no recording the launch names. Only such a window deletes an older
+/// version's recording, replaces another build's helpers, and stops the recording at its quit,
+/// since a window that only observes a recording must not cost the user it.
+fn own_default_recording(options: &Options) -> bool {
+    if options.source.recording.is_some() {
+        return false;
+    }
+
+    personal(options, options.control.is_some())
+}
+
 /// The directory Flightdeck keeps the user's files in.
 fn application_support() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
     Ok(PathBuf::from(home).join("Library/Application Support/Flightdeck"))
 }
 
-fn collector_session(
+/// The collector configuration of the window `run` opens.
+fn run_configuration(
     root: &std::path::Path,
     options: &Options,
-) -> Result<lifecycle::CollectorSession, Box<dyn std::error::Error>> {
+) -> Result<lifecycle::Configuration, Box<dyn std::error::Error>> {
+    collector_configuration(root, options, own_default_recording(options))
+}
+
+/// The collector configuration of a headless probe, which is never the user's own window, so a
+/// check of a development build neither stops the user's recording nor replaces its helpers.
+fn probe_configuration(
+    root: &std::path::Path,
+    options: &Options,
+) -> Result<lifecycle::Configuration, Box<dyn std::error::Error>> {
+    collector_configuration(root, options, false)
+}
+
+fn collector_configuration(
+    root: &std::path::Path,
+    options: &Options,
+    own_default_recording: bool,
+) -> Result<lifecycle::Configuration, Box<dyn std::error::Error>> {
     let mode = if options.source.start_collector {
         lifecycle::Mode::Explicit
     } else {
@@ -436,10 +462,11 @@ fn collector_session(
             lifecycle::Mode::Auto
         }
     };
-    Ok(lifecycle::CollectorSession::new(lifecycle::Configuration {
+    Ok(lifecycle::Configuration {
         root: root.to_owned(),
         binary: lifecycle::binary(&std::env::current_exe()?)?,
         isolated: options.source.recording.is_some(),
         mode,
-    }))
+        own_default_recording,
+    })
 }

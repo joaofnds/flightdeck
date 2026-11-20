@@ -5,6 +5,7 @@ use collector::recording::{BUILD, Registration, Registry, identity_text, random_
 use collector::ring::{Identity, Place, Readings, RingReader, Shape, Writer};
 use serde_json::json;
 
+use super::test_child::Controlled;
 use super::*;
 use crate::live_source::Snapshot;
 use collector::recording::control::{Control, Reporter, Role, State as WorkerState};
@@ -113,6 +114,225 @@ fn a_recorder_running_under_another_build_is_reported_by_its_build() {
 }
 
 #[test]
+fn a_recording_another_build_runs_reads_as_that_build() {
+    // Goal: a launch after an upgrade learns that the older build's helpers still run, though
+    // this build cannot open their control file.
+    // Method: stamp a real control file with another build and hold the collector's lock.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let _collector = fixture.hold("collector.lock");
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
+}
+
+#[test]
+fn a_recording_another_build_was_asked_to_stop_reads_as_finishing() {
+    // Goal: a launch waits for another build's helpers that were asked to stop, rather than
+    // failing on their build, and knows their build for the failure if they never finish.
+    // Method: ask a real control file to stop, stamp it with another build, and hold only the
+    // persister's lock.
+    let fixture = Controlled::new();
+    Control::open_writable(&fixture.root)
+        .unwrap()
+        .request_stop()
+        .unwrap();
+    fixture.stamp_build(OTHER_BUILD);
+    let _persister = fixture.hold("persister.lock");
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == RecordingStatus::Finishing);
+    assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
+}
+
+#[test]
+fn a_recording_another_build_left_with_no_lock_held_reads_as_ready() {
+    // Goal: a control file another build left behind keeps no launch from recording.
+    // Method: stamp a real control file with another build and hold none of its locks.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == RecordingStatus::Ready);
+}
+
+#[test]
+fn a_recording_another_build_was_asked_to_stop_with_no_lock_held_reads_as_ready() {
+    // Goal: another build's helpers that were asked to stop and have finished keep no launch
+    // waiting for them.
+    // Method: ask a real control file to stop, stamp it with another build, and hold none of its
+    // locks.
+    let fixture = Controlled::new();
+    Control::open_writable(&fixture.root)
+        .unwrap()
+        .request_stop()
+        .unwrap();
+    fixture.stamp_build(OTHER_BUILD);
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == RecordingStatus::Ready);
+}
+
+#[test]
+fn a_recording_without_a_control_file_with_a_held_lifetime_lock_reads_as_finishing() {
+    // Goal: a launch waits for a recorder or persister that holds its lock before it writes a
+    // control file, rather than starting a recorder beside it.
+    // Method: remove a real control file and hold each of the two locks alone.
+    for lock in ["recorder.lock", "persister.lock"] {
+        let fixture = Controlled::new();
+        std::fs::remove_file(fixture.root.join("recorder.control")).unwrap();
+        let _held = fixture.hold(lock);
+
+        let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+        assert!(source.recording == RecordingStatus::Finishing, "{lock}");
+    }
+}
+
+#[test]
+fn an_unreadable_control_file_with_a_held_recorder_or_persister_lock_reads_as_finishing() {
+    // Goal: a launch waits for a recorder or persister whose control file it cannot read,
+    // rather than starting a recorder beside it.
+    // Method: give a real control file another MAGIC and hold each of the two locks alone.
+    for lock in ["recorder.lock", "persister.lock"] {
+        let fixture = Controlled::new();
+        fixture.change_word(0, 0);
+        let _held = fixture.hold(lock);
+
+        let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+        assert!(source.recording == RecordingStatus::Finishing, "{lock}");
+    }
+}
+
+#[test]
+fn a_recorder_this_app_started_reads_as_its_own_before_it_replaces_another_builds_file() {
+    // Goal: the recorder this app just started is never taken for another build's helper while
+    // it has its lock but has yet to replace the control file another build left.
+    // Method: stamp a real control file with another build, hold the recorder's lock, and read
+    // it as a session that owns a recorder.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let _recorder = fixture.hold("recorder.lock");
+
+    let source = health::Health::new()
+        .read(&fixture.root, Some(std::process::id()))
+        .unwrap();
+
+    assert_eq!(policy::Build::Expected, source.build);
+}
+
+#[test]
+fn a_starting_session_keeps_its_recorder_before_it_replaces_another_builds_file() {
+    // Goal: a launch never stops the recorder it just started for another build's control file.
+    // Method: stamp a real control file with another build, hold the recorder's lock, and step
+    // the user's own window once it launched a recorder.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let _recorder = fixture.hold("recorder.lock");
+    let mut session = fixture.session(true);
+    session
+        .0
+        .policy
+        .launched(std::process::id(), std::time::Duration::ZERO);
+
+    session.tick();
+
+    assert_eq!(None, session.failure());
+}
+
+#[test]
+fn the_own_window_asks_another_builds_running_recording_to_stop() {
+    // Goal: a launch after an upgrade stops the older build's helpers without a shell command.
+    // Method: stamp a real control file with another build, hold the collector's lock, and take
+    // the first step of the user's own window.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let _collector = fixture.hold("collector.lock");
+    let mut session = fixture.session(true);
+
+    session.tick();
+
+    let written = Control::read_across_builds(&fixture.root).unwrap();
+    assert!(written.stopping);
+    assert!(session.failure().is_none());
+    assert!(session.0.child.is_none());
+}
+
+#[test]
+fn a_refused_stop_of_another_build_fails_with_the_pkill_line() {
+    // Goal: older helpers this app may not stop are left to the user, with the command to do it.
+    // Method: raise the writer the recording requires past this build's, stamp another build,
+    // and take the first step of the user's own window.
+    let fixture = Controlled::new();
+    let identity = std::fs::read_to_string(fixture.root.join("identity")).unwrap();
+    let mut lines: Vec<&str> = identity.lines().collect();
+    let newer = format!("{:08x}", collector::recording::format::WRITER_PROTOCOL + 1);
+    lines[2] = &newer;
+    let raised = format!("{}\n", lines.join("\n"));
+    collector::recording::private::atomic_write(&fixture.root, "identity", raised.as_bytes())
+        .unwrap();
+    fixture.stamp_build(OTHER_BUILD);
+    let _collector = fixture.hold("collector.lock");
+    let mut session = fixture.session(true);
+
+    session.tick();
+
+    let failure = session.failure().map(str::to_owned);
+    assert_eq!(failure, Some(policy::other_build_failure(OTHER_BUILD)));
+    assert!(!Control::read_across_builds(&fixture.root).unwrap().stopping);
+}
+
+#[test]
+fn another_window_leaves_another_builds_recording_running() {
+    // Goal: a window that only observes the recording never stops another build's helpers.
+    // Method: stamp a real control file with another build, hold the collector's lock, and take
+    // the first step of a window that is not the user's own on the default recording.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let _collector = fixture.hold("collector.lock");
+    let mut session = fixture.session(false);
+
+    session.tick();
+
+    let failure = session.failure().map(str::to_owned);
+    assert_eq!(failure, Some(policy::other_build_failure(OTHER_BUILD)));
+    assert!(!Control::read_across_builds(&fixture.root).unwrap().stopping);
+}
+
+#[test]
+fn a_quit_of_the_own_window_on_a_recording_without_a_control_file_reports_nothing() {
+    // Goal: a quit before any recorder wrote its control file is no error the user sees.
+    // Method: remove a real control file, then quit the user's own window on the recording.
+    let fixture = Controlled::new();
+    std::fs::remove_file(fixture.root.join("recorder.control")).unwrap();
+    let mut session = fixture.session(true);
+
+    let quit = session.quit();
+
+    quit.unwrap();
+}
+
+#[test]
+fn a_quit_of_the_own_window_on_another_builds_recording_reports_nothing_and_asks_nothing() {
+    // Goal: a quit leaves another build's helpers to the launch that replaces them, and is no
+    // error the user sees.
+    // Method: stamp a real control file with another build, then quit the user's own window.
+    let fixture = Controlled::new();
+    fixture.stamp_build(OTHER_BUILD);
+    let mut session = fixture.session(true);
+
+    let quit = session.quit();
+
+    quit.unwrap();
+    assert!(!Control::read_across_builds(&fixture.root).unwrap().stopping);
+}
+
+#[test]
 fn a_launch_waits_for_a_controller_that_is_stopping() {
     // Goal: a launch during a long stop waits for it rather than failing and starting nothing.
     // Method: publish a live controller's stop, and read what the launch's discovery sees.
@@ -123,6 +343,29 @@ fn a_launch_waits_for_a_controller_that_is_stopping() {
     )
     .unwrap();
     controller.set_state(WorkerState::Stopping).unwrap();
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == policy::RecordingStatus::Finishing);
+}
+
+#[test]
+fn a_launch_waits_for_a_running_controller_whose_stop_was_asked() {
+    // Goal: a launch right after a quit waits for the recording the quit asked to stop, rather
+    // than attaching to helpers whose controller has yet to publish that it stops.
+    // Method: publish a live controller running, ask the stop through the control file, and
+    // read what the launch's discovery sees.
+    let fixture = Recording::managed();
+    let mut controller = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Controller,
+    )
+    .unwrap();
+    controller.set_state(WorkerState::Running).unwrap();
+    Control::open_writable(&fixture.root)
+        .unwrap()
+        .request_stop()
+        .unwrap();
 
     let source = health::Health::new().read(&fixture.root, None).unwrap();
 
@@ -150,6 +393,7 @@ fn a_retry_on_a_recording_older_than_this_version_starts_nothing_and_says_how_to
     let mut session = CollectorSession::new(Configuration {
         root,
         mode: Mode::Auto,
+        own_default_recording: false,
         binary: std::env::current_exe().unwrap(),
         isolated: false,
     });
@@ -729,6 +973,7 @@ fn the_collector_starts_with_the_library_thread_defaults() {
         binary: PathBuf::from("/collector"),
         isolated: true,
         mode: Mode::Explicit,
+        own_default_recording: false,
     };
 
     let command = spawn_command(&configuration, "ring");
@@ -766,6 +1011,7 @@ fn a_collector_that_cannot_start_is_named_in_the_failure() {
         binary: binary.clone(),
         isolated: true,
         mode: Mode::Explicit,
+        own_default_recording: false,
     });
 
     session.tick();
@@ -890,6 +1136,7 @@ impl Recording {
             binary: std::env::current_exe().unwrap(),
             isolated: true,
             mode,
+            own_default_recording: false,
         })
     }
 

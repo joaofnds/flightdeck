@@ -11,6 +11,9 @@ pub(super) struct Recorder {
     collector: io::Result<Worker>,
     persister: io::Result<Worker>,
     authority: String,
+    /// Whether the control file asks the recording to stop, which the controller publishes as
+    /// its state only at its next step.
+    stopping: bool,
     now_ns: u64,
 }
 
@@ -60,6 +63,7 @@ impl Recorder {
                 previous.map(|recorder| &recorder.persister),
             ),
             authority: identity_text(control.authority()).to_string(),
+            stopping: control.stopping(),
             now_ns,
         }))
     }
@@ -78,9 +82,12 @@ impl Recorder {
             _ => None,
         };
         let controller_missing = matches!(&self.controller, Ok(controller) if !controller.alive);
+        // A launch right after a quit waits for the recording the quit asked to stop, rather than
+        // attaching to it until its controller publishes that it stops.
         let controller_stopping = matches!(
             &self.controller,
-            Ok(controller) if controller.alive && controller.health.state == State::Stopping
+            Ok(controller) if controller.alive
+                && (self.stopping || controller.health.state == State::Stopping)
         );
         let controller_pid = match &self.controller {
             Ok(controller) if controller.alive => {

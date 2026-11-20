@@ -546,6 +546,178 @@ fn a_collector_built_from_other_code_fails_discovery_without_spawning() {
     assert!(policy.can_retry());
 }
 
+/// Another build's recording, whose helpers run and were not asked to stop.
+fn other_build() -> Source {
+    Source {
+        build: Build::Other(OTHER_BUILD),
+        ..Source::default()
+    }
+}
+
+/// Another build's recording, whose helpers were asked to stop and still save.
+fn other_build_finishing() -> Source {
+    Source {
+        recording: RecordingStatus::Finishing,
+        build: Build::Other(OTHER_BUILD),
+        ..Source::default()
+    }
+}
+
+#[test]
+fn the_own_window_asks_another_builds_recording_to_stop_once() {
+    // Goal: a launch after an upgrade asks the older build's helpers to stop, and asks once.
+    // Method: report another build's recording running on two discovery steps of the user's
+    // own window on the default recording.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+
+    let first = policy.step(Duration::ZERO, &other_build());
+    let second = policy.step(Duration::from_secs(1), &other_build());
+
+    assert_eq!(first, Action::StopOtherBuild(OTHER_BUILD));
+    assert_eq!(second, Action::None);
+}
+
+#[test]
+fn the_own_window_waits_for_another_builds_recording_past_the_discovery_deadline() {
+    // Goal: the older build's helpers get as long as their own stop takes, and then the launch
+    // starts a recorder of this build.
+    // Method: ask, report the recording running and then finishing past the discovery
+    // deadline, then ready.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+    policy.step(Duration::ZERO, &other_build());
+
+    let running = policy.step(DISCOVERY_LIMIT, &other_build());
+    let finishing = policy.step(
+        DISCOVERY_LIMIT + Duration::from_secs(1),
+        &other_build_finishing(),
+    );
+    let starting = policy.step(
+        DISCOVERY_LIMIT + Duration::from_secs(2),
+        &Source {
+            recording: RecordingStatus::Ready,
+            ..Source::default()
+        },
+    );
+
+    assert_eq!(running, Action::None);
+    assert_eq!(finishing, Action::None);
+    assert_eq!(starting, Action::Spawn);
+}
+
+#[test]
+fn the_own_window_fails_with_the_pkill_line_once_another_build_runs_past_the_stop_deadline() {
+    // Goal: older helpers that never stop end in the failure that says how to stop them.
+    // Method: ask, then report the recording still running at the stop deadline.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+    policy.step(Duration::ZERO, &other_build());
+    policy.step(
+        FINISHING_LIMIT.checked_sub(Duration::from_secs(1)).unwrap(),
+        &other_build(),
+    );
+
+    let action = policy.step(FINISHING_LIMIT, &other_build());
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
+}
+
+#[test]
+fn the_own_window_fails_with_the_pkill_line_once_another_build_finishes_past_the_stop_deadline() {
+    // Goal: older helpers that never finish stopping end in the failure that says how to stop
+    // them, not in the failure for a collector of this build.
+    // Method: ask, then report the recording finishing at the stop deadline.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+    policy.step(Duration::ZERO, &other_build());
+    policy.step(
+        FINISHING_LIMIT.checked_sub(Duration::from_secs(1)).unwrap(),
+        &other_build_finishing(),
+    );
+
+    let action = policy.step(FINISHING_LIMIT, &other_build_finishing());
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
+}
+
+#[test]
+fn a_retry_on_the_own_window_asks_another_build_again() {
+    // Goal: a Retry asks another build's helpers again where they still run unasked, as after a
+    // refused request or once other helpers replaced the ones asked.
+    // Method: let the request pass its deadline, retry, and report the recording running.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+    policy.step(Duration::ZERO, &other_build());
+    policy.step(FINISHING_LIMIT, &other_build());
+    policy.retry();
+
+    let action = policy.step(FINISHING_LIMIT + Duration::from_secs(1), &other_build());
+
+    assert_eq!(action, Action::StopOtherBuild(OTHER_BUILD));
+}
+
+#[test]
+fn the_own_window_waits_unasked_for_another_build_already_finishing_and_ends_in_the_pkill_line() {
+    // Goal: older helpers asked to stop before this launch, as by the old app's quit, are waited
+    // for without a second request and end in the failure that says how to stop them.
+    // Method: report another build finishing on the user's own window, just before and then
+    // at the stop deadline.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+
+    let first = policy.step(Duration::ZERO, &other_build_finishing());
+    policy.step(
+        FINISHING_LIMIT.checked_sub(Duration::from_secs(1)).unwrap(),
+        &other_build_finishing(),
+    );
+    let before = policy.state;
+    let action = policy.step(FINISHING_LIMIT, &other_build_finishing());
+
+    assert_eq!(first, Action::None);
+    assert_eq!(before, State::Discovering);
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
+}
+
+#[test]
+fn another_window_waits_for_another_build_already_finishing_and_ends_in_the_pkill_line() {
+    // Goal: a window that only observes the recording waits for older helpers that are already
+    // stopping, and ends in the failure that says how to stop them.
+    // Method: report another build finishing on a window that is not the user's own, just
+    // before and then at the stop deadline.
+    let mut policy = Policy::new(Mode::Auto);
+
+    let first = policy.step(Duration::ZERO, &other_build_finishing());
+    policy.step(
+        FINISHING_LIMIT.checked_sub(Duration::from_secs(1)).unwrap(),
+        &other_build_finishing(),
+    );
+    let before = policy.state;
+    let action = policy.step(FINISHING_LIMIT, &other_build_finishing());
+
+    assert_eq!(first, Action::None);
+    assert_eq!(before, State::Discovering);
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
+}
+
+#[test]
+fn a_retry_after_a_granted_request_waits_again_without_asking_and_ends_in_the_pkill_line() {
+    // Goal: a Retry over older helpers still stopping after a granted request waits for them
+    // again, asks nothing, and again names the command that stops them.
+    // Method: ask, report the recording finishing past the stop deadline, retry, and report it
+    // finishing until the next stop deadline.
+    let mut policy = Policy::new_own_default_recording(Mode::Auto);
+    policy.step(Duration::ZERO, &other_build());
+    policy.step(FINISHING_LIMIT, &other_build_finishing());
+    policy.retry();
+    let retried = FINISHING_LIMIT + Duration::from_secs(1);
+
+    let waiting = policy.step(retried, &other_build_finishing());
+    let action = policy.step(retried + FINISHING_LIMIT, &other_build_finishing());
+
+    assert_eq!(waiting, Action::None);
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
+}
+
 #[test]
 fn a_collector_announcing_another_format_fails_discovery_without_spawning() {
     // Goal: the app never reads a ring of a version whose announcement it cannot read.

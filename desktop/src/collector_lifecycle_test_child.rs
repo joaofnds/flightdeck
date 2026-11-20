@@ -3,6 +3,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use collector::recording::control::Control;
+use collector::recording::{identity_text, random_identity};
+
 use super::{CollectorSession, Configuration, Mode};
 
 const HELPER: &str = "live_launch::lifecycle::test_child::delayed_shutdown_helper";
@@ -28,9 +31,10 @@ const _: () = {
     );
 };
 
-pub(crate) fn session() -> (CollectorSession, PathBuf, u32) {
-    let token =
-        collector::recording::identity_text(collector::recording::random_identity().unwrap());
+/// A real child owned by an explicit session with no control file, of the user's own window on
+/// the default recording where `own_default_recording` says so.
+pub(crate) fn session(own_default_recording: bool) -> (CollectorSession, PathBuf, u32) {
+    let token = identity_text(random_identity().unwrap());
     let root = std::env::temp_dir().join(format!("flightdeck-quit-helper-{token}"));
     std::fs::create_dir(&root).unwrap();
     let ready = root.join("ready");
@@ -49,6 +53,7 @@ pub(crate) fn session() -> (CollectorSession, PathBuf, u32) {
         binary: std::env::current_exe().unwrap(),
         isolated: true,
         mode: Mode::Explicit,
+        own_default_recording,
     });
     session.0.child = Some(child);
     session.0.policy.launched(pid, Duration::ZERO);
@@ -75,6 +80,58 @@ fn wait_ready(path: &std::path::Path) {
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!("Delayed exit helper did not become ready");
+}
+
+/// A recording with a control file and no run, whose lifetime locks a test holds itself.
+pub(crate) struct Controlled {
+    pub root: PathBuf,
+}
+
+impl Controlled {
+    pub fn new() -> Self {
+        let token = identity_text(random_identity().unwrap());
+        let root = std::env::temp_dir().join(format!("flightdeck-controlled-{token}"));
+        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(Control::create(&root).unwrap());
+        Self { root }
+    }
+
+    /// Writes `value` at the control file's word `index`, as another build or layout would.
+    pub fn change_word(&self, index: u64, value: u64) {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.root.join("recorder.control"))
+            .unwrap();
+        file.write_all_at(&value.to_ne_bytes(), index * 8).unwrap();
+    }
+
+    /// Writes `build` as the build that wrote the control file, as another build would.
+    pub fn stamp_build(&self, build: u64) {
+        self.change_word(6, build);
+    }
+
+    /// An automatic session on the recording, of the user's own window on the default recording
+    /// where `own_default_recording` says so.
+    pub fn session(&self, own_default_recording: bool) -> CollectorSession {
+        CollectorSession::new(Configuration {
+            root: self.root.clone(),
+            binary: std::env::current_exe().unwrap(),
+            isolated: true,
+            mode: Mode::Auto,
+            own_default_recording,
+        })
+    }
+
+    pub fn hold(&self, lock: &str) -> collector::recording::private::FileLock {
+        collector::recording::private::FileLock::try_lock(&self.root.join(lock)).unwrap()
+    }
+}
+
+impl Drop for Controlled {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
 }
 
 #[test]

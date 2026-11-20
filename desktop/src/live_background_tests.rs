@@ -518,7 +518,7 @@ impl BackgroundHarness {
 
     fn setup(cx: &TestAppContext) -> Self {
         let cx = cx.clone();
-        let (session, root, _pid) = super::super::lifecycle::test_child::session();
+        let (session, root, _pid) = super::super::lifecycle::test_child::session(false);
         let reopening = Reopening {
             root: root.clone(),
             hardware: false,
