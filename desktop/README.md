@@ -109,8 +109,10 @@ once its window closes, with no Dock icon, so collection goes on and no reading 
 missed. Its item in the menu bar brings the window back, as does opening the app
 again, and a right click or Control-click on the item opens a menu with Quit. A
 launch that opens a recording read-only, runs for `--seconds` or listens on
-`--control` still quits with its last window. Closing or quitting the GUI leaves recording
-running. Its diagnostic socket readers close on quit; the workers' bounded diagnostic
+`--control` still quits with its last window. Closing the window leaves recording running.
+Quit on a live launch of the default recording asks that recording to stop and does not wait
+for it, while quitting any other launch leaves its recording running. Its diagnostic socket
+readers close on quit; the workers' bounded diagnostic
 queues handle delivery failure without blocking acquisition or durable health. The Self
 page includes recorder, collector and persister CPU, and individual footprint charges.
 The recorder plus collector share the 256 MiB acquisition ceiling; the persister has its
@@ -123,10 +125,14 @@ To stop a candidate recording explicitly, run the matching build's
 `target/release/recorder --recording /absolute/path/to/session.recording --stop yes`
 from the repository root. The controller stops acquisition and drains eligible tail, and
 recording stays stopped until a Retry or the next launch on that recording. Another build's
-controller refuses this request, so a recorder that outlived an upgrade stops with
-`pkill -x 'recorder|collector'`, which drains the same way.
+controller refuses this request. A live launch of
+the default recording that finds another build's recorder there, such as one that outlived an
+upgrade, asks it to stop through its control file, waits up to 150 seconds for its workers to
+finish, then starts its own. Where that build cannot be asked or does not finish in time, the
+launch fails naming `pkill -x 'recorder|collector'`, which drains the same way and stays the
+last resort.
 Headless `--live-check` and `--live-soak` runs still explicitly stop a recorder they start
-when their measurement ends. An attaching GUI never signals another owner's processes.
+when their measurement ends. A GUI never signals a process it did not start.
 Xcode and its command-line tools are required. GPUI and its macOS backend come from a
 fork, https://github.com/joaofnds/zed on branch `flightdeck-gpui`, at the revision
 `Cargo.toml` pins. The branch is upstream revision

@@ -32,9 +32,12 @@ collector runs. Run, boot and publication identities distinguish observations,
 including observations that share a wall-clock second.
 
 The desktop attaches to an existing compatible recording or starts its recorder when needed.
-Closing or quitting the GUI detaches from the recorder; acquisition and saving continue. Opening a saved recording with `--recording`
-is read-only unless collection is explicitly requested. Collector ownership and
-window visibility are separate lifecycles.
+Closing the GUI leaves the recording going. A Quit of the user's own window on the default
+recording asks that recording to stop, and a Quit of any other window detaches, so acquisition
+and saving continue. A launch of the user's own window that finds another build's recording
+asks it to stop through its control file and sends no signal to processes it did not start.
+Opening a saved recording with `--recording` is read-only unless collection is explicitly
+requested. Collector ownership and window visibility are separate lifecycles.
 
 | Part | Responsibility | Starting point |
 | --- | --- | --- |

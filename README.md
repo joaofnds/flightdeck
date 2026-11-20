@@ -67,7 +67,8 @@ failures with delays of 1, 2, 4, then 5 seconds, starting over once a worker has
 for a minute. A fixed private control mapping reports
 acquisition and durable recording separately; durable progress advances only after a
 canonical seal commits. Finite runs, Ctrl-C and SIGTERM ask acquisition to stop and drain
-the saved tail. GUI quit detaches while recording continues.
+the saved tail. Quitting the app's default launch asks its recording to stop the same way and
+does not wait for it, while closing the window leaves the recording running.
 
 If the recorder dies, healthy workers continue. Automatic recovery then needs a recorder
 start, which the app's next launch makes on its default recording; no installed service
@@ -113,15 +114,18 @@ just dev
 Mise acts only for a contributor who trusts the file, and without it the recipes in
 `justfile` run as they are under Rust 1.98.0.
 
-The movable bundle contains four executables—the app, recorder, collector and persister—and
-schematic artwork.
+The movable bundle contains four executables, the app and its recorder, collector and
+persister, and schematic artwork.
 Default launch follows the last fifteen minutes of live readings, attaching to an
 existing recording or starting a recorder when none is running, and it sets a recording an
 older version wrote aside for a new one, as the
-[desktop guide](desktop/README.md) describes. Quitting detaches the
-app while the recorder and its workers continue. Stop them with
-`Flightdeck.app/Contents/Helpers/recorder --recording PATH --stop yes`, using the recording's
-path, until the app's next launch starts them again. `--recording PATH` on the app opens a
+[desktop guide](desktop/README.md) describes. Closing the window leaves the
+app in the menu bar and the recorder and its workers running. Quit from the menu bar asks them
+to stop, and they save what they hold and exit on their own, until the app's next launch starts
+them again. A default launch that finds a recorder another build started asks it to stop the same
+way, waits up to 150 seconds for its workers to finish, then starts its own. To stop them
+without quitting, run `Flightdeck.app/Contents/Helpers/recorder --recording PATH --stop yes`,
+using the recording's path. `--recording PATH` on the app opens a
 recording read-only; `--reference` opens captured prototype data.
 
 The UI uses GPUI's Metal rendering without a browser runtime. Its separate Cargo
@@ -165,6 +169,12 @@ failed, which is safe since gh deletes the draft of a publish that failed and wr
 replaces the one there. The bundle has no Developer ID signature and is not notarized, so the
 cask clears the quarantine macOS sets on a download. Clear it on a copy downloaded by hand
 with `xattr -cr Flightdeck.app`. The bundle is built only for Apple chips.
+
+`brew upgrade --cask flightdeck` quits the app, which asks its recording to stop, replaces the
+bundle and opens the new version, which starts recording again. Homebrew quits the app as the
+installed cask says, so this begins with the upgrade after the one that installs a cask saying
+it. Where the old app is still in the menu bar after an upgrade, take Quit there and open the
+app again.
 
 ## Recording inspection tools
 

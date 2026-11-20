@@ -364,7 +364,11 @@ never launches a persister. Each worker keeps its own lifetime lock if the recor
 On Ctrl-C, SIGTERM, the end of a `--seconds` run, or an explicit recorder stop request,
 acquisition finishes its ring and the persister seals the recoverable tail. The recorder
 reaps its children or verifies an adopted worker has exited before releasing ownership.
-GUI quit detaches. An explicit CLI `--parent-pid` binding still stops when that parent exits.
+Closing the GUI leaves the recording going. A Quit of the user's own window on the default
+recording asks the recorder to stop through the control file, or sends SIGTERM to a recorder it
+started where no control file it reads can carry the stop, and a Quit of any other window
+detaches. A GUI sends no signal to processes it did not start. An explicit CLI `--parent-pid`
+binding still stops when that parent exits.
 
 The recorder checks worker state once a second. Operating failures retry after 1, 2, 4 and
 then 5 seconds, with the failure class, retry count and next attempt in the control mapping.
