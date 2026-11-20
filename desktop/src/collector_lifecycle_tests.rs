@@ -49,7 +49,7 @@ fn attached_health_separates_acquisition_and_durable_failure_without_output() {
     session.tick();
 
     let (notice, retry) = session.status().unwrap();
-    assert!(notice.contains("Acquisition: running;"), "{notice}");
+    assert!(notice.contains("Acquisition: running ·"), "{notice}");
     assert!(notice.contains("Durable recording: failed"), "{notice}");
     assert!(!retry);
     assert!(session.0.standard.is_none());
@@ -226,7 +226,7 @@ fn an_interrupted_controller_health_write_preserves_independent_worker_health() 
     session.tick();
 
     let (notice, _) = session.status().unwrap();
-    assert!(notice.contains("Acquisition: running;"), "{notice}");
+    assert!(notice.contains("Acquisition: running ·"), "{notice}");
     assert!(notice.contains("Recovery: unavailable"), "{notice}");
 }
 
@@ -238,16 +238,7 @@ fn notices_across_an_interrupted_read(
     sequence_byte: u64,
 ) -> (String, String, bool, Option<String>) {
     use std::os::unix::fs::FileExt;
-    let fixture = Recording::managed();
-    let mut reporters = [Role::Controller, Role::Collector, Role::Persister]
-        .map(|role| Reporter::new(Control::open_writable(&fixture.root).unwrap(), role).unwrap());
-    for reporter in &mut reporters {
-        reporter
-            .update(WorkerState::Running, fixture.run(), 7)
-            .unwrap();
-    }
-    let mut session = fixture.session(Mode::Auto);
-    session.tick();
+    let (fixture, _reporters, mut session) = running_recorder(7);
     let (first, _) = session.status().unwrap();
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -289,7 +280,7 @@ fn an_interrupted_health_read_keeps_a_healthy_collector_running() {
     // Method: refuse only the collector's second read through its real mapped sequence.
     let (first, second, _, failure) = notices_across_an_interrupted_read(Role::Collector, 32 * 8);
 
-    assert!(second.contains("Acquisition: running;"), "{second}");
+    assert!(second.contains("Acquisition: running ·"), "{second}");
     assert_eq!(first, second);
     assert_eq!(failure, None);
 }
@@ -303,6 +294,106 @@ fn an_interrupted_health_read_keeps_a_healthy_persister_running() {
     assert!(second.contains("Durable recording: running"), "{second}");
     assert_eq!(first, second);
     assert_eq!(failure, None);
+}
+
+#[test]
+fn a_collector_whose_readings_advance_keeps_the_status() {
+    // Goal: a second in which every helper stays healthy changes no status text, so the page,
+    // which redraws its window when the status changes, redraws for no such second.
+    // Method: advance the collector's reading through its real mapped record between two health
+    // reads, as a tick does, while the persister has saved no further.
+    let (fixture, mut reporters, mut session) = running_recorder(7);
+    let (first, _) = session.status().unwrap();
+
+    reporters[COLLECTOR]
+        .update(WorkerState::Running, fixture.run(), 8)
+        .unwrap();
+    session.tick();
+
+    let (second, _) = session.status().unwrap();
+    assert_eq!(session.observed_publication(), Some(8));
+    assert!(second.contains("Acquisition: running ·"), "{second}");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn a_persister_that_saves_further_names_the_reading_it_saved_through() {
+    // Goal: the status shows how far the recording is saved, which nothing else on the page
+    // does, and a later health read replaces what the one before it read.
+    // Method: move the persister's saved reading through its real mapped record between two
+    // health reads.
+    let (fixture, mut reporters, mut session) = running_recorder(7);
+    let (first, _) = session.status().unwrap();
+
+    reporters[PERSISTER]
+        .update(WorkerState::Running, fixture.run(), 9)
+        .unwrap();
+    session.tick();
+
+    let (second, _) = session.status().unwrap();
+    assert!(
+        first.contains("Durable recording: running; reading 7 ·"),
+        "{first}"
+    );
+    assert!(
+        second.contains("Durable recording: running; reading 9 ·"),
+        "{second}"
+    );
+}
+
+#[test]
+fn a_helper_with_no_reading_yet_awaits_its_first_progress() {
+    // Goal: a helper that runs and has reached no reading reads differently from one that has,
+    // and names no reading.
+    // Method: report every role running at reading 0 through its real mapped record.
+    let (_fixture, _reporters, session) = running_recorder(0);
+
+    let (notice, _) = session.status().unwrap();
+    assert!(
+        notice.contains("Acquisition: running; awaiting first progress ·"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("Durable recording: running; awaiting first progress ·"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn a_persister_that_failed_names_no_reading() {
+    // Goal: only a persister that runs names the reading it saved through, as before the
+    // collector's reading left the status.
+    // Method: fail the persister through its real mapped record after it saved a reading.
+    let (fixture, mut reporters, mut session) = running_recorder(7);
+
+    reporters[PERSISTER]
+        .update(WorkerState::Failed, fixture.run(), 7)
+        .unwrap();
+    session.tick();
+
+    let (notice, _) = session.status().unwrap();
+    assert!(notice.contains("Durable recording: failed ("), "{notice}");
+    assert!(!notice.contains("reading 7"), "{notice}");
+}
+
+const COLLECTOR: usize = 1;
+const PERSISTER: usize = 2;
+
+/// A managed recording whose controller, collector and persister, in that order, say they run
+/// and have reached `publication`, with a session that has read their health once.
+fn running_recorder(publication: u64) -> (Recording, [Reporter; 3], CollectorSession) {
+    let fixture = Recording::managed();
+    let mut reporters = [Role::Controller, Role::Collector, Role::Persister]
+        .map(|role| Reporter::new(Control::open_writable(&fixture.root).unwrap(), role).unwrap());
+    for reporter in &mut reporters {
+        reporter
+            .update(WorkerState::Running, fixture.run(), publication)
+            .unwrap();
+    }
+    let mut session = fixture.session(Mode::Auto);
+    session.tick();
+
+    (fixture, reporters, session)
 }
 
 #[test]

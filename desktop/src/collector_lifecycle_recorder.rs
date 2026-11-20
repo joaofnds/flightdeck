@@ -110,12 +110,27 @@ impl Recorder {
             .collector
             .as_ref()
             .map_or_else(|error| format!("unavailable; {error}"), Worker::description);
-        let durable = self
-            .persister
-            .as_ref()
-            .map_or_else(|error| format!("unavailable; {error}"), Worker::description);
+        let durable = self.notice_durable();
         let recovery = self.notice_recovery();
         format!("Acquisition: {acquisition} · Durable recording: {durable} · Recovery: {recovery}")
+    }
+
+    /// What the persister reads, with the reading it has saved through while it runs. Nothing
+    /// else on the page shows that reading, and it moves once a sealed minute, so naming it
+    /// redraws the window that often.
+    fn notice_durable(&self) -> String {
+        let persister = match &self.persister {
+            Ok(persister) => persister,
+            Err(error) => return format!("unavailable; {error}"),
+        };
+        let description = persister.description();
+        if persister.running() {
+            if persister.health.publication > 0 {
+                return format!("{description}; reading {}", persister.health.publication);
+            }
+        }
+
+        description
     }
 
     fn notice_recovery(&self) -> String {
@@ -189,9 +204,9 @@ impl Worker {
             return "unavailable; heartbeat is stale".into();
         }
         match self.health.state {
-            State::Running if self.health.publication > 0 => {
-                format!("running; reading {}", self.health.publication)
-            }
+            // The text names no reading, since the collector's grows every second and each
+            // change of the text redraws the window.
+            State::Running if self.health.publication > 0 => "running".into(),
             State::Running => "running; awaiting first progress".into(),
             State::Starting => "starting".into(),
             State::Retrying => "retrying".into(),
