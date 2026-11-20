@@ -96,11 +96,14 @@ Retry, or the next launch on the default recording, starts a controller that ver
 worker identities before adoption. Closing the window leaves the app running, so opening it
 then only shows the window, and a new launch takes Quit from the menu bar first.
 
-A launch on a default recording an older version wrote renames it to
-`flightdeck.<identity>.recording` beside it and starts a new recording, so the charts begin
-empty. `--recording PATH` opens the old readings, which stay on disk until you delete that
-directory. A recording a process still uses stays where it is and fails the launch. Stop that
-process, Quit from the menu bar and open the app again, since Retry cannot move it.
+A launch on a default recording an older version wrote deletes it, with the rings it kept, and
+starts a new recording, so the charts begin empty and the old readings are gone. No writer of
+this version appends to an older recording, so keeping it would keep the app from recording. A
+recording `--recording PATH` names is never deleted, and neither is the default one under a
+timed window or a window under the control socket. A recording a process still uses stays where
+it is, and the status line then says it comes from an older Flightdeck. Once that process has
+ended, Quit from the menu bar and open the app again, since only a launch deletes it and Retry
+does not.
 
 Opening a recording read-only grants no start or shutdown authority.
 

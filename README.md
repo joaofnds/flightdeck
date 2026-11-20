@@ -117,8 +117,8 @@ Mise acts only for a contributor who trusts the file, and without it the recipes
 The movable bundle contains four executables, the app and its recorder, collector and
 persister, and schematic artwork.
 Default launch follows the last fifteen minutes of live readings, attaching to an
-existing recording or starting a recorder when none is running, and it sets a recording an
-older version wrote aside for a new one, as the
+existing recording or starting a recorder when none is running, and it deletes a recording an
+older version wrote to start a new one, as the
 [desktop guide](desktop/README.md) describes. Closing the window leaves the
 app in the menu bar and the recorder and its workers running. Quit from the menu bar asks them
 to stop, and they save what they hold and exit on their own, until the app's next launch starts
