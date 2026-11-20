@@ -1955,14 +1955,9 @@ pub(super) fn charted_cohorts(view: &View) -> super::Cohorts {
         first: last.saturating_sub(crate::session::CHARTED_SECONDS - 1),
         last,
     };
-    let readings = super::Readings {
-        seconds: &view.seconds,
-        apps: &view.apps,
-        stretches: &view.stretches,
-    };
     let mut cohorts = super::Cohorts::with_room();
 
-    super::Leaders::new().choose(&readings, window, &mut cohorts);
+    super::Leaders::new().choose(&view.readings(), window, &mut cohorts);
     cohorts
 }
 

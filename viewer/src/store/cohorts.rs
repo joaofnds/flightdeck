@@ -29,6 +29,8 @@ const _: () = {
     // A gauge counts the seconds of a View that measured an App in a `u32`.
     assert!(EARLIER_STRIDE_SECONDS == 10);
     assert!(SECONDS_MAX + STRETCHES_MAX * 10 < 4_294_967_295);
+    // A room holds three lists of `APPS_MAX` entries, about 13 MB at this size.
+    assert!(size_of::<Entry>() <= 176);
 };
 
 /// The Apps each App chart drawn from a View draws on a line of its own, chosen over the seconds
@@ -108,7 +110,12 @@ pub struct Readings<'view> {
     pub stretches: &'view [Arc<AppsStretch>],
 }
 
-/// Room to choose the Apps of the App charts in, which holds nothing between choices.
+/// Room to choose the Apps of the App charts in. Between choices it keeps each App's sums over
+/// the closed stretches its last choice held wholly, and the closing number of each of those
+/// stretches, since they change only when a stretch closes or leaves the window, about twice in
+/// ten seconds. It holds no reference to a stretch, so the store's buffers write and clear a
+/// stretch once its Views let go of it, and it keeps the names of the Apps it summed until it
+/// forgets them.
 pub struct Leaders {
     /// Every App of the window, in key order.
     entries: Vec<Entry>,
@@ -120,9 +127,67 @@ pub struct Leaders {
     sums: Vec<Entry>,
     /// The entries a chart draws, the most first.
     chosen: Vec<usize>,
+    /// The sums of the closed stretches the last choice held wholly.
+    kept: Kept,
+}
+
+/// The sums of the closed stretches a room's last choice held wholly, kept between choices.
+struct Kept {
+    /// Every App of the stretches `closing_numbers` names, in key order, as adding them up
+    /// oldest first leaves them.
+    entries: Vec<Entry>,
+    /// The closing number of each closed stretch `entries` adds up, oldest first. A stretch of
+    /// a kept number holds the Apps `entries` added, as `AppsStretch::closing_number` says.
+    closing_numbers: Vec<u64>,
+}
+
+impl Kept {
+    /// Room for the sums of every App a window holds, keeping none.
+    fn with_room() -> Self {
+        Self {
+            entries: Vec::with_capacity(APPS_MAX),
+            closing_numbers: Vec::with_capacity(STRETCHES_MAX),
+        }
+    }
+
+    /// Lets go of the sums and the names of their Apps.
+    fn forget(&mut self) {
+        self.entries.clear();
+        self.closing_numbers.clear();
+    }
+
+    /// Moves into `entries`, which hold nothing, the sums it kept of the stretches `stretches`
+    /// begins with, and returns how many those are. Where `stretches` does not begin with them
+    /// it forgets them and returns zero.
+    fn resume(&mut self, stretches: &[Arc<AppsStretch>], entries: &mut Vec<Entry>) -> usize {
+        assert!(entries.is_empty());
+        assert!(stretches.len() <= self.closing_numbers.capacity());
+        let count = resume_count(&self.closing_numbers, stretches);
+        if count.is_none() {
+            self.forget();
+        }
+
+        std::mem::swap(entries, &mut self.entries);
+        count.unwrap_or(0)
+    }
+
+    /// Keeps `entries`, the sums of `stretches`, which begin with the stretches it resumed.
+    fn keep(&mut self, stretches: &[Arc<AppsStretch>], entries: &[Entry]) {
+        assert!(self.closing_numbers.len() <= stretches.len());
+        let capacity = self.entries.capacity();
+        for stretch in &stretches[self.closing_numbers.len()..] {
+            // Every stretch a View holds was closed, and zero names Apps no close finished.
+            assert!(stretch.closing_number() > 0);
+            self.closing_numbers.push(stretch.closing_number());
+        }
+        self.entries.clear();
+        self.entries.extend_from_slice(entries);
+        assert_eq!(self.entries.capacity(), capacity);
+    }
 }
 
 /// One App of the window.
+#[derive(Clone)]
 struct Entry {
     name: Arc<RankedApp>,
     /// What the App used of each of `METRICS` over the seconds that measured it, in their order.
@@ -195,7 +260,14 @@ impl Leaders {
             spare: Vec::with_capacity(APPS_MAX),
             sums: Vec::with_capacity(APPS_PER_SECOND_MAX),
             chosen: Vec::with_capacity(COHORT_MAX),
+            kept: Kept::with_room(),
         }
+    }
+
+    /// Lets go of what the room keeps between choices, the names of the Apps of the stretches
+    /// it held wholly, as a page does that lets go of its View.
+    pub fn forget(&mut self) {
+        self.kept.forget();
     }
 
     /// Writes into `cohorts` the Apps each chart draws over `window` of `readings`, those whose
@@ -236,7 +308,8 @@ impl Leaders {
 
     /// Each App's sums over `window` of `readings`, in key order, as `choose` adds them up
     /// before it chooses, or none where they come to more than `APPS_MAX` Apps, which a test
-    /// compares exactly where the cohorts show only the eight Apps each chart draws.
+    /// compares exactly where the cohorts show only the eight Apps each chart draws. Like
+    /// `choose`, it renews the sums the room keeps between choices.
     #[cfg(test)]
     pub(in crate::store) fn sums_over(
         &mut self,
@@ -270,7 +343,7 @@ impl Leaders {
 
     /// Adds to the entries the Apps of the closed stretches that lie wholly in `window`, whose
     /// newest second is `newest`, and of the seconds `run` names of `readings` outside them.
-    /// Returns false where they come to more than `APPS_MAX` Apps.
+    /// Returns false, keeping nothing, where they come to more than `APPS_MAX` Apps.
     fn choose_add_window(
         &mut self,
         readings: &Readings<'_>,
@@ -281,14 +354,22 @@ impl Leaders {
         let wholly = choose_stretches(readings.stretches, super::stretch(newest), window);
         let stretches = &readings.stretches[wholly];
 
-        self.choose_add_stretches(stretches) && self.choose_add_seconds(readings, run, stretches)
+        let fits = self.choose_add_stretches(stretches)
+            && self.choose_add_seconds(readings, run, stretches);
+        if !fits {
+            self.forget();
+        }
+        fits
     }
 
     /// Adds the Apps of `stretches`, none of a stretch that held too many to add them up, as a
-    /// second that held too many adds none. Returns false where they come to more than
-    /// `APPS_MAX` Apps.
+    /// second that held too many adds none, starting from the sums it kept of the stretches
+    /// they begin with, and keeps the sums of them all. Returns false where they come to more
+    /// than `APPS_MAX` Apps, which leaves the caller to forget.
     fn choose_add_stretches(&mut self, stretches: &[Arc<AppsStretch>]) -> bool {
-        for stretch in stretches {
+        let start = self.kept.resume(stretches, &mut self.entries);
+
+        for stretch in &stretches[start..] {
             let Some(rows) = stretch.apps() else {
                 continue;
             };
@@ -296,6 +377,8 @@ impl Leaders {
                 return false;
             }
         }
+
+        self.kept.keep(stretches, &self.entries);
         true
     }
 
@@ -415,6 +498,21 @@ impl Leaders {
         );
         choose_cohort(&self.entries, &self.chosen, &mut cohorts.resident);
     }
+}
+
+/// How many of `stretches` the closing numbers `kept` name, where the stretches begin with
+/// those numbers in their order, and None where they do not. Equal numbers mean equal Apps, as
+/// `AppsStretch::closing_number` says, and the room keeps no zero.
+pub(super) fn resume_count(kept: &[u64], stretches: &[Arc<AppsStretch>]) -> Option<usize> {
+    if kept.len() > stretches.len() {
+        return None;
+    }
+    let begins_with_kept = kept
+        .iter()
+        .zip(stretches)
+        .all(|(kept, stretch)| *kept == stretch.closing_number());
+
+    begins_with_kept.then_some(kept.len())
 }
 
 /// The indexes of the newest seconds of `seconds` that lie in `window`, those after the newest

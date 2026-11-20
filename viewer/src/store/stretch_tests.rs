@@ -2,8 +2,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::apps::TickApps;
+use super::cohorts::resume_count;
 use super::sampled::LoadedRanks;
-use super::stretch::{Folded, Folding, StretchRow};
+use super::stretch::{Folded, Folding, StretchRow, Stretches};
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsSpan, AppsStretch, Cohorts, Held,
     Leaders, MachinePlace, MachineSecond, Mailbox, MemorySecond, Missing, Readings,
@@ -11,7 +12,7 @@ use super::{
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{App, Key, KeyKind, Measure, RankedApp};
+use crate::live_app_response::{App, Key, KeyKind, Measure, Rankable, RankedApp};
 use collector::ring::{Identity, RunIdentity};
 
 const RUN: RunIdentity = RunIdentity {
@@ -861,25 +862,463 @@ fn a_window_chooses_its_apps_past_a_stretch_of_more_apps_than_it_holds() {
 }
 
 #[test]
-fn leaders_keep_no_app_alive_between_choices() {
-    // Goal: the room a chart's leaders are chosen in keeps no App's name alive once the View
-    // and the chosen Apps are let go of, as the store lets go of a stretch's names with it.
-    // Method: choose the leaders of `window_view` one by one, keep only a weak reference to
-    // the App leading CPU time, and let go of the View and the cohorts.
+fn leaders_keep_the_apps_of_their_last_choice_until_they_forget_them() {
+    // Goal: between choices the room a chart's leaders are chosen in keeps the Apps the closed
+    // stretches of its last choice add up, so once it forgets, no App's name of a View it let go
+    // of is alive. Method: choose the leaders of `window_view` from its stretches, keep a weak
+    // reference to the App leading CPU time, let go of the View and the cohorts, then forget.
     let view = window_view();
+    let tail = view.apps.skipping(STRETCHED_SECONDS_COUNT);
     let mut leaders = Leaders::new();
     let mut cohorts = Cohorts::with_room();
     let window = WallSeconds {
         first: 100,
         last: 139,
     };
-    leaders.choose(&window_one_by_one(&view), window, &mut cohorts);
+    leaders.choose(&window_from_stretches(&view, &tail), window, &mut cohorts);
     let leader = Arc::downgrade(&cohorts.cpu[0]);
-
     drop(cohorts);
+    drop(tail);
     drop(view);
+    assert!(leader.upgrade().is_some());
+
+    leaders.forget();
 
     assert!(leader.upgrade().is_none());
+}
+
+#[test]
+fn leaders_reused_as_a_window_slides_choose_as_fresh_leaders() {
+    // Goal: one room reused for each second's choice, keeping what the stretches it held wholly
+    // add up, chooses as a fresh room does as the window slides across stretches that close and
+    // stretches that leave it. Method: take in seconds 100 to 175 one at a time, each a View, and
+    // choose the window of the newest 30 seconds from each with one reused room and with a fresh
+    // one, comparing the sums and the cohorts. The Views share their stretches, as the store
+    // hands them over.
+    let mut held = Held::without_recording();
+    let mut reused = Leaders::new();
+    let mut previous = published(&mut held);
+    let mut shared = 0;
+    for wall_second in 100..=175 {
+        take(&mut held, wall_second, &sliding_used(wall_second));
+        let view = published(&mut held);
+        shared += shared_stretches(&previous, &view);
+        let window = WallSeconds {
+            first: wall_second.saturating_sub(29),
+            last: wall_second,
+        };
+
+        assert_chooses_as_fresh_leaders(&mut reused, &view.readings(), window);
+        previous = view;
+    }
+
+    assert!(shared > 0);
+}
+
+#[test]
+fn leaders_add_up_again_a_stretch_replaced_by_another_of_its_number() {
+    // Goal: a stretch the room kept the sums of, replaced by another object of the same stretch
+    // number with other readings, is added up again. Method: choose over the stretches of a
+    // View, then over the same stretches with the first replaced by the stretch of the same
+    // number of a View of other readings, with the reused room and with a fresh one.
+    let view = window_view();
+    let other = sliding_view(100..=139);
+    let mut reused = Leaders::new();
+    let window = WallSeconds {
+        first: 100,
+        last: 139,
+    };
+    assert_chooses_as_fresh_leaders(&mut reused, &view.readings(), window);
+    let mut stretches = view.stretches.clone();
+    assert_eq!(stretches[0].stretch, other.stretches[0].stretch);
+    stretches[0] = Arc::clone(&other.stretches[0]);
+
+    let replaced = Readings {
+        stretches: &stretches,
+        ..view.readings()
+    };
+    assert_ne!(
+        Leaders::new().sums_over(&replaced, window),
+        Leaders::new().sums_over(&view.readings(), window)
+    );
+
+    assert_chooses_as_fresh_leaders(&mut reused, &replaced, window);
+}
+
+#[test]
+fn leaders_keep_nothing_of_a_window_whose_stretches_hold_more_apps_than_they_add_up() {
+    // Goal: where the stretches a window holds wholly come to more Apps than the room adds up,
+    // it chooses none and keeps nothing, so its next choice is a fresh room's. Method: in a View
+    // whose thirteen stretches each hold 2,048 Apps no other holds, choose the window of the
+    // oldest six, then the window of all thirteen, which begins with the six it kept, then the
+    // six again.
+    let view = crowded_view();
+    let readings = view.readings();
+    let mut reused = Leaders::new();
+    assert_chooses_as_fresh_leaders(&mut reused, &readings, crowded_window(6));
+    let mut crowded = Cohorts::with_room();
+
+    reused.choose(&readings, crowded_window(13), &mut crowded);
+
+    assert!(crowded.refused);
+    assert_chooses_as_fresh_leaders(&mut reused, &readings, crowded_window(6));
+}
+
+#[test]
+fn leaders_keep_nothing_of_a_window_whose_seconds_one_by_one_hold_more_apps_than_they_add_up() {
+    // Goal: where the stretches a window holds wholly fit in the room but its other seconds take
+    // the Apps past what it adds up, it chooses none and keeps no App's name, so its next choice
+    // is a fresh room's. Method: in a `crowded_view`, choose the window of the oldest eleven
+    // stretches and the first second of the twelfth, whose 2,048 Apps take the 22,528 of the
+    // eleven past 24,000, compare the references to an App of the oldest stretch with those
+    // before the choice, then choose the window of the oldest six.
+    let view = crowded_view();
+    let readings = view.readings();
+    let name = view.stretches[0].apps().unwrap()[0].ranked();
+    let references = Arc::strong_count(&name);
+    let mut reused = Leaders::new();
+    let mut crowded = Cohorts::with_room();
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_110,
+    };
+
+    reused.choose(&readings, window, &mut crowded);
+
+    assert!(crowded.refused);
+    assert_eq!(Arc::strong_count(&name), references);
+    assert_chooses_as_fresh_leaders(&mut reused, &readings, crowded_window(6));
+}
+
+#[test]
+fn leaders_choose_a_window_the_reader_picks_over_the_view_they_kept_the_sums_of() {
+    // Goal: a window the reader picks over the same View, holding other stretches wholly than
+    // the window followed, is chosen as a fresh room chooses it, and so is the followed window
+    // after it. Method: choose the newest 30 seconds of a View of 100 to 175, then windows that
+    // end earlier, start earlier, and lie inside it, then the newest 30 seconds again.
+    let view = sliding_view(100..=175);
+    let mut reused = Leaders::new();
+    let readings = view.readings();
+    for (first, last) in [(146, 175), (120, 159), (100, 175), (131, 148), (146, 175)] {
+        let window = WallSeconds { first, last };
+
+        assert_chooses_as_fresh_leaders(&mut reused, &readings, window);
+    }
+}
+
+#[test]
+fn leaders_take_no_reference_to_the_stretches_they_choose_over() {
+    // Goal: the room a chart's leaders are chosen in holds no reference to a stretch, so the
+    // store's pool writes and clears a stretch's buffer once its Views let go of it, as it does
+    // where no room chose over it, and a closed stretch that takes its owed Apps finds a free
+    // buffer. Method: a store of two closed stretches over three buffers takes stretches 100
+    // and 101, a room chooses over them, and the counts of references to each stretch are
+    // compared before and after. Then the View is let go of, stretch 102 closes in the third
+    // buffer, so stretch 100's buffer is the only one the span does not hold, and stretch 102
+    // takes owed Apps, which writes that buffer.
+    let mut held = Held::without_recording();
+    held.stretches = Stretches::new(2, 1);
+    for wall_second in 1_000..=1_020 {
+        take(&mut held, wall_second, &[cpu(b"/A.app", wall_second)]);
+    }
+    let view = published(&mut held);
+    assert_eq!(view.stretches.len(), 2);
+    let counts = reference_counts(&view.stretches);
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_019,
+    };
+
+    let mut leaders = Leaders::new();
+
+    let chosen = chosen_over(&mut leaders, &view.readings(), window);
+
+    assert_eq!(chosen.cpu, ["/A.app"]);
+    assert_eq!(reference_counts(&view.stretches), counts);
+    drop(view);
+    held.release_views();
+    for wall_second in 1_021..=1_030 {
+        take(&mut held, wall_second, &[cpu(b"/A.app", wall_second)]);
+    }
+    let mut folding = Folding::new();
+    assert!(
+        folding
+            .add(102, &second_with(1_020, &[cpu(b"/B.app", 1_000)]))
+            .is_none()
+    );
+    // `add_owed` asserts that it finds a free buffer, which a reference the living room held to
+    // stretch 100 would take, so the room stays alive past it, and the drop shows where it ends.
+    held.stretches
+        .add_owed(&RUN, 1_020, &folding.finish().unwrap());
+    drop(leaders);
+}
+
+/// The strong and the weak references to each of `stretches`, in their order.
+fn reference_counts(stretches: &[Arc<AppsStretch>]) -> Vec<(usize, usize)> {
+    stretches
+        .iter()
+        .map(|stretch| (Arc::strong_count(stretch), Arc::weak_count(stretch)))
+        .collect()
+}
+
+#[test]
+fn leaders_add_up_again_a_stretch_written_again_in_its_own_buffer() {
+    // Goal: a stretch the store's pool writes again in the buffer of a stretch the room kept
+    // the sums of, with the same address and stretch number but other readings, is added up
+    // again. Method: a store of one closed stretch over two buffers closes stretch 100 of A in
+    // its first buffer, a room chooses over it, the store resets and closes stretch 100 of C in
+    // the second buffer, resets again and closes stretch 100 of B in the first buffer, and the
+    // reused room chooses over that.
+    let mut held = Held::without_recording();
+    held.stretches = Stretches::new(1, 1);
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_009,
+    };
+    let mut reused = Leaders::new();
+    let first = published_stretch_of(&mut held, b"/A.app");
+    assert_chooses_as_fresh_leaders(&mut reused, &first.readings(), window);
+    let address = Arc::as_ptr(&first.stretches[0]);
+    drop(first);
+    held.reset();
+    drop(published_stretch_of(&mut held, b"/C.app"));
+    held.reset();
+
+    let again = published_stretch_of(&mut held, b"/B.app");
+
+    assert!(std::ptr::eq(Arc::as_ptr(&again.stretches[0]), address));
+    assert_eq!(again.stretches[0].stretch, 100);
+    assert_chooses_as_fresh_leaders(&mut reused, &again.readings(), window);
+}
+
+/// The View `held` publishes after it takes seconds 1,000 to 1,010, each naming the App `key`,
+/// which closes stretch 100.
+fn published_stretch_of(held: &mut Held, key: &'static [u8]) -> Arc<View> {
+    for wall_second in 1_000..=1_010 {
+        take(held, wall_second, &[cpu(key, wall_second)]);
+    }
+    let view = published(held);
+    assert_eq!(view.stretches.len(), 1);
+    view
+}
+
+#[test]
+fn leaders_add_up_again_a_stretch_that_took_its_owed_apps() {
+    // Goal: a closed stretch the room kept the sums of, which the store replaces with one that
+    // adds the Apps a load owed it, is added up again. Method: close stretch 100 of seconds
+    // that hold no Apps, choose over it, hand it the Apps a load added up, and choose over it
+    // again with the reused room.
+    let mut held = Held::without_recording();
+    take_mac_readings(&mut held, 1_000..1_011, 95.0);
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_009,
+    };
+    let mut reused = Leaders::new();
+    let owing = published(&mut held);
+    assert_chooses_as_fresh_leaders(&mut reused, &owing.readings(), window);
+    drop(owing);
+    let mut folding = Folding::new();
+    assert!(
+        folding
+            .add(100, &second_with(1_000, &[cpu(b"/A.app", 1_000)]))
+            .is_none()
+    );
+    held.stretches
+        .add_owed(&RUN, 1_000, &folding.finish().unwrap());
+
+    let owed = published(&mut held);
+
+    assert_chooses_as_fresh_leaders(&mut reused, &owed.readings(), window);
+    assert_eq!(
+        chosen_over(&mut reused, &owed.readings(), window).cpu,
+        ["/A.app"]
+    );
+}
+
+#[test]
+fn leaders_reused_past_a_stretch_of_more_apps_than_it_holds_choose_as_fresh_leaders() {
+    // Goal: a room whose kept stretches include one that holds no Apps, since its seconds came
+    // to more than it holds, chooses as a fresh room does once another stretch closes. Method:
+    // stretch 100 holds too many Apps and stretch 101 holds A, a reused room chooses the window
+    // of the two, then stretch 102 of A closes and the room chooses the window of all three.
+    let mut held = Held::without_recording();
+    take_more_apps_than_a_stretch_holds(&mut held, 1_000);
+    for wall_second in 1_010..=1_020 {
+        take(&mut held, wall_second, &[cpu(b"/A.app", wall_second)]);
+    }
+    let two = published(&mut held);
+    assert!(two.stretches[0].apps().is_none());
+    let mut reused = Leaders::new();
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_019,
+    };
+    assert_chooses_as_fresh_leaders(&mut reused, &two.readings(), window);
+    for wall_second in 1_021..=1_030 {
+        take(&mut held, wall_second, &[cpu(b"/A.app", wall_second)]);
+    }
+
+    let three = published(&mut held);
+
+    assert_eq!(three.stretches.len(), 3);
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_029,
+    };
+    assert_chooses_as_fresh_leaders(&mut reused, &three.readings(), window);
+}
+
+#[test]
+fn a_room_resumes_the_sums_of_the_stretches_a_window_begins_with() {
+    // Goal: a room resumes the sums it kept where the window's stretches begin with the kept
+    // closing numbers, counting those. Method: keep the numbers of the oldest two of a View's
+    // stretches and compare them with all of its stretches.
+    let view = sliding_view(100..=139);
+    let kept = closing_numbers(&view.stretches[..2]);
+
+    let count = resume_count(&kept, &view.stretches);
+
+    assert_eq!(count, Some(2));
+}
+
+#[test]
+fn a_room_resumes_no_sums_of_more_stretches_than_a_window_holds() {
+    // Goal: a room resumes nothing where it kept more stretches than the window holds wholly.
+    // Method: keep the numbers of all of a View's stretches and compare them with all but the
+    // newest.
+    let view = sliding_view(100..=139);
+    let kept = closing_numbers(&view.stretches);
+
+    let count = resume_count(&kept, &view.stretches[..2]);
+
+    assert_eq!(count, None);
+}
+
+#[test]
+fn a_room_resumes_no_sums_of_a_stretch_closed_again() {
+    // Goal: a room resumes nothing where a stretch the window begins with took another closing
+    // number than the one kept. Method: keep the number of the oldest stretch of one View and
+    // compare it with the stretches of another View of the same seconds.
+    let view = sliding_view(100..=139);
+    let again = sliding_view(100..=139);
+    let kept = closing_numbers(&view.stretches[..1]);
+
+    let count = resume_count(&kept, &again.stretches);
+
+    assert_eq!(count, None);
+}
+
+#[test]
+fn a_room_that_kept_nothing_resumes_no_stretch() {
+    // Goal: a room that kept no closing number resumes none of the window's stretches, so it
+    // adds up all of them. Method: compare no number with a View's stretches.
+    let view = sliding_view(100..=139);
+
+    let count = resume_count(&[], &view.stretches);
+
+    assert_eq!(count, Some(0));
+}
+
+/// The closing number of each of `stretches`, in their order.
+fn closing_numbers(stretches: &[Arc<AppsStretch>]) -> Vec<u64> {
+    stretches
+        .iter()
+        .map(|stretch| stretch.closing_number())
+        .collect()
+}
+
+/// Asserts that `reused` chooses over `window` of `readings` the sums and the cohorts a fresh
+/// room chooses.
+fn assert_chooses_as_fresh_leaders(
+    reused: &mut Leaders,
+    readings: &Readings<'_>,
+    window: WallSeconds,
+) {
+    let sums = reused.sums_over(readings, window);
+    let chosen = chosen_over(reused, readings, window);
+
+    let expected = Leaders::new().sums_over(readings, window);
+    let fresh = chosen_over(&mut Leaders::new(), readings, window);
+    assert!(expected.is_some());
+    assert_eq!(sums, expected, "{window:?}");
+    assert_eq!(chosen, fresh, "{window:?}");
+}
+
+/// How many of the stretches of `previous` are the very objects `view` holds.
+fn shared_stretches(previous: &View, view: &View) -> usize {
+    previous
+        .stretches
+        .iter()
+        .filter(|stretch| view.stretches.iter().any(|held| Arc::ptr_eq(held, stretch)))
+        .count()
+}
+
+/// The View of the seconds of `wall_seconds`, each using what `sliding_used` names.
+fn sliding_view(wall_seconds: std::ops::RangeInclusive<u64>) -> Arc<View> {
+    let mut held = Held::without_recording();
+    for wall_second in wall_seconds {
+        take(&mut held, wall_second, &sliding_used(wall_second));
+    }
+
+    published(&mut held)
+}
+
+/// What each App uses at `wall_second`, which differs from second to second so that each
+/// window's sums differ: A at even seconds, B at every third, C at every second, D at every
+/// seventh, and E at the seconds ending in 4, each in its own amounts of every resource.
+fn sliding_used(wall_second: u64) -> Vec<Used<'static>> {
+    let keys: [(&[u8], u64); 5] = [
+        (b"/A.app", 2),
+        (b"/B.app", 3),
+        (b"/C.app", 1),
+        (b"/D.app", 7),
+        (b"/E.app", 10),
+    ];
+    (0_u64..)
+        .zip(keys)
+        .filter(|(index, (_, every))| wall_second % every == *index % *every)
+        .map(|(index, (key, _))| {
+            let amount = wall_second * 13 + index * 1_000;
+            Used {
+                key,
+                cpu_ns: amount,
+                energy_nj: Some(amount * 3),
+                gpu_ns: Some(amount * 5),
+                disk_io_bytes: Some(amount * 7),
+                resident_bytes: amount * 11,
+            }
+        })
+        .collect()
+}
+
+/// A View of seconds 1,000 to 1,130 whose first second of each ten, from 1,000 to 1,120, holds
+/// 2,048 Apps no other second holds, as many as a stretch holds, and whose other seconds hold
+/// none, so that its thirteen closed stretches hold more Apps than a window adds up.
+fn crowded_view() -> Arc<View> {
+    let mut held = Held::without_recording();
+    for wall_second in 1_000..=1_130 {
+        let crowded = wall_second % 10 == 0 && wall_second < 1_130;
+        let keys: Vec<Vec<u8>> = if crowded {
+            (0..APPS_PER_SECOND_MAX)
+                .map(|index| format!("/{wall_second}-{index:04}.app").into_bytes())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let used: Vec<_> = keys.iter().map(|key| cpu(key, 1_000)).collect();
+        take(&mut held, wall_second, &used);
+    }
+
+    published(&mut held)
+}
+
+/// The window of a `crowded_view` that holds its oldest `stretches` stretches wholly.
+fn crowded_window(stretches: u64) -> WallSeconds {
+    WallSeconds {
+        first: 1_000,
+        last: 1_000 + stretches * 10 - 1,
+    }
 }
 
 /// A recording of the ticks `minutes` names, as `seal_minutes` seals them.
@@ -1143,6 +1582,7 @@ fn window_used(wall_second: u64) -> Vec<Used<'static>> {
 
 /// The Apps the App charts of CPU time, energy, disk bytes, GPU time and resident memory draw on
 /// lines of their own over a window of readings, by name, and the seconds they draw one by one.
+#[derive(Debug, PartialEq)]
 struct Chosen {
     cpu: Vec<String>,
     power: Vec<String>,

@@ -19,6 +19,10 @@ use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp
 use collector::ring::{Identity, RunIdentity};
 use persistence::retention::Retained;
 
+#[path = "stretch_apps.rs"]
+mod stretch_apps;
+use stretch_apps::StretchApps;
+
 /// The Apps a stretch holds at most, as many as a second holds, past which it holds none and
 /// says so.
 const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
@@ -225,13 +229,8 @@ pub struct AppsStretch {
     /// interval its rates were taken over.
     elapsed_overflowed: bool,
     completeness: Completeness,
-    /// Whether the stretch's seconds hold more Apps between them than a stretch holds, so it
-    /// holds none.
-    too_many: bool,
-    /// Every App of the stretch's seconds, once each, in key order.
-    rows: Vec<StretchRow>,
-    /// Every App of `rows` added up, once the stretch is closed.
-    totals: Totals,
+    /// Every App of the stretch's seconds and the closing number that names them.
+    apps: StretchApps,
     /// What the stretch's seconds read of the whole Mac.
     pub machine: Box<MachineStretch>,
 }
@@ -273,7 +272,7 @@ impl AppsStretch {
     /// A stretch with room for `STRETCH_APPS_MAX` Apps, holding none.
     fn with_room() -> Self {
         Self {
-            rows: Vec::with_capacity(STRETCH_APPS_MAX),
+            apps: StretchApps::with_room(),
             ..Self::default()
         }
     }
@@ -286,9 +285,7 @@ impl AppsStretch {
         self.elapsed_ns = 0;
         self.elapsed_overflowed = false;
         self.completeness = Completeness::default();
-        self.too_many = false;
-        self.rows.clear();
-        self.totals = Totals::default();
+        self.apps.clear();
         *self.machine = MachineStretch::default();
     }
 
@@ -311,9 +308,7 @@ impl AppsStretch {
             elapsed_ns,
             elapsed_overflowed,
             completeness,
-            too_many,
-            rows,
-            totals,
+            apps,
             machine,
         } = other;
         self.stretch = *stretch;
@@ -323,9 +318,7 @@ impl AppsStretch {
         self.elapsed_overflowed = *elapsed_overflowed;
         self.completeness = *completeness;
         self.machine.clone_from(machine);
-        self.too_many = *too_many;
-        self.rows.clone_from(rows);
-        self.totals = *totals;
+        self.apps.copy_from(apps);
     }
 
     /// Whether the stretch's first second is the tick of publication `publication` of run `run`.
@@ -353,7 +346,8 @@ impl AppsStretch {
         if let Some(elapsed_ns) = elapsed_ns {
             self.add_elapsed(elapsed_ns);
         }
-        self.add_rows(&second.apps, spare, |row, app| row.add(app, elapsed_ns));
+        self.apps
+            .add(&second.apps, spare, |row, app| row.add(app, elapsed_ns));
     }
 
     /// Adds `other`, the same stretch's Apps over seconds the stretch does not hold, writing the
@@ -367,11 +361,7 @@ impl AppsStretch {
         self.seconds += other.seconds;
         self.add_elapsed(other.elapsed_ns);
         self.elapsed_overflowed |= other.elapsed_overflowed;
-        if other.too_many {
-            self.rows.clear();
-            self.too_many = true;
-        }
-        self.add_rows(&other.rows, spare, StretchRow::add_row);
+        self.apps.add_stretch(&other.apps, spare);
     }
 
     /// Adds `elapsed_ns` to the intervals the stretch's seconds measured their Apps over.
@@ -391,50 +381,26 @@ impl AppsStretch {
         };
     }
 
-    /// Adds `incoming`, Apps in key order, to the stretch's with `add`, writing them into
-    /// `spare`, which then trades places with them. Where they come to more than
-    /// `STRETCH_APPS_MAX` Apps, the stretch holds none.
-    fn add_rows<R: PointRow + Rankable>(
-        &mut self,
-        incoming: &[R],
-        spare: &mut Vec<StretchRow>,
-        add: impl Fn(&mut StretchRow, &R),
-    ) {
-        if self.too_many {
-            return;
-        }
-
-        let capacity = spare.capacity();
-        spare.clear();
-        let fits = key_order::add_merged(&mut self.rows, incoming, spare, STRETCH_APPS_MAX, add);
-        mem::swap(&mut self.rows, spare);
-        if !fits {
-            self.rows.clear();
-            self.too_many = true;
-        }
-        assert_eq!(spare.capacity(), capacity);
-    }
-
     /// Finds each App's resident memory over the stretch, and adds the Apps up, once the store
     /// adds no more seconds to the stretch.
     fn close(&mut self) {
-        let seconds = u64::from(self.seconds);
-        for row in &mut self.rows {
-            assert!(seconds > 0);
-            // The division floors.
-            row.resident_bytes = row.resident.known / seconds;
-        }
-        self.totals = Totals::of_rows(&self.rows);
+        self.apps.close(self.seconds);
+    }
+
+    /// The number the stretch's last close took, which names its Apps as `StretchApps` says, or
+    /// zero where no close finished them.
+    pub(super) fn closing_number(&self) -> u64 {
+        self.apps.closing_number()
     }
 
     /// Every App of the stretch's seconds, once each, in key order, or `None` where they held
     /// more Apps between them than a stretch holds.
     pub(super) fn apps(&self) -> Option<&[StretchRow]> {
-        if self.too_many {
+        if self.apps.too_many() {
             return None;
         }
 
-        Some(&self.rows)
+        Some(self.apps.rows())
     }
 
     /// Stretch `stretch` of `seconds`, the Apps of seconds of that stretch oldest first, added up
@@ -468,7 +434,7 @@ impl AppsStretch {
     /// more Apps than a stretch holds.
     #[must_use]
     pub fn holds_apps(&self) -> bool {
-        if self.too_many {
+        if self.apps.too_many() {
             return false;
         }
 
@@ -651,15 +617,15 @@ impl PointApps for AppsStretch {
     type Row = StretchRow;
 
     fn app_count(&self) -> usize {
-        self.rows.len()
+        self.apps.rows().len()
     }
 
     fn found(&self, name: &RankedApp) -> Option<Cow<'_, StretchRow>> {
-        attribution::found_in(&self.rows, name).map(Cow::Borrowed)
+        attribution::found_in(self.apps.rows(), name).map(Cow::Borrowed)
     }
 
     fn totals(&self) -> &Totals {
-        &self.totals
+        self.apps.totals()
     }
 
     fn elapsed_ns(&self) -> Option<u64> {

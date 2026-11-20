@@ -415,7 +415,8 @@ impl LiveDashboard {
     /// Lets go of the View a hold kept, whose buffers the store then makes no new ones beside.
     /// The page keeps the charts it drew from the View and the readings of its newest second,
     /// and shows them until the store's next View, since the worker's readings may be older and
-    /// draw the charts by App over fifteen minutes at most.
+    /// draw the charts by App over fifteen minutes at most. It keeps the Apps it chose those
+    /// charts from, since the next View shares the stretches they add up.
     pub(super) fn store_view_let_go(&mut self) {
         let Some(view) = self.store_view.take() else {
             return;
@@ -427,11 +428,13 @@ impl LiveDashboard {
         });
     }
 
-    /// Lets go of the store's View and of what the page kept of one it let go of, so the page
-    /// draws nothing from the store until it takes another View.
+    /// Lets go of the store's View, of what the page kept of one it let go of, and of the Apps
+    /// the page kept to choose its charts by App from it, so the page draws nothing from the store
+    /// and keeps none of its Apps alive until it takes another View.
     pub(super) fn store_view_drop(&mut self) {
         self.store_view = None;
         self.store_panels.remnant = None;
+        self.leaders.forget();
     }
 
     /// Lets go of the store's View as the window hides, but of none a hold keeps, since the
@@ -466,14 +469,15 @@ impl LiveDashboard {
         self.store_panels = StorePanels { builds, ..panels };
     }
 
-    /// Lets go of the View the page could not draw, so the page shows the worker's readings
-    /// whole and its error stays the worker's, and reports `error` once each time it changes.
+    /// Lets go of the View the page could not draw, and of the Apps the page kept to choose its
+    /// charts by App from it, so the page shows the worker's readings whole and its error stays
+    /// the worker's, and reports `error` once each time it changes.
     fn draw_store_view_failed(&mut self, error: String) {
         if self.store_panels.failure.as_ref() != Some(&error) {
             eprintln!("Flightdeck could not draw the store's View: {error}");
         }
         self.store_panels.failure = Some(error);
-        self.store_view = None;
+        self.store_view_drop();
     }
 
     /// The charts of `view`, as the range zooms them, and the top Apps of its newest second. The
@@ -1017,12 +1021,7 @@ fn draw_store_view_cohorts(view: &View, window: WallSeconds, leaders: &mut Leade
         return cohorts;
     }
 
-    let readings = viewer::store::Readings {
-        seconds: &view.seconds,
-        apps: &view.apps,
-        stretches: &view.stretches,
-    };
-    leaders.choose(&readings, window, &mut cohorts);
+    leaders.choose(&view.readings(), window, &mut cohorts);
     cohorts
 }
 

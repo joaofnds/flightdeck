@@ -215,6 +215,17 @@ pub struct View {
 }
 
 impl View {
+    /// What the App charts choose their Apps over: each second the View holds one by one and its
+    /// closed stretches.
+    #[must_use]
+    pub fn readings(&self) -> Readings<'_> {
+        Readings {
+            seconds: &self.seconds,
+            apps: &self.apps,
+            stretches: &self.stretches,
+        }
+    }
+
     /// Exact identities at this wall second, ordered by wall time, run and publication.
     #[must_use]
     pub fn alternatives(&self, second: u64) -> Vec<Observation> {

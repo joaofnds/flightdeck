@@ -667,10 +667,20 @@ fn time_leaders(view: &View) {
     };
     let mut leaders = Leaders::new();
 
-    time_leaders_over("with", view, &view.stretches, &mut leaders, window);
-    time_leaders_over("without", view, &[], &mut leaders, window);
+    time_leaders_over(
+        "with its stretches",
+        view,
+        &view.stretches,
+        &mut leaders,
+        window,
+    );
+    time_leaders_over("without its stretches", view, &[], &mut leaders, window);
+    time_leaders_again(view, &mut leaders, window);
 }
 
+/// Times the choice of the leaders over `window` of `view` with `stretches` by a room that
+/// forgets before each choice, so each adds up every stretch, as a first choice does. The
+/// forgetting is timed with the choice.
 fn time_leaders_over(
     label: &str,
     view: &View,
@@ -678,19 +688,46 @@ fn time_leaders_over(
     leaders: &mut Leaders,
     window: WallSeconds,
 ) {
+    let readings = Readings {
+        stretches,
+        ..view.readings()
+    };
+
     time(
-        &format!("choose the leaders of the span {label} its stretches"),
+        &format!("choose the leaders of the span {label}"),
         || {
             let mut cohorts = Cohorts::with_room();
-            let readings = Readings {
-                seconds: &view.seconds,
-                apps: &view.apps,
-                stretches,
-            };
+            leaders.forget();
             leaders.choose(&readings, window, &mut cohorts);
             cohorts
         },
         cohorts_digest,
+    );
+}
+
+/// Times the choice of the leaders over `window` of `view` by a room that chose over the same
+/// stretches already, so it adds none of them up again, as the page's room does in nine seconds
+/// of ten. In the tenth the oldest stretch leaves the window and the room adds every stretch up
+/// again, as `time_leaders_over` times. Its last choice must give the cohorts a fresh room gives.
+fn time_leaders_again(view: &View, leaders: &mut Leaders, window: WallSeconds) {
+    let readings = view.readings();
+    let mut fresh = Cohorts::with_room();
+    Leaders::new().choose(&readings, window, &mut fresh);
+    let fresh_digest = cohorts_digest(&fresh);
+    leaders.choose(&readings, window, &mut Cohorts::with_room());
+
+    time(
+        "choose the leaders of the span again over the stretches it kept the sums of",
+        || {
+            let mut cohorts = Cohorts::with_room();
+            leaders.choose(&readings, window, &mut cohorts);
+            cohorts
+        },
+        |cohorts| {
+            let digest = cohorts_digest(cohorts);
+            assert_eq!(digest, fresh_digest);
+            digest
+        },
     );
 }
 

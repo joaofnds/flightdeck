@@ -687,6 +687,75 @@ fn a_rested_memory_page_reads_its_chart_of_resident_memory_by_app_at_the_views_n
     assert_eq!(chart_reading(&dashboard, id), chart_reading(&worker, id));
 }
 
+/// The stretch of the loaded hour that also holds the Apps of `crowded_used`, a stretch the
+/// Overview's default window of fifteen minutes holds wholly.
+const CROWDED_STRETCH_INDEX: usize = 50;
+
+/// Weak references to the names of Z the stretch at `CROWDED_STRETCH_INDEX` of the loaded hour
+/// was made from, once `dashboard`, an Overview, takes that View and chooses its charts by App
+/// over it, and the test lets go of it. That stretch also holds eight Apps more. The least of
+/// them is Z, last in key order, which wins no tie on the charts every App reads none of, so no
+/// chart draws it on a line of its own and keeps its name, and only the View and the room the
+/// page chooses in keep it alive.
+fn crowded_names(dashboard: &mut LiveDashboard) -> Vec<std::sync::Weak<RankedApp>> {
+    let (mut view, _) = crate::live_store_app_fixtures::hour();
+    let number = view.stretches[CROWDED_STRETCH_INDEX].stretch;
+    let seconds: Vec<Arc<AppsSecond>> = (number * 10..number * 10 + 10)
+        .map(|second| Arc::new(apps_at(&reading_at(second, 0), &crowded_used())))
+        .collect();
+    let names: Vec<std::sync::Weak<RankedApp>> = seconds
+        .iter()
+        .flat_map(|second| {
+            second
+                .apps
+                .iter()
+                .filter(|app| app.name.display_name == "Z")
+        })
+        .map(|app| Arc::downgrade(&app.name))
+        .collect();
+    assert_eq!(names.len(), seconds.len());
+    view.stretches[CROWDED_STRETCH_INDEX] =
+        Arc::new(viewer::store::AppsStretch::of_seconds(number, &seconds));
+    drop(seconds);
+    assert!(dashboard.take_view(Arc::new(view)));
+    assert!(names.iter().any(|name| name.upgrade().is_some()));
+    names
+}
+
+#[test]
+fn a_page_that_cannot_draw_its_view_keeps_no_app_of_it_alive() {
+    // Goal: a page that lets go of the store's View it could not draw keeps alive none of the
+    // Apps it chose its charts by App from, since the room it chooses them in keeps the Apps of
+    // the View's stretches between choices. Method: Overview over the View of the loaded hour
+    // that `crowded_names` makes, then the page lets go of it as a failed draw does, which no
+    // View a test can build reaches through a draw.
+    let hour_newest = crate::live_store_app_fixtures::HOUR_NEWEST;
+    let mut dashboard = dashboard(&[reading_at(hour_newest - 1, 0), reading_at(hour_newest, 0)]);
+    let names = crowded_names(&mut dashboard);
+
+    dashboard.draw_store_view_failed("The View could not be drawn".to_owned());
+
+    assert!(names.iter().all(|name| name.upgrade().is_none()));
+}
+
+/// What the Apps of the crowded stretch use at each of its seconds, in key order: A, B and C as
+/// at the hour's other seconds, seven Apps more than any of them, and Z less than any.
+fn crowded_used() -> [(&'static str, u64); 11] {
+    [
+        ("A", 500_000_000),
+        ("B", 250_000_000),
+        ("C", 125_000_000),
+        ("D", 900_000_000),
+        ("E", 900_000_000),
+        ("F", 900_000_000),
+        ("G", 900_000_000),
+        ("H", 900_000_000),
+        ("I", 900_000_000),
+        ("J", 900_000_000),
+        ("Z", 1_000),
+    ]
+}
+
 mod when_the_view_cannot_choose_the_apps_its_charts_draw {
     use super::*;
 
@@ -1808,6 +1877,23 @@ mod when_macos_hides_the_window {
         dashboard.tick_hidden();
 
         assert_eq!(Arc::strong_count(&view), 1);
+    }
+
+    #[test]
+    fn the_page_keeps_no_app_of_the_view_alive() {
+        // Goal: a page that lets go of the store's View for good, as a hidden window does,
+        // keeps alive none of the Apps it chose its charts by App from, since the room it
+        // chooses them in keeps the Apps of the View's stretches between choices. Method:
+        // Overview over the View of the loaded hour that `crowded_names` makes, then the
+        // window hides.
+        let hour_newest = crate::live_store_app_fixtures::HOUR_NEWEST;
+        let mut dashboard =
+            dashboard(&[reading_at(hour_newest - 1, 0), reading_at(hour_newest, 0)]);
+        let names = crowded_names(&mut dashboard);
+
+        dashboard.tick_hidden();
+
+        assert!(names.iter().all(|name| name.upgrade().is_none()));
     }
 }
 
