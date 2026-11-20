@@ -8,6 +8,8 @@ use super::{BUILD, identity_text, parse_identity, private};
 use crate::ring::Identity;
 
 const ANNOUNCEMENT: &str = "collector.announcement";
+/// Every process that may go on using a recording's path holds one of these for its lifetime.
+const LIFETIME_LOCKS: [&str; 3] = ["recorder.lock", "collector.lock", "persister.lock"];
 /// The start every version of the header shares, so a reader tells a format it cannot read
 /// from a damaged file.
 const HEADER_FAMILY: &str = "flightdeck-collector-";
@@ -107,6 +109,18 @@ fn holder_parse(bytes: &[u8]) -> io::Result<Holder> {
     let build = std::str::from_utf8(build).map_err(|_| invalid())?;
     let build = u64::from_str_radix(build, 16).map_err(|_| invalid())?;
     Ok(Holder::Announced { run, build })
+}
+
+/// Whether any process still uses the recording at `root`, as a recorder, a collector or a
+/// persister, which goes on using its path whatever another process does there.
+pub fn lifetime_lock_held(root: &Path) -> io::Result<bool> {
+    for lock in LIFETIME_LOCKS {
+        if private::FileLock::held(&root.join(lock))? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Removes the announcement a previous holder left, once the caller holds the lock.
@@ -323,6 +337,34 @@ mod tests {
             io::ErrorKind::InvalidData,
             holder(&fixture.root).unwrap_err().kind()
         );
+    }
+
+    #[test]
+    fn each_lifetime_lock_held_says_a_process_still_uses_the_recording() {
+        // Goal: a process that goes on using the recording's path is found, whichever it is.
+        // Method: hold each of the three lifetime locks alone and ask whether one is held.
+        let fixture = Fixture::new("lifetime");
+        for lock in ["recorder.lock", "collector.lock", "persister.lock"] {
+            let _held = private::FileLock::try_lock(&fixture.root.join(lock)).unwrap();
+
+            let held = lifetime_lock_held(&fixture.root).unwrap();
+
+            assert!(held, "{lock} held was not found");
+        }
+    }
+
+    #[test]
+    fn a_recording_whose_processes_let_go_holds_no_lifetime_lock() {
+        // Goal: a lock file a process left behind does not read as a process using the recording.
+        // Method: take and release each lifetime lock, so its file stays, then ask.
+        let fixture = Fixture::new("released");
+        for lock in ["recorder.lock", "collector.lock", "persister.lock"] {
+            drop(private::FileLock::try_lock(&fixture.root.join(lock)).unwrap());
+        }
+
+        let held = lifetime_lock_held(&fixture.root).unwrap();
+
+        assert!(!held);
     }
 
     struct Fixture {

@@ -31,6 +31,11 @@ pub(super) fn requires_older_writer(root: &Path) -> io::Result<bool> {
     Ok(read(root)?.writer < WRITER_PROTOCOL)
 }
 
+/// Whether a root requires a writer newer than this one.
+pub(super) fn requires_newer_writer(root: &Path) -> io::Result<bool> {
+    Ok(read(root)?.writer > WRITER_PROTOCOL)
+}
+
 #[cfg(test)]
 pub(super) fn create(root: &Path, identity: Identity) -> io::Result<()> {
     let header = std::str::from_utf8(HEADER).map_err(|_| invalid())?;

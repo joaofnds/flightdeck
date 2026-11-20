@@ -23,6 +23,9 @@ const _: () = assert!(RECORD_VALUE_COUNT < RECORD_WORDS);
 /// its own start, so the words beside it name the boot that clock belongs to.
 const STOP_WORD: usize = 5;
 const STOP_BOOT_WORDS: [usize; 2] = [7, 8];
+/// The build that wrote the file, the last word of the header `create` writes.
+const BUILD_WORD: usize = 6;
+const _: () = assert!(BUILD_WORD < RECORD_START);
 const _: () = assert!(RECORD_START + 3 * RECORD_WORDS <= WORDS);
 const _: () = assert!(STOP_BOOT_WORDS[1] < RECORD_START);
 
@@ -30,6 +33,13 @@ const _: () = assert!(STOP_BOOT_WORDS[1] < RECORD_START);
 pub struct Control {
     words: NonNull<AtomicU64>,
     writable: bool,
+}
+
+/// What a control file says of its recording to a build that may not be the one that wrote it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Written {
+    pub build: u64,
+    pub stopping: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +160,7 @@ impl Control {
         }
         let authority = super::random_identity()?;
         let mut bytes = [0_u8; BYTES];
-        let header = [
+        let header: [u64; BUILD_WORD + 1] = [
             MAGIC,
             identity.0[0],
             identity.0[1],
@@ -184,6 +194,31 @@ impl Control {
         Ok(control)
     }
 
+    /// Reads which build wrote the recording's control file and whether a stop was asked there,
+    /// from a file any build with this MAGIC wrote. An absent file stays `NotFound`, apart from a
+    /// file that fails the checks, which is `InvalidData`.
+    pub fn read_across_builds(root: &Path) -> io::Result<Written> {
+        let control = Self::open_across_builds(root, false)?;
+        Ok(Written {
+            build: control.word(BUILD_WORD).load(Ordering::SeqCst),
+            stopping: control.stopping(),
+        })
+    }
+
+    /// Opens a control file any build with this MAGIC wrote, checking all but the build word, so
+    /// only the words every such build keeps in place may be used through it.
+    fn open_across_builds(root: &Path, writable: bool) -> io::Result<Self> {
+        let path = root.join("recorder.control");
+        let file = if writable {
+            private::open_private_file_writable(&path)?
+        } else {
+            private::open_private_file(&path, false)?
+        };
+        let control = Self::map(&file, writable)?;
+        control.validate_recording(read_identity(root)?)?;
+        Ok(control)
+    }
+
     fn map(file: &std::fs::File, writable: bool) -> io::Result<Self> {
         if file.metadata()?.len() != u64::try_from(BYTES).map_err(io::Error::other)? {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
@@ -208,10 +243,18 @@ impl Control {
     }
 
     fn validate(&self, identity: Identity) -> io::Result<()> {
+        self.validate_recording(identity)?;
+        if self.word(BUILD_WORD).load(Ordering::SeqCst) != super::BUILD {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        Ok(())
+    }
+
+    /// Checks that the file keeps this layout and belongs to the recording `identity` names.
+    fn validate_recording(&self, identity: Identity) -> io::Result<()> {
         if self.word(0).load(Ordering::SeqCst) != MAGIC
             || self.word(1).load(Ordering::SeqCst) != identity.0[0]
             || self.word(2).load(Ordering::SeqCst) != identity.0[1]
-            || self.word(6).load(Ordering::SeqCst) != super::BUILD
         {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
@@ -244,6 +287,22 @@ impl Control {
         drop(Self::open_writable(root)?);
         let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
         Self::open_writable(root)?.request_stop()
+    }
+
+    /// Asks a recording another build may run to stop, as `request_recording_stop` does but
+    /// skipping the build word, since the stop and its boot keep their words while MAGIC stands. A
+    /// recording that needs a newer writer is refused, since this build could not start the
+    /// recorder that replaces the one it stops.
+    pub fn request_recording_stop_across_builds(root: &Path) -> io::Result<()> {
+        // A root with no control file refuses here, before the lock could be created inside it.
+        drop(Self::open_across_builds(root, true)?);
+        let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+        // A newer build replaces an older recording at this root under this lock, so the writer
+        // read here is the one of the recording the stop lands on.
+        if super::format::requires_newer_writer(root)? {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        Self::open_across_builds(root, true)?.request_stop()
     }
 
     pub fn request_stop(&self) -> io::Result<()> {
@@ -904,5 +963,160 @@ mod tests {
             worker.control().read(Role::Collector).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn reads_the_build_and_the_stop_of_a_control_file_another_build_wrote() {
+        // Goal: a build learns which build wrote a control file it cannot open, and whether a
+        // stop was asked there.
+        // Method: change only the build word of a real control file and read it across builds.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        control.word(BUILD_WORD).fetch_xor(1, Ordering::SeqCst);
+
+        let written = Control::read_across_builds(&directory.0).unwrap();
+
+        let expected = Written {
+            build: super::super::BUILD ^ 1,
+            stopping: false,
+        };
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn a_read_across_builds_refuses_another_magic_or_recording() {
+        // Goal: a file of another layout or another recording never passes for another build's.
+        // Method: change the MAGIC and each identity word of a real control file in turn.
+        for field in [0, 1, 2] {
+            let directory = Directory::new();
+            let control = Control::create(&directory.0).unwrap();
+            control.word(field).fetch_xor(1, Ordering::SeqCst);
+
+            let result = Control::read_across_builds(&directory.0);
+
+            assert_eq!(
+                result.unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_across_builds_refuses_a_control_file_of_another_size() {
+        // Goal: a file of another size never passes for another build's control file.
+        // Method: lengthen a real control file by one word and read it across builds.
+        let directory = Directory::new();
+        drop(Control::create(&directory.0).unwrap());
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.0.join("recorder.control"))
+            .unwrap();
+        file.set_len(u64::try_from(BYTES + 8).unwrap()).unwrap();
+
+        let result = Control::read_across_builds(&directory.0);
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_read_across_builds_of_a_recording_without_a_control_file_finds_none() {
+        // Goal: an absent control file stays apart from one that fails the checks.
+        // Method: read across builds in a directory that holds no control file.
+        let directory = Directory::new();
+
+        let result = Control::read_across_builds(&directory.0);
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_stop_across_builds_reaches_a_control_file_another_build_wrote() {
+        // Goal: this build can ask another build's recording to stop.
+        // Method: change only the build word of a real control file and ask across builds.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        control.word(BUILD_WORD).fetch_xor(1, Ordering::SeqCst);
+
+        Control::request_recording_stop_across_builds(&directory.0).unwrap();
+
+        assert!(control.stopping());
+    }
+
+    #[test]
+    fn a_stop_across_builds_refuses_a_file_of_another_magic() {
+        // Goal: a stop across builds writes nothing into a file of another layout.
+        // Method: change the MAGIC of a real control file and ask across builds.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        control.word(0).fetch_xor(1, Ordering::SeqCst);
+
+        let result = Control::request_recording_stop_across_builds(&directory.0);
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(!control.stopping());
+    }
+
+    #[test]
+    fn a_stop_across_builds_refuses_a_recording_that_needs_a_newer_writer() {
+        // Goal: an older app never stops a recording whose writer it could not replace.
+        // Method: raise the writer the recording's identity requires past this build's, then ask
+        // across builds.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        let identity = std::fs::read_to_string(directory.0.join("identity")).unwrap();
+        let mut lines: Vec<&str> = identity.lines().collect();
+        let newer = format!("{:08x}", super::super::format::WRITER_PROTOCOL + 1);
+        lines[2] = &newer;
+        let raised = format!("{}\n", lines.join("\n"));
+        private::atomic_write(&directory.0, "identity", raised.as_bytes()).unwrap();
+
+        let result = Control::request_recording_stop_across_builds(&directory.0);
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert!(!control.stopping());
+    }
+
+    #[test]
+    fn a_stop_across_builds_reaches_a_recording_that_needs_an_older_writer() {
+        // Goal: a newer app stops the helpers an older build left, whose recording it replaces.
+        // Method: lower the writer the recording's identity requires below this build's, then ask
+        // across builds and read the stop.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        let identity = std::fs::read_to_string(directory.0.join("identity")).unwrap();
+        let mut lines: Vec<&str> = identity.lines().collect();
+        let older = format!("{:08x}", super::super::format::WRITER_PROTOCOL - 1);
+        lines[2] = &older;
+        let lowered = format!("{}\n", lines.join("\n"));
+        private::atomic_write(&directory.0, "identity", lowered.as_bytes()).unwrap();
+
+        Control::request_recording_stop_across_builds(&directory.0).unwrap();
+
+        assert!(control.stopping());
+    }
+
+    #[test]
+    fn the_stop_and_its_boot_keep_their_words_while_the_magic_stands() {
+        // Goal: a build reading another build's control file finds the build, the stop and its
+        // boot where that build wrote them, so moving one of them needs a new MAGIC.
+        // Method: pin the MAGIC, ask for a stop across builds, and read the words from the file's
+        // bytes at their fixed places.
+        assert_eq!(
+            MAGIC, 0x6664_6374_726c_0002,
+            "Moving a word of the header needs a new MAGIC"
+        );
+        let directory = Directory::new();
+        drop(Control::create(&directory.0).unwrap());
+
+        Control::request_recording_stop_across_builds(&directory.0).unwrap();
+
+        let bytes = std::fs::read(directory.0.join("recorder.control")).unwrap();
+        let word = |index: usize| {
+            u64::from_ne_bytes(bytes[index * 8..(index + 1) * 8].try_into().unwrap())
+        };
+        assert_eq!(word(6), super::super::BUILD);
+        assert_ne!(word(5), 0);
+        assert_eq!([word(7), word(8)], super::super::boot_identity().unwrap().0);
     }
 }

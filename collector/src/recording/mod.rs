@@ -12,7 +12,7 @@ pub mod private;
 mod registry;
 
 pub use delete_older::{delete_older, is_older};
-pub use holder::{Holder, holder};
+pub use holder::{Holder, holder, lifetime_lock_held};
 pub use registry::{RegisteredRun, Registry, RegistryBuffer};
 
 /// The fingerprint of the code this collector is built from.

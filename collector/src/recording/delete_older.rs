@@ -2,12 +2,9 @@
 use std::io;
 use std::path::Path;
 
-use super::{Registry, format, private};
+use super::{Registry, format, lifetime_lock_held, private};
 use crate::diagnostics;
 use crate::ring::unlink_generation;
-
-/// Every process that may go on using a recording's path holds one of these for its lifetime.
-const LIFETIME_LOCKS: [&str; 3] = ["recorder.lock", "collector.lock", "persister.lock"];
 
 /// Deletes a recording an older version wrote, which no writer of this version may append to, so
 /// that the next recorder starts a new one at `root`, and returns whether it did. A recording a
@@ -25,7 +22,7 @@ pub fn delete_older(root: &Path) -> io::Result<bool> {
     {
         let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
         // Another launch may have deleted it and started a new recording here during the wait.
-        if delete_older_held(root)? || !is_older(root)? {
+        if lifetime_lock_held(root)? || !is_older(root)? {
             return Ok(false);
         }
         std::fs::rename(root, &deletion)?;
@@ -36,16 +33,6 @@ pub fn delete_older(root: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-fn delete_older_held(root: &Path) -> io::Result<bool> {
-    for lock in LIFETIME_LOCKS {
-        if private::FileLock::held(&root.join(lock))? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 /// Removes what the deletion name holds. A launch may name any path as its recording, so this name
 /// may hold one in use, which stays, or a link, whose target's rings are not this call's to remove.
 fn delete_older_finish(deletion: &Path) -> io::Result<()> {
@@ -54,7 +41,7 @@ fn delete_older_finish(deletion: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    if delete_older_held(deletion)? {
+    if lifetime_lock_held(deletion)? {
         return Ok(());
     }
 
