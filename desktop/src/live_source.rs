@@ -147,9 +147,8 @@ pub struct Snapshot {
     /// The page's App histories, or the older tail its charts draw, are still being read, and
     /// a later snapshot carries them.
     pub histories_pending: bool,
-    /// The points of the reading's charts were dropped as the user left its page, whose charts
-    /// still draw them, and the page's next reading brings them again.
-    pub points_dropped: bool,
+    /// Whether the reading holds the points of its charts, which are most of it.
+    pub points_keeping: PointsKeeping,
     /// What the window said draws the page's chart by App as the reading read its App
     /// histories. A reading that read none, a hover's or one whose histories are pending, says
     /// the reading, since it left nothing to the View that it would otherwise have read.
@@ -161,8 +160,50 @@ impl Snapshot {
     /// Whether a later reading brings part of what the page draws, its App histories, the older
     /// tail of its charts or their points.
     pub fn awaits_reading(&self) -> bool {
-        self.histories_pending || self.points_dropped
+        self.histories_pending || self.points_keeping == PointsKeeping::Dropped
     }
+
+    /// Takes the points of the charts out of the reading as the user leaves its page, and leaves
+    /// the selected second's own reading and the window its charts end in. The charts the page
+    /// drew from the points go on drawing them, and the page's next reading brings them again.
+    pub fn drop_points(&mut self) {
+        self.remove_points();
+        self.points_keeping = PointsKeeping::Dropped;
+    }
+
+    /// Takes the points of the charts out of a reading that keeps them, since the store's View
+    /// draws every point of them from now on. A reading that dropped its points still awaits
+    /// the reading that brings them, so it stays as it is.
+    pub fn leave_points_to_view(&mut self) {
+        match self.points_keeping {
+            PointsKeeping::Kept => {
+                self.remove_points();
+                self.points_keeping = PointsKeeping::LeftToView;
+            }
+            PointsKeeping::Dropped | PointsKeeping::LeftToView => {}
+        }
+    }
+
+    fn remove_points(&mut self) {
+        self.selection.edit(|selection| {
+            drop(selection.take_trends());
+            if let Some(mut fields) = selection.fields_mut() {
+                drop(fields.remove("earlier_trends"));
+            }
+        });
+    }
+}
+
+/// Whether a reading holds the points of its charts, and where they went when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointsKeeping {
+    /// Kept in the reading, as every reading arrives.
+    Kept,
+    /// Dropped as the user left the reading's page, whose next reading brings them again.
+    Dropped,
+    /// Left to the store's View, which draws every point of the page's charts while the page
+    /// follows the newest second.
+    LeftToView,
 }
 
 pub enum Update {
@@ -1431,7 +1472,7 @@ fn reader_snapshot_owned(
         app_attribution_history: None,
         overview_app_histories: None,
         histories_pending: false,
-        points_dropped: false,
+        points_keeping: PointsKeeping::Kept,
         app_chart_source: AppChartSource::Reading,
         process_history: None,
         rankings: None,

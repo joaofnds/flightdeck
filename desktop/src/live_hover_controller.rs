@@ -5,7 +5,7 @@ use gpui::{Context, SharedString};
 use super::timings::{HoverTiming, HoverTimings};
 use super::{HeldSecond, Origin, Preview, Target};
 use crate::live_dashboard::{ChartHover, LiveDashboard, Picker};
-use crate::live_source::{Snapshot, Update};
+use crate::live_source::{PointsKeeping, Snapshot, Update};
 
 #[cfg(test)]
 #[path = "live_hover_input_tests.rs"]
@@ -56,7 +56,7 @@ impl LiveDashboard {
         };
         // A page opened again names no reading of its charts' seconds until its next reading,
         // so a hover of one is ignored until the pointer moves after that reading arrives.
-        if target.identity.is_none() && snapshot.points_dropped {
+        if target.identity.is_none() && snapshot.points_keeping == PointsKeeping::Dropped {
             return false;
         }
 
@@ -185,6 +185,7 @@ impl LiveDashboard {
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
         let selection_reading = self.selection_reading();
         let reader_rested = self.reader_rested();
+        let points_left_to_view = self.points_left_to_view();
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -202,7 +203,10 @@ impl LiveDashboard {
             return;
         }
 
-        if preview.target.identity.is_none() {
+        // A second the reading has no point for is a gap, so the hover shows nothing. Where the
+        // points are left to the View, the page cannot tell a gap from a second the View lacks,
+        // so the hover reads, and a gap there costs one page read.
+        if preview.target.identity.is_none() && !points_left_to_view {
             preview.complete = true;
             self.hover_timed();
             cx.notify();
@@ -423,9 +427,11 @@ impl LiveDashboard {
         let mut preview = Preview::resident(snapshot, &self.request, target);
         preview.held = in_view;
         // The View holds the second's readings and top Apps, which is all the page shows of it,
-        // so the page reads nothing of it.
+        // so the page reads nothing of it. Of an older stretch the View sampled no tick of, it
+        // holds the readings alone, and the top Apps the page's reading ranked complete them.
         if let Some(held) = &preview.held {
-            if held.rankings.is_some() {
+            let ranked_by_reading = held.second.is_some() && preview.reading.rankings.is_some();
+            if held.rankings.is_some() || ranked_by_reading {
                 preview.complete = true;
             }
         }

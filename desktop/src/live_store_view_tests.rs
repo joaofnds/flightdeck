@@ -25,6 +25,9 @@ use crate::live_store_page_fixtures::{
 use crate::live_views::summary;
 use crate::live_views::utilization::UtilizationReadings;
 
+#[path = "live_store_view_points_tests.rs"]
+mod points;
+
 #[test]
 fn a_view_newer_than_the_readings_draws_the_overviews_machine_charts() {
     // Goal: Overview, following the newest second, draws its machine charts from the store's

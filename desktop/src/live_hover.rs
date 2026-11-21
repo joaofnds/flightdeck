@@ -7,7 +7,7 @@ use viewer::live_app_response::Page;
 use viewer::store::MachineSecond;
 
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::{Snapshot, identity_publication, identity_signature};
+use crate::live_source::{PointsKeeping, Snapshot, identity_publication, identity_signature};
 
 #[cfg(test)]
 #[path = "live_identity_tests.rs"]
@@ -156,7 +156,7 @@ impl Preview {
         }
         let matched = target.matches(&snapshot.selection["selected"]);
         let complete =
-            resident_complete(&request.route, matched, snapshot.points_dropped, &reading);
+            resident_complete(&request.route, matched, snapshot.points_keeping, &reading);
 
         Self {
             source: gpui::SharedString::default(),
@@ -271,7 +271,7 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
         overview_app_histories: snapshot.overview_app_histories.clone(),
         process_history: snapshot.process_history.clone(),
         histories_pending: snapshot.histories_pending,
-        points_dropped: false,
+        points_keeping: PointsKeeping::Kept,
         app_chart_source: snapshot.app_chart_source,
         rankings: resident_rankings(snapshot, target),
         app_ranks: None,
@@ -282,12 +282,17 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
 
 /// Whether the preview holds every reading of its target the page shows, so the page reads
 /// nothing for it.
-fn resident_complete(route: &str, matched: bool, points_dropped: bool, reading: &Snapshot) -> bool {
+fn resident_complete(
+    route: &str,
+    matched: bool,
+    points_keeping: PointsKeeping,
+    reading: &Snapshot,
+) -> bool {
     if matched {
         return true;
     }
     // The summary of every second but the selected one went with the points of the charts.
-    if points_dropped {
+    if points_keeping != PointsKeeping::Kept {
         return false;
     }
 

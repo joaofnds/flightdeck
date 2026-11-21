@@ -5,7 +5,7 @@ use crate::charts::TEXT;
 use crate::data::Panel;
 use crate::hardware_motion::{HardwareState, reduce_motion};
 use crate::live_hover::Origin;
-use crate::live_source::{Request, Snapshot, Update, Worker};
+use crate::live_source::{PointsKeeping, Request, Snapshot, Update, Worker};
 use gpui::{
     Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
 };
@@ -93,19 +93,6 @@ pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
     } else {
         Some(pressed)
     }
-}
-
-/// Takes the points of the charts out of `snapshot`, the reading of the page the user leaves,
-/// and leaves the selected second's own reading and the window its charts end in. A reading
-/// left a second time before its page's next reading holds no points but still waits for them.
-fn switch_route_drop_points(snapshot: &mut Snapshot) {
-    snapshot.selection.edit(|selection| {
-        drop(selection.take_trends());
-        if let Some(mut fields) = selection.fields_mut() {
-            drop(fields.remove("earlier_trends"));
-        }
-    });
-    snapshot.points_dropped = true;
 }
 
 /// Spreads `view` across `panel` where it is drawn against the clock.
@@ -456,6 +443,14 @@ impl LiveDashboard {
     }
 
     pub(crate) fn window_state(&mut self) -> WindowState {
+        // A window that follows the store's View draws every point of its charts from the View
+        // once it opens again, as a page whose reader rested does, so it keeps none of them. A
+        // held second keeps the View it was held over, so its window keeps none either.
+        if self.followed_store_view().is_some() {
+            if let Some(snapshot) = &mut self.snapshot {
+                snapshot.leave_points_to_view();
+            }
+        }
         let hold = self.hold.take();
         // A held second keeps the View its charts were drawn from, and a window that follows
         // the live Mac takes the store's newest View once it opens again.
@@ -465,7 +460,7 @@ impl LiveDashboard {
         let snapshot = self.snapshot.take();
         let panels = if snapshot
             .as_ref()
-            .is_some_and(|snapshot| snapshot.points_dropped)
+            .is_some_and(|snapshot| snapshot.points_keeping != PointsKeeping::Kept)
         {
             std::mem::take(&mut self.panels)
         } else {
@@ -496,10 +491,10 @@ impl LiveDashboard {
         dashboard.store_panels = state.store_panels;
         if let Some(snapshot) = state.snapshot {
             dashboard.generation = snapshot.generation;
-            if snapshot.points_dropped {
-                dashboard.restore_drawn(snapshot, state.panels);
-            } else {
+            if snapshot.points_keeping == PointsKeeping::Kept {
                 dashboard.accept(snapshot);
+            } else {
+                dashboard.restore_drawn(snapshot, state.panels);
             }
         }
         if !dashboard.pinned_reading_complete() {
@@ -826,8 +821,7 @@ impl LiveDashboard {
                     "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
                     "curve_builds":self.plots.curve_builds(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
-                    "scalar_points":self.snapshot.as_ref()
-                        .and_then(|s| s.selection.trends()).map(viewer::Trends::len),
+                    "scalar_points":self.tick_deadline_scalar_points(),
                     "cpu_history":self.snapshot.as_ref()
                         .and_then(|snapshot| snapshot.cpu_history.as_ref())
                         .map(|history| serde_json::json!({"rows":history.cpus().len(),
@@ -839,6 +833,21 @@ impl LiveDashboard {
                 cx.quit();
             }
         }
+    }
+
+    /// How many points a second apart the page's machine charts draw: the reading's, or the
+    /// store's View's where the reading left its points to the View.
+    fn tick_deadline_scalar_points(&self) -> Option<usize> {
+        if self.points_left_to_view() {
+            return self
+                .followed_store_view()
+                .map(|view| store_view::tick_deadline_scalar_points_charted(&view.seconds));
+        }
+
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.selection.trends())
+            .map(viewer::Trends::len)
     }
 
     /// Rests the reader of a window macOS hides, or asks for the page of a window it shows again.
@@ -920,6 +929,11 @@ impl LiveDashboard {
             Ok(Some(resting)) => {
                 self.worker = resting;
                 self.presence = Presence::Rested;
+                // The charts were drawn from the points once, and the View draws every point
+                // of them from now on, so the points would only take memory.
+                if let Some(snapshot) = &mut self.snapshot {
+                    snapshot.leave_points_to_view();
+                }
             }
             Ok(None) => {}
             Err(error) => self.error = Some(error),
@@ -929,6 +943,14 @@ impl LiveDashboard {
     /// Whether the page rested its reader while it draws from the store's View.
     pub(crate) fn reader_rested(&self) -> bool {
         self.presence == Presence::Rested
+    }
+
+    /// Whether the page's reading left the points of its charts to the store's View, which
+    /// then names each reading the charts draw.
+    pub(crate) fn points_left_to_view(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.points_keeping == PointsKeeping::LeftToView)
     }
 
     /// Draws the page shown again from the store's newest View, released while the window hid,
@@ -1266,9 +1288,10 @@ impl LiveDashboard {
         if self.request.route != route {
             self.sections.reset();
             // The points of the page's charts are most of its reading, and the charts it keeps
-            // already draw them.
+            // already draw them. The page's next reading brings them again, so a reading that
+            // left them to the View waits for that reading too once its page is left.
             if let Some(snapshot) = &mut self.snapshot {
-                switch_route_drop_points(snapshot);
+                snapshot.drop_points();
             }
         }
         self.keep_page();
@@ -1364,8 +1387,19 @@ impl LiveDashboard {
     }
 
     /// The reading of `second` the page's readings name, or the second alone where they name
-    /// none of it.
+    /// none of it. Where the readings left their points to the store's View, the View names it,
+    /// as it names a hover's.
     fn inspection_target(&self, second: u64) -> crate::live_hover::Target {
+        if self.points_left_to_view() {
+            let second = self.store_view_point_second(second).unwrap_or(second);
+            return self
+                .store_view_target(second)
+                .unwrap_or(crate::live_hover::Target {
+                    second,
+                    identity: None,
+                });
+        }
+
         let second = self.context_snapshot().map_or(second, |snapshot| {
             crate::live_projection::inspection_second(&snapshot.selection, second)
         });
@@ -1963,7 +1997,7 @@ mod selection_tests {
             app_attribution_history: None,
             overview_app_histories: None,
             histories_pending: false,
-            points_dropped: false,
+            points_keeping: PointsKeeping::Kept,
             app_chart_source: crate::live_source::AppChartSource::Reading,
             process_history: None,
             rankings: None,

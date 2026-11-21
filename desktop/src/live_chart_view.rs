@@ -638,7 +638,15 @@ impl LiveDashboard {
                 .or(context.selection["second"].as_u64()),
             newest,
         };
-        let Some(next) = keyboard_second(&selection, delta, context) else {
+        // A reading that left its points to the View has no stretches of its own to step across.
+        let next = if self.points_left_to_view() {
+            keyboard_second_stepped(&selection, context, |second| {
+                self.chart_step_view_second(second, delta)
+            })
+        } else {
+            keyboard_second(&selection, delta, context)
+        };
+        let Some(next) = next else {
             return;
         };
         if Some(next) == selection.stepped.or(selection.accepted) {
@@ -666,9 +674,23 @@ impl LiveDashboard {
         }
     }
 
+    /// The second a step of `delta` from `second` shows on the charts drawn from the store's
+    /// View: the first second in that direction whose point the View draws is another than the
+    /// point of `second`, or a gap, since every second of an older stretch shows one point.
+    fn chart_step_view_second(&self, second: u64, delta: i64) -> u64 {
+        crate::live_projection::stepped_second_by(second, delta, |second| {
+            self.store_view_point_second(second).unwrap_or(second)
+        })
+    }
+
     /// The target of `second` when the page shows readings that hold it.
     pub(crate) fn held_target(&self, second: u64) -> Option<crate::live_hover::Target> {
         let snapshot = self.snapshot.as_deref()?;
+        // A reading that left its points to the View holds none to name a second by, its own
+        // second included, so the page names the second once the read of it arrives.
+        if self.points_left_to_view() {
+            return None;
+        }
         if !crate::live_projection::holds_second(&snapshot.selection, second) {
             return None;
         }
@@ -1025,8 +1047,19 @@ struct KeyboardSelection {
 
 /// The second a step of `delta` shows from the one shown, held to the recording's edges.
 fn keyboard_second(keys: &KeyboardSelection, delta: i64, snapshot: &Snapshot) -> Option<u64> {
+    keyboard_second_stepped(keys, snapshot, |second| {
+        crate::live_projection::stepped_second(&snapshot.selection, second, delta)
+    })
+}
+
+/// The second `step` shows from the one shown, held to the recording's edges.
+fn keyboard_second_stepped(
+    keys: &KeyboardSelection,
+    snapshot: &Snapshot,
+    step: impl FnOnce(u64) -> u64,
+) -> Option<u64> {
     let second = keys.stepped.or(keys.accepted)?;
-    let mut next = crate::live_projection::stepped_second(&snapshot.selection, second, delta);
+    let mut next = step(second);
     let catalog = &snapshot.catalog;
     if let Some(first) = catalog["first_second"].as_u64() {
         next = next.max(first);
@@ -1561,7 +1594,7 @@ mod tests {
             app_attribution_history: None,
             overview_app_histories: None,
             histories_pending: false,
-            points_dropped: false,
+            points_keeping: crate::live_source::PointsKeeping::Kept,
             app_chart_source: crate::live_source::AppChartSource::Reading,
             process_history: None,
             rankings: None,

@@ -496,20 +496,7 @@ impl LiveDashboard {
     }
 
     pub fn inspect_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let seconds = self
-            .context_snapshot()
-            .and_then(|snapshot| snapshot.selection.trends())
-            .map_or_else(Vec::new, |trends| {
-                trends
-                    .iter()
-                    .take(4096)
-                    .filter_map(|trend| {
-                        trend.point()["wall_ns"]
-                            .as_u64()
-                            .map(|wall| wall / 1_000_000_000)
-                    })
-                    .collect()
-            });
+        let seconds = self.inspect_text_seconds();
         match crate::native_text::inspection_second(text, &seconds) {
             Ok(second) => {
                 self.native.notice = None;
@@ -520,6 +507,30 @@ impl LiveDashboard {
                 cx.notify();
             }
         }
+    }
+
+    /// The seconds a typed clock time can name: those of the points the charts draw a second
+    /// apart, which the store's View holds where the page's reading left its points to it.
+    fn inspect_text_seconds(&self) -> Vec<u64> {
+        if self.points_left_to_view() {
+            return self.store_view_wall_seconds();
+        }
+
+        let Some(snapshot) = self.context_snapshot() else {
+            return Vec::new();
+        };
+
+        snapshot.selection.trends().map_or_else(Vec::new, |trends| {
+            trends
+                .iter()
+                .take(4096)
+                .filter_map(|trend| {
+                    trend.point()["wall_ns"]
+                        .as_u64()
+                        .map(|wall| wall / 1_000_000_000)
+                })
+                .collect()
+        })
     }
 }
 

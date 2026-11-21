@@ -141,6 +141,21 @@ pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {
     view
 }
 
+/// How many of `seconds`, the View's live span oldest first, the charts draw a second apart:
+/// those of the newest `CHARTED_SECONDS` seconds, since the older seconds the span holds stand
+/// before the charts' window.
+pub(super) fn tick_deadline_scalar_points_charted(seconds: &[Arc<MachineSecond>]) -> usize {
+    let Some(newest) = seconds.last() else {
+        return 0;
+    };
+
+    let first =
+        (newest.wall_ns / NANOSECONDS_PER_SECOND).saturating_sub(viewer::CHARTED_SECONDS - 1);
+    let older = seconds.partition_point(|second| second.wall_ns / NANOSECONDS_PER_SECOND < first);
+
+    seconds.len() - older
+}
+
 #[cfg(all(test, feature = "automation"))]
 thread_local! {
     /// What the page on this thread has asked the store's mailbox for, which a test reads.
@@ -471,13 +486,18 @@ impl LiveDashboard {
 
     /// Lets go of the View the page could not draw, and of the Apps the page kept to choose its
     /// charts by App from it, so the page shows the worker's readings whole and its error stays
-    /// the worker's, and reports `error` once each time it changes.
+    /// the worker's, and reports `error` once each time it changes. A reading that left its points
+    /// to the View holds none to show, so its rested reader reads the page again.
     fn draw_store_view_failed(&mut self, error: String) {
         if self.store_panels.failure.as_ref() != Some(&error) {
             eprintln!("Flightdeck could not draw the store's View: {error}");
         }
         self.store_panels.failure = Some(error);
         self.store_view_drop();
+
+        if self.points_left_to_view() && !self.reply_pending {
+            self.request_reading();
+        }
     }
 
     /// The charts of `view`, as the range zooms them, and the top Apps of its newest second. The
@@ -890,6 +910,19 @@ impl LiveDashboard {
         };
 
         held.second.as_deref()
+    }
+
+    /// The wall second of each second the store's View holds of its live span, oldest first, or
+    /// none where the page draws no chart from the View.
+    pub(crate) fn store_view_wall_seconds(&self) -> Vec<u64> {
+        let Some(view) = self.apps_followed_store_view() else {
+            return Vec::new();
+        };
+
+        view.seconds
+            .iter()
+            .map(|second| second.wall_ns / NANOSECONDS_PER_SECOND)
+            .collect()
     }
 
     /// The second whose point the charts of the store's View draw for a hover of `second`, or

@@ -129,12 +129,20 @@ pub fn inspection_second(selection: &viewer::Selection, second: u64) -> u64 {
 /// shows the one reading that stands for it.
 #[must_use]
 pub fn stepped_second(selection: &viewer::Selection, second: u64, delta: i64) -> u64 {
-    let shown = inspection_second(selection, second);
+    stepped_second_by(second, delta, |second| inspection_second(selection, second))
+}
+
+/// The second a step of `delta` from `second` shows where `shown` names the second whose
+/// reading the charts show at each second: the first second in that direction whose shown
+/// second is another than that of `second`.
+#[must_use]
+pub fn stepped_second_by(second: u64, delta: i64, shown: impl Fn(u64) -> u64) -> u64 {
+    let first = shown(second);
     let mut next = second;
     // A stretch spans the viewer's stride, so a step that far always leaves it.
     for _ in 0..viewer::EARLIER_STRIDE_SECONDS {
         next = next.saturating_add_signed(delta);
-        if inspection_second(selection, next) != shown {
+        if shown(next) != first {
             return next;
         }
     }
