@@ -62,8 +62,9 @@ fn quitting_the_own_window_without_a_control_file_stops_its_recorder(cx: &mut Te
     // Goal: a Quit of the user's own window stops the recorder it started even where no control
     // file this build reads carries the stop, and still does not wait for the recorder.
     // Method: quit over a real child of the user's own window on a recording with no control
-    // file, look at the child without reaping it, read its termination observation, then reap
-    // it here, since a stopped child exits on its own once released.
+    // file, look at the child without reaping it, release it, then reap it here, since a child
+    // exits 0 once released only after its stop arrived, and 18 ten seconds later otherwise.
+    // The child's observation at its release is not read, since the stop may arrive after it.
     let (session, root, pid) = test_child::session(true);
     cx.update(|app| install(session, app));
 
@@ -71,7 +72,6 @@ fn quitting_the_own_window_without_a_control_file_stops_its_recorder(cx: &mut Te
 
     let at_return = observe(pid, libc::WNOHANG);
     test_child::release(&root);
-    let after_quit = test_child::observation(&root);
     let exited = observe(pid, 0);
     let pid = i32::try_from(pid).unwrap();
     let mut status = 0;
@@ -83,11 +83,10 @@ fn quitting_the_own_window_without_a_control_file_stops_its_recorder(cx: &mut Te
         at_return,
         "quitting waited for the collector"
     );
-    assert_eq!("stopping", after_quit, "quitting left the recorder running");
     assert_eq!(
         Observed::Exited(0),
         exited,
-        "the recorder did not exit on its stop"
+        "quitting left the recorder running"
     );
 }
 
