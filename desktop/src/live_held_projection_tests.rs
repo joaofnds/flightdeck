@@ -9,8 +9,9 @@ use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
 use super::{Observations, ViewPanelsPoints, overview_point_second, view_panels};
 use crate::data::Panel;
 use crate::live_store_fixtures::{
-    levels, memory_rates, overview_panels, reading_at, selection, selection_of_json, summary_point,
-    summary_selection, trend_point, view, with_memory_rates, with_memory_reading,
+    levels, memory_rates, network_rates, overview_panels, reading_at, selection, selection_of_json,
+    summary_point, summary_selection, trend_point, view, with_memory_rates, with_memory_reading,
+    with_network_rates, with_network_reading,
 };
 
 /// `place` as a trend point's reach names a reading.
@@ -169,9 +170,9 @@ fn the_memory_charts_of_the_view_draw_as_the_readings_draw_them() {
     assert_memory_lines_drawn(&drawn);
 }
 
-/// The first second the Memory page of a View whose newest second is 10,000 draws in full
-/// detail.
-const MEMORY_HOUR_DETAIL_FIRST: u64 = 9_041;
+/// The first second a page drawn from a View whose newest second is 10,000 draws in full detail,
+/// as Memory and Network do.
+const HOUR_DETAIL_FIRST: u64 = 9_041;
 
 /// An hour of seconds that ends at 10,000, each with the complete reading the Memory page draws:
 /// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
@@ -217,7 +218,7 @@ fn memory_hour() -> Vec<MachineSecond> {
 }
 
 /// `seconds` by the stretch each lies in, oldest first.
-fn memory_hour_stretches(
+fn seconds_by_stretch(
     seconds: &[MachineSecond],
 ) -> std::collections::BTreeMap<u64, Vec<&MachineSecond>> {
     let mut stretches = std::collections::BTreeMap::<u64, Vec<&MachineSecond>>::new();
@@ -230,7 +231,7 @@ fn memory_hour_stretches(
 
 /// What the store reduces `seconds`, all of stretch `stretch`, to, each reading placed in its own
 /// run.
-fn memory_hour_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStretch> {
+fn reduced_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStretch> {
     let mut held = AppsStretch::of_seconds(stretch, &[Arc::new(AppsSecond::default())]);
     for second in seconds {
         let run = RunIdentity {
@@ -245,7 +246,7 @@ fn memory_hour_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStre
 }
 
 /// The reach the older tail writes for `seconds`, the readings of one stretch.
-fn memory_hour_reach(seconds: &[&MachineSecond]) -> serde_json::Value {
+fn older_tail_reach(seconds: &[&MachineSecond]) -> serde_json::Value {
     let readings: Vec<_> = seconds
         .iter()
         .map(|second| {
@@ -271,8 +272,8 @@ fn the_memory_charts_of_the_view_draw_an_hour_as_the_readings_draw_it() {
     // the first reading of each stretch before the join with the reach of the whole stretch, and
     // the reach of the join's stretch on its last point.
     let seconds = memory_hour();
-    let stretches = memory_hour_stretches(&seconds);
-    let join = MEMORY_HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
+    let stretches = seconds_by_stretch(&seconds);
+    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
     let (earlier, live) = seconds.split_at(
         seconds
             .iter()
@@ -282,20 +283,20 @@ fn the_memory_charts_of_the_view_draw_an_hour_as_the_readings_draw_it() {
     let mut view = view(1, earlier, live);
     view.stretches = stretches
         .range(..=join)
-        .map(|(stretch, held)| memory_hour_stretch(*stretch, held))
+        .map(|(stretch, held)| reduced_stretch(*stretch, held))
         .collect();
     let mut tail: Vec<serde_json::Value> = stretches
         .range(..join)
         .map(|(_, held)| {
             let mut point = summary_point(held[0]);
-            point["reach"] = memory_hour_reach(held);
+            point["reach"] = older_tail_reach(held);
             point
         })
         .collect();
-    tail.last_mut().unwrap()["reach_after"] = memory_hour_reach(&stretches[&join]);
+    tail.last_mut().unwrap()["reach_after"] = older_tail_reach(&stretches[&join]);
     let detail: Vec<MachineSecond> = seconds
         .iter()
-        .filter(|second| second.wall_ns / 1_000_000_000 >= MEMORY_HOUR_DETAIL_FIRST)
+        .filter(|second| second.wall_ns / 1_000_000_000 >= HOUR_DETAIL_FIRST)
         .cloned()
         .collect();
     let mut selected = summary_selection(&[], &detail);
@@ -376,6 +377,200 @@ fn at_a_refused_second_the_memory_charts_draw_what_the_second_holds() {
     let window = panel_named(&drawn, "live-memory-pressure").window.unwrap();
     let cell = usize::try_from(9_999 - window.first).unwrap();
     assert_eq!(pressure.values[cell], Some(0.0));
+}
+
+/// The Network line whose reading the collector records nowhere, by chart and line.
+const NETWORK_UNRECORDED: (&str, &str) = ("live-network-apps", "All traffic");
+
+/// Asserts that every line of `panels` draws a value, except the line no reading is recorded
+/// for, which draws none.
+fn assert_network_lines_drawn(panels: &[std::rc::Rc<Panel>]) {
+    for panel in panels {
+        for line in &panel.lines {
+            let unrecorded = NETWORK_UNRECORDED == (panel.id.as_str(), line.name.as_str());
+            let drawn = line.values.iter().filter(|value| value.is_some()).count();
+            if unrecorded {
+                assert_eq!(drawn, 0, "{} {}", panel.id, line.name);
+            } else {
+                assert!(drawn > 0, "{} {}", panel.id, line.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_network_charts_of_the_view_draw_as_the_readings_draw_them() {
+    // Goal: the Network page draws the same charts from the seconds the store holds as from the
+    // trend points the viewer writes of their complete readings. Method: seconds whose complete
+    // readings hold every reading Network draws, each with its own value, across older seconds
+    // and a break, drawn both ways, with every line but the one recorded nowhere drawing a value.
+    let read = |wall_second, segment| with_network_reading(reading_at(wall_second, segment));
+    let earlier = [read(6_345, 0), read(7_001, 2)];
+    let older = [read(9_020, 3), read(9_030, 3)];
+    let detail = [
+        read(9_041, 3),
+        read(9_042, 3),
+        read(9_500, 4),
+        read(10_000, 4),
+    ];
+    let view = view(1, &earlier, &[older.as_slice(), &detail].concat());
+    let expected = panels(
+        "network",
+        &selection_of_json(&summary_selection(&[earlier, older].concat(), &detail)),
+        None,
+    );
+
+    let drawn = view_panels("network", &view, levels().as_ref());
+
+    let drawn = drawn.unwrap();
+    assert_eq!(drawn, expected.unwrap());
+    assert_eq!(drawn.len(), 4);
+    assert_network_lines_drawn(&drawn);
+}
+
+/// An hour of seconds that ends at 10,000, each with the complete reading the Network page draws:
+/// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
+/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+fn network_hour() -> Vec<MachineSecond> {
+    (6_400..=10_000)
+        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
+        .map(|wall_second| {
+            let segment = match wall_second {
+                ..7_500 => 0,
+                7_500..8_000 => 1,
+                8_000.. => 2,
+            };
+            let mut second = reading_at(wall_second, segment);
+            if wall_second >= 8_000 {
+                second.run = [5, 6];
+            }
+            let peak = matches!(wall_second, 7_013 | 9_040);
+            let mut rates = network_rates(&second);
+            if peak {
+                let traffic = second.network.as_mut().unwrap();
+                traffic.received_bps *= 10.0;
+                traffic.sent_bps *= 10.0;
+                rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
+            }
+            // A gap and a restart each leave the first second after them with no rates.
+            if matches!(wall_second, 7_600 | 8_000) {
+                second.elapsed_ns = None;
+                second.network = None;
+                rates = [None; 4];
+            }
+            with_network_rates(second, rates)
+        })
+        .collect()
+}
+
+#[test]
+fn the_network_charts_of_the_view_draw_an_hour_as_the_readings_draw_it() {
+    // Goal: over the loaded hour the Network page draws the same charts, peaks included, from the
+    // seconds and stretches the store holds as from the trend points and reach the viewer writes
+    // of the same readings. Method: an hour with a peak in an older stretch, a gap, a collector
+    // restart and a peak at the join, drawn both ways, the tail written as the session writes it:
+    // the first reading of each stretch before the join with the reach of the whole stretch, and
+    // the reach of the join's stretch on its last point.
+    let seconds = network_hour();
+    let stretches = seconds_by_stretch(&seconds);
+    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
+    let (earlier, live) = seconds.split_at(
+        seconds
+            .iter()
+            .position(|second| second.wall_ns / 1_000_000_000 >= 9_000)
+            .unwrap(),
+    );
+    let mut view = view(1, earlier, live);
+    view.stretches = stretches
+        .range(..=join)
+        .map(|(stretch, held)| reduced_stretch(*stretch, held))
+        .collect();
+    let mut tail: Vec<serde_json::Value> = stretches
+        .range(..join)
+        .map(|(_, held)| {
+            let mut point = summary_point(held[0]);
+            point["reach"] = older_tail_reach(held);
+            point
+        })
+        .collect();
+    tail.last_mut().unwrap()["reach_after"] = older_tail_reach(&stretches[&join]);
+    let detail: Vec<MachineSecond> = seconds
+        .iter()
+        .filter(|second| second.wall_ns / 1_000_000_000 >= HOUR_DETAIL_FIRST)
+        .cloned()
+        .collect();
+    let mut selected = summary_selection(&[], &detail);
+    selected["earlier_trends"] = serde_json::json!(tail);
+    let expected = panels("network", &selection_of_json(&selected), None);
+
+    let drawn = view_panels("network", &view, levels().as_ref());
+
+    let drawn = drawn.unwrap();
+    assert_eq!(drawn, expected.unwrap());
+    assert_network_lines_drawn(&drawn);
+    let lines = [0, 1].map(|line| ("live-network", line));
+    let packets = [0, 1].map(|line| ("live-packets", line));
+    let errors = [0, 1].map(|line| ("live-network-errors", line));
+    for (id, line) in [lines, packets, errors].concat() {
+        let extremes = panel_named(&drawn, id).lines[line]
+            .extremes
+            .clone()
+            .unwrap();
+        let peaks: Vec<u64> = extremes
+            .iter()
+            .flatten()
+            .map(|reach| reach.peak.second())
+            .filter(|second| matches!(second, 7_013 | 9_040))
+            .collect();
+        assert_eq!(peaks, [7_013, 9_040], "{id} {line}");
+        assert_eq!(
+            extremes[tail.len()].unwrap().peak.second(),
+            9_040,
+            "{id} {line}"
+        );
+    }
+}
+
+#[test]
+fn at_a_refused_second_the_network_charts_draw_what_the_second_holds() {
+    // Goal: where the store refused a second's complete reading, the Network page draws the
+    // traffic the second holds itself, as the Overview does, and leaves the packets and errors
+    // only a complete reading holds missing. Method: a refused second among seconds with
+    // complete readings, and the value each Network line draws there against the value the
+    // worker's charts draw from its trend point of that second.
+    let read = |wall_second| with_network_reading(reading_at(wall_second, 3));
+    let mut refused = reading_at(9_999, 3);
+    refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
+    let seconds = [read(9_998), refused, read(10_000)];
+    let view = view(1, &[], &seconds);
+
+    let drawn = view_panels("network", &view, levels().as_ref()).unwrap();
+
+    let worker = panels(
+        "network",
+        &selection_of_json(&selection(&[], &seconds)),
+        None,
+    )
+    .unwrap();
+    let at = |id: &str, line: usize| {
+        let line = &panel_named(&drawn, id).lines[line];
+        (line.name.clone(), line.values[1])
+    };
+    let read_by_the_worker = |id: &str, line: usize| panel_named(&worker, id).lines[line].values[1];
+    for (id, line) in [("live-network", 0), ("live-network", 1)] {
+        let (name, value) = at(id, line);
+        assert!(value.is_some(), "{name}");
+        assert_eq!(value, read_by_the_worker(id, line), "{name}");
+    }
+    let missing = [
+        at("live-packets", 0),
+        at("live-packets", 1),
+        at("live-network-errors", 0),
+        at("live-network-errors", 1),
+    ];
+    for (name, value) in missing {
+        assert_eq!(value, None, "{name}");
+    }
 }
 
 mod when_seconds_are_older_than_the_full_detail_ones {

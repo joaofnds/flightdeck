@@ -7,7 +7,9 @@ use collector::machine::Pressure;
 use collector::recording::identity_text;
 use collector::ring::Identity;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, MachineSecond, MemoryRate, MemorySecond, Traffic, View};
+use viewer::store::{
+    AppsSecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Traffic, View,
+};
 
 use crate::live_inventory::{PerformanceLevel, performance_levels};
 
@@ -164,6 +166,38 @@ pub fn with_memory_rates(
 ) -> MachineSecond {
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
     let complete = viewer::store::CompleteMachine::of_memory(&second, rates, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
+/// `second` with a complete reading of the traffic it holds and of the network's packet and
+/// error rates, as the store holds a second it read. Each rate differs from the other rates and
+/// from the rates of every other second.
+pub fn with_network_reading(second: MachineSecond) -> MachineSecond {
+    let rates = network_rates(&second);
+    with_network_rates(second, rates)
+}
+
+/// The rates `with_network_reading` gives `second`, in the order of `NetworkRate::ALL`.
+pub fn network_rates(second: &MachineSecond) -> [Option<f64>; NetworkRate::ALL.len()] {
+    let wall_second = f64::from(u32::try_from(second.wall_ns / NANOSECONDS_PER_SECOND).unwrap());
+
+    [
+        Some(wall_second * 3.0 + 0.25),
+        Some(wall_second * 2.0 + 0.5),
+        Some(wall_second / 4.0 + 0.75),
+        Some(wall_second / 8.0),
+    ]
+}
+
+/// `second` with a complete reading of the traffic it holds and of the network's packet and
+/// error rates `rates`.
+pub fn with_network_rates(
+    mut second: MachineSecond,
+    rates: [Option<f64>; NetworkRate::ALL.len()],
+) -> MachineSecond {
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_network(&second, rates, &budget);
     second.complete = viewer::store::CompleteMachineState::Available(complete);
     second
 }

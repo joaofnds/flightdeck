@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, Reduction, Second,
-    View,
+    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, NetworkRate,
+    Reduction, Second, View,
 };
 
 use super::{
@@ -58,6 +58,7 @@ fn view_panels_specifications(
     match route {
         "overview" => Ok(super::overview(levels)),
         "memory" => Ok(super::memory_specifications()),
+        "network" => Ok(super::network()),
         _ => Err(format!("The store draws no charts of {route}")),
     }
 }
@@ -417,6 +418,10 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => stretch_reach_measured(&stretch.network_received_bps),
         (None, "network_tx_bps", None) => stretch_reach_measured(&stretch.network_sent_bps),
+        (None, key, None) if let Some(rate) = network_rate_named(key) => {
+            stretch_reach_measured(stretch.network_rate(rate))
+        }
+        (None, "network_apps_bytes_per_second", None) => None,
         (Some("storage"), "read_bps", None) => stretch_reach_measured(&stretch.disk_read_bps),
         (Some("storage"), "write_bps", None) => stretch_reach_measured(&stretch.disk_written_bps),
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
@@ -477,6 +482,11 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => narrow(network.map(|traffic| traffic.received_bps)),
         (None, "network_tx_bps", None) => narrow(network.map(|traffic| traffic.sent_bps)),
+        (None, key, None) if let Some(rate) = network_rate_named(key) => {
+            narrow(second.network_rate(rate))
+        }
+        // No reading records traffic by App, so its chart draws none wherever it is drawn.
+        (None, "network_apps_bytes_per_second", None) => None,
         (Some("storage"), "read_bps", None) => narrow(second.disk_read_bps),
         (Some("storage"), "write_bps", None) => narrow(second.disk_written_bps),
         (None, "power_watts", None) => second.power_watts,
@@ -495,6 +505,12 @@ pub(crate) use viewer::store::pressure_level;
 /// reading holds.
 fn memory_rate_named(key: &str) -> Option<MemoryRate> {
     MemoryRate::ALL.into_iter().find(|rate| rate.key() == key)
+}
+
+/// The rate of the network's packet and error counters a trend point names `key`, which only a
+/// second's complete reading holds.
+fn network_rate_named(key: &str) -> Option<NetworkRate> {
+    NetworkRate::ALL.into_iter().find(|rate| rate.key() == key)
 }
 
 /// The nearest `f32` to `value`.

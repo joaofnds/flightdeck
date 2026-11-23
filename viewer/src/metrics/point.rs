@@ -37,7 +37,7 @@ pub(crate) struct Point {
     pub fan_rpm: Option<Vec<Option<f64>>>,
     pub memory: [Option<u64>; 13],
     /// Memory's six rates followed by the six external network rates.
-    pub rates: [Option<f64>; 12],
+    pub rates: [Option<f64>; MEMORY_RATES.len() + TRAFFIC_RATES.len()],
     pub battery: Option<battery::BatteryPoint>,
     pub storage: Option<storage::StoragePoint>,
     pub system: system::SystemPoint,

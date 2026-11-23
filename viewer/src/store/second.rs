@@ -134,6 +134,65 @@ impl MemoryRate {
     }
 }
 
+/// A rate of the external network's packet and error counters the complete reading of a second
+/// holds and the second does not, since only the Network page draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkRate {
+    ReceivedPackets,
+    SentPackets,
+    ReceiveErrors,
+    SendErrors,
+}
+
+impl NetworkRate {
+    pub const ALL: [Self; 4] = [
+        Self::ReceivedPackets,
+        Self::SentPackets,
+        Self::ReceiveErrors,
+        Self::SendErrors,
+    ];
+
+    /// The name a trend point gives the rate.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        crate::metrics::TRAFFIC_RATES[self.traffic_index()].0
+    }
+
+    /// Where `ALL` holds the rate.
+    pub(super) fn index(self) -> usize {
+        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
+            unreachable!("`ALL` holds every rate");
+        };
+        index
+    }
+
+    /// Where a complete reading holds the rate among its rates, which hold memory's six rates
+    /// and then the traffic's.
+    fn point_index(self) -> usize {
+        crate::metrics::MEMORY_RATES.len() + self.traffic_index()
+    }
+
+    /// Where the traffic's rates hold the rate, after the bytes received and sent.
+    fn traffic_index(self) -> usize {
+        match self {
+            Self::ReceivedPackets => 2,
+            Self::SentPackets => 3,
+            Self::ReceiveErrors => 4,
+            Self::SendErrors => 5,
+        }
+    }
+}
+
+const _: () = {
+    use crate::metrics::{MEMORY_RATES, TRAFFIC_RATES};
+
+    // The point is written with the traffic's rates from index 6, after memory's.
+    assert!(MEMORY_RATES.len() == 6);
+    // The traffic's rates are the bytes received and sent, then `NetworkRate::ALL`. A point's
+    // rates take their count from the two tables, so they hold these and no other.
+    assert!(NetworkRate::ALL.len() + 2 == TRAFFIC_RATES.len());
+};
+
 /// External traffic over a second, in bytes per second.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Traffic {
@@ -333,6 +392,14 @@ impl MachineSecond {
     pub fn memory_rate(&self, rate: MemoryRate) -> Option<f64> {
         self.complete()
             .and_then(|complete| complete.memory_rate(rate))
+    }
+
+    /// The second's `rate` as its complete reading holds it, `None` where the second has no
+    /// complete reading, as an unread or refused second has none.
+    #[must_use]
+    pub fn network_rate(&self, rate: NetworkRate) -> Option<f64> {
+        self.complete()
+            .and_then(|complete| complete.network_rate(rate))
     }
 
     #[must_use]

@@ -222,6 +222,12 @@ impl CompleteMachine {
         self.point.rates[rate.point_index()]
     }
 
+    /// The reading's `rate` over the interval before it, `None` where the readings give none.
+    #[must_use]
+    pub fn network_rate(&self, rate: super::NetworkRate) -> Option<f64> {
+        self.point.rates[rate.point_index()]
+    }
+
     /// The reservation charges one physical owner even when Views and sampled tails share it.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -379,6 +385,27 @@ impl CompleteMachine {
             }
         }
         for (rate, value) in super::MemoryRate::ALL.into_iter().zip(rates) {
+            point.rates[rate.point_index()] = value;
+        }
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// A complete reading of `second` whose readings are the traffic `second` holds and the
+    /// network's packet and error rates `rates` in the order of `NetworkRate::ALL`, charged to
+    /// `budget`, so a test outside the viewer can give a second the complete reading the Network
+    /// page draws.
+    #[must_use]
+    pub fn of_network(
+        second: &MachineSecond,
+        rates: [Option<f64>; super::NetworkRate::ALL.len()],
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let mut point = Point::default();
+        let received_index = crate::metrics::MEMORY_RATES.len();
+        point.rates[received_index] = second.network.map(|traffic| traffic.received_bps);
+        point.rates[received_index + 1] = second.network.map(|traffic| traffic.sent_bps);
+        for (rate, value) in super::NetworkRate::ALL.into_iter().zip(rates) {
             point.rates[rate.point_index()] = value;
         }
 

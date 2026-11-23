@@ -19,7 +19,7 @@ pub(crate) const MEMORY_RATES: [(&str, &str); 6] = [
     ("swap_in_bytes_per_second", "swapped_in_bytes"),
     ("swap_out_bytes_per_second", "swapped_out_bytes"),
 ];
-const TRAFFIC_RATES: [(&str, &str); 6] = [
+pub(crate) const TRAFFIC_RATES: [(&str, &str); 6] = [
     ("network_rx_bps", "received_bytes"),
     ("network_tx_bps", "sent_bytes"),
     ("network_rx_packets_per_second", "received_packets"),

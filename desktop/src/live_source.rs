@@ -66,9 +66,10 @@ pub struct Request {
 }
 
 /// What draws the page's chart by App: the worker's reading, or the Store's View the window
-/// draws it from, which leaves the reading no App history of that chart to build. A reading
-/// says which one it was built for, so the window reads a reading with no App history as one
-/// that left the chart to the View only where it did.
+/// draws it from, which leaves the reading no App history of that chart to build. A page that
+/// draws no chart by App, as Network, names the View while it shows the charts it drew from one.
+/// A reading says which one it was built for, so the window reads a reading with no App history
+/// as one that left the chart to the View only where it did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppChartSource {
     Reading,

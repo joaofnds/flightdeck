@@ -4,7 +4,9 @@ use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::system::{FactText, PerformanceLevel};
 
-use super::{BatterySecond, MachineSecond, MemoryRate, MemorySecond, Reading, Traffic, readings};
+use super::{
+    BatterySecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Reading, Traffic, readings,
+};
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
 };
@@ -517,6 +519,38 @@ fn a_second_reads_each_memory_rate_its_complete_reading_holds() {
             ("memory_decompressions_per_second", Some(7.0)),
             ("swap_in_bytes_per_second", Some(11.0)),
             ("swap_out_bytes_per_second", Some(13.0)),
+        ]
+    );
+}
+
+#[test]
+fn a_second_reads_each_network_rate_its_complete_reading_holds() {
+    // Goal: the Network page reads a second's packet and error rates from the second's complete
+    // reading, as its summary writes them. Method: each packet and error counter of an interface
+    // grows by its own amount over one second, and each rate the second reads is set beside the
+    // summary's.
+    let before = Machine::at(1).cpus(&[(0, 0)]).interfaces(&[(1, 0, 0)]);
+    let current = Machine::at(2)
+        .cpus(&[(25, 75)])
+        .interfaces(&[(1, 0, 0)])
+        .packets_and_errors([3, 5, 7, 11]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    let summary = second.complete().unwrap().summary(&second);
+    let read = NetworkRate::ALL.map(|rate| (rate.key(), second.network_rate(rate)));
+    let written = NetworkRate::ALL.map(|rate| (rate.key(), summary[rate.key()].as_f64()));
+    assert_eq!(read, written);
+    assert_eq!(
+        read,
+        [
+            ("network_rx_packets_per_second", Some(3.0)),
+            ("network_tx_packets_per_second", Some(5.0)),
+            ("network_rx_errors_per_second", Some(7.0)),
+            ("network_tx_errors_per_second", Some(11.0)),
         ]
     );
 }
@@ -1145,6 +1179,19 @@ impl Machine {
                 },
             })
             .collect();
+        self
+    }
+
+    /// Gives every interface the packets it received and sent and the errors it met receiving
+    /// and sending, in that order.
+    fn packets_and_errors(mut self, counts: [u64; 4]) -> Self {
+        let [received_packets, sent_packets, receive_errors, send_errors] = counts;
+        for row in &mut self.interfaces {
+            row.interface.received_packets = received_packets;
+            row.interface.sent_packets = sent_packets;
+            row.interface.receive_errors = receive_errors;
+            row.interface.send_errors = send_errors;
+        }
         self
     }
 

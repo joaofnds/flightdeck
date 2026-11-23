@@ -270,6 +270,14 @@ impl Leaders {
         self.kept.forget();
     }
 
+    /// How many Apps the room keeps the sums of between choices, which a test reads to see that
+    /// a page keeps none alive.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn kept_app_count(&self) -> usize {
+        self.kept.entries.len()
+    }
+
     /// Writes into `cohorts` the Apps each chart draws over `window` of `readings`, those whose
     /// seconds measured the most of its resource on average, ties going to the App first in key
     /// order, as the worker's App histories choose them. A stretch the window cuts counts only

@@ -17,7 +17,8 @@ use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::apps_at;
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    levels, levels_named, reading_at, store_levels_named, trend_point, view, with_memory_reading,
+    levels, levels_named, network_rates, reading_at, store_levels_named, trend_point, view,
+    with_memory_reading, with_network_reading,
 };
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -333,6 +334,17 @@ fn assert_shows_the_record_of_a_refused_second(route: &str) {
             memory.compressed_bytes
         )
     );
+    assert_shows_the_traffic_of_the_record(&shown, refused.network.unwrap());
+}
+
+/// Asserts that `shown` holds the bytes received and sent of `traffic`, a second's record of its
+/// traffic, and no packet or error rate, which the record does not hold.
+fn assert_shows_the_traffic_of_the_record(shown: &Value, traffic: viewer::store::Traffic) {
+    assert_eq!(shown["network_rx_bps"].as_f64(), Some(traffic.received_bps));
+    assert_eq!(shown["network_tx_bps"].as_f64(), Some(traffic.sent_bps));
+    for rate in viewer::store::NetworkRate::ALL {
+        assert!(shown[rate.key()].is_null(), "{}", rate.key());
+    }
 }
 
 #[test]
@@ -482,6 +494,127 @@ fn a_followed_memory_page_rests_its_reader_and_draws_each_newer_view() {
         assert_eq!(dashboard.shown_second(), Some(newest));
     }
     assert_eq!(dashboard.generation, generation);
+}
+
+#[test]
+fn a_followed_network_page_rests_its_reader_and_draws_each_newer_view() {
+    // Goal: a Network page following the newest second rests its reader after its first reading
+    // and draws each second after it from the store's View, as Memory does. Method: the worker's
+    // first reading of Network ends at 10,000 and the page takes a View of the same seconds,
+    // then three Views each one second newer arrive with no reading, and after each the page's
+    // machine charts are that View's and its readings show the View's newest second.
+    let first = network_seconds(&[9_999, 10_000]);
+    let mut dashboard = opening_on("network");
+    let mut reading = worker_reading(&first);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    let generation = dashboard.generation;
+
+    dashboard.take_view(Arc::new(view(1, &[], &first)));
+    dashboard.tick_rest();
+
+    assert!(dashboard.reader_rested());
+    for (version, newest) in [(2, 10_001), (3, 10_002), (4, 10_003)] {
+        let seconds = network_seconds(&(9_999..=newest).collect::<Vec<_>>());
+        let view = Arc::new(view(version, &[], &seconds));
+        assert!(dashboard.take_view(Arc::clone(&view)));
+        let panels =
+            crate::live_projection::held_projection::view_panels("network", &view, None).unwrap();
+        assert!(!panels.is_empty());
+        for panel in &panels {
+            assert_eq!(
+                drawn(&dashboard, &panel.id).lines,
+                panel.lines,
+                "{}",
+                panel.id
+            );
+        }
+        assert_eq!(dashboard.shown_second(), Some(newest));
+        assert_eq!(
+            dashboard.shown_summary()["network_rx_packets_per_second"].as_f64(),
+            network_rates(&seconds[seconds.len() - 1])[0]
+        );
+    }
+    assert_eq!(dashboard.generation, generation);
+}
+
+#[test]
+fn a_followed_network_page_builds_and_keeps_nothing_of_the_views_apps() {
+    // Goal: the Network page, which draws no chart by App from the View and ranks no Apps,
+    // chooses no Apps, builds no App chart, history or ranking from a View and keeps none, so
+    // the page thread does no App work there. Method: a Network page over the worker's reading
+    // of the hour, whose room for choosing Apps keeps the Apps of the hour's closed stretches as
+    // Overview leaves it, then the View of the hour, and what the page holds of Apps after it.
+    let (view, _) = crate::live_store_app_fixtures::hour();
+    let live: Vec<MachineSecond> = view
+        .seconds
+        .iter()
+        .map(|second| (**second).clone())
+        .collect();
+    let mut dashboard = opening_on("network");
+    let mut reading = worker_reading(&live);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    let window = viewer::store::WallSeconds {
+        first: view.earlier[0].wall_ns / 1_000_000_000,
+        last: live[live.len() - 1].wall_ns / 1_000_000_000,
+    };
+    let mut cohorts = Cohorts::with_room();
+    dashboard
+        .leaders
+        .choose(&view.readings(), window, &mut cohorts);
+    assert!(dashboard.leaders.kept_app_count() > 0);
+
+    assert!(dashboard.take_view(Arc::new(view)));
+
+    let drawn = &dashboard.store_panels;
+    assert!(drawn.histories.is_none());
+    assert!(drawn.resident.is_none());
+    assert!(drawn.gpu.is_none());
+    assert!(drawn.rankings.is_none());
+    assert!(drawn.apps.is_empty());
+    assert!(!drawn.panels.is_empty());
+    assert_eq!(dashboard.leaders.kept_app_count(), 0);
+}
+
+#[test]
+fn a_rested_network_page_shows_the_traffic_of_a_newest_second_without_a_complete_reading() {
+    // Goal: a Network page whose reader rests shows the traffic the View records for its newest
+    // second where the store holds no complete reading of that second, since the resting reader
+    // never reads that second, and shows the packets that record does not hold as missing.
+    // Method: the worker reads network seconds 9,999 and 10,000, the View of them rests the
+    // reader, then a View adds 10,001 with the traffic of its record alone, and the traffic and
+    // packets the page's readings show.
+    let first = network_seconds(&[9_999, 10_000]);
+    let mut dashboard = rested_on("network", &first, worker_reading(&first));
+    let newest = reading_at(10_001, 0);
+    let traffic = newest.network.unwrap();
+    let seconds = [first[0].clone(), first[1].clone(), newest];
+
+    assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
+
+    let shown = dashboard.shown_summary();
+    assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_shows_the_traffic_of_the_record(&shown, traffic);
+}
+
+#[test]
+fn a_rested_network_page_shows_the_traffic_of_a_refused_second_the_worker_read() {
+    // Goal: the Network page shows the traffic the store's record of a second holds where the
+    // store refused that second's complete reading, even where the worker read the same second,
+    // whose point then holds none of the readings, as Memory shows that record's memory.
+    // Method: rest the Network page over a refused second the worker read, then the traffic of
+    // the shown summary against the record's, and its cards against those of the summary.
+    let (dashboard, refused) = rested_over_a_refused_second("network");
+
+    let shown = dashboard.shown_summary();
+
+    let traffic = refused.network.unwrap();
+    let cards = texts(&summary::cards_of_summary("network", &shown));
+    assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_shows_the_traffic_of_the_record(&shown, traffic);
+    assert_ne!(cards[0].1, "Unavailable", "{cards:?}");
+    assert_ne!(cards[1].1, "Unavailable", "{cards:?}");
 }
 
 #[test]
@@ -985,9 +1118,10 @@ mod when_the_page_is_another_page {
 
     #[test]
     fn the_worker_s_readings_draw_the_charts() {
-        // Goal: a page with no chart by App the View draws keeps the charts of its own
-        // readings. Method: the Network page, then a newer View.
-        let mut dashboard = dashboard_on("network", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        // Goal: a page the View draws neither machine charts nor charts by App for keeps the
+        // charts of its own readings. Method: the Battery page, which is such a page, then a
+        // newer View.
+        let mut dashboard = dashboard_on("battery", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let before = dashboard.panels.clone();
 
         let changed = dashboard.take_view(newer_view());
@@ -2158,6 +2292,15 @@ fn memory_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
     wall_seconds
         .iter()
         .map(|&wall_second| with_memory_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
+/// The seconds at `wall_seconds`, each with a complete reading of the traffic it holds and of
+/// the network's packet and error rates, as the store holds a second it read.
+fn network_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_network_reading(reading_at(wall_second, 0)))
         .collect()
 }
 

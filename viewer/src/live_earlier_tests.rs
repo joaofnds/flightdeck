@@ -1165,6 +1165,84 @@ fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
     assert_eq!(peaks, (EARLIER_BASE + 31..=EARLIER_BASE + 37).collect::<Vec<_>>());
 }
 
+#[test]
+fn a_stretch_keeps_each_network_reading_the_session_tail_keeps() {
+    // Goal: an older stretch keeps the lowest and highest of each packet and error rate the
+    // Network page draws, with the reading that read the highest, as the session's older tail
+    // keeps them for the same seconds, so a peak of the Network charts drawn from a store is the
+    // peak the tail draws. Method: each counter of one interface rises at its own pace and jumps
+    // at its own second of the stretch of 10,030, and the stretch's summaries are set beside the
+    // reach of the tail's point.
+    let mut fixture = RingFixture::new_following();
+    let memory = collector::machine::Memory {
+        total_bytes: 48 * 1024 * 1024 * 1024,
+        ..collector::machine::Memory::default()
+    };
+    for tick in 1..=70 {
+        let interfaces = [earlier_network_peaks(tick)];
+        let wall_second = EARLIER_BASE + u64::from(tick);
+        fixture.publish_following_readings(tick, wall_second, &memory, &interfaces);
+    }
+    fixture.seal_held();
+    let stretch = earlier_store_stretch(&fixture, 70, 3);
+    let tail = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(earlier_context_last(EARLIER_BASE + 70))
+        .unwrap();
+    let point = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| {
+            point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND / EARLIER_STRIDE_SECONDS
+                == (EARLIER_BASE + 30) / EARLIER_STRIDE_SECONDS
+        })
+        .unwrap();
+
+    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
+        let measured = reduction.measured.unwrap();
+        (
+            measured.minimum.value,
+            measured.maximum.value,
+            measured.maximum.place,
+        )
+    };
+    let held =
+        crate::store::NetworkRate::ALL.map(|rate| (rate.key(), kept(stretch.network_rate(rate))));
+    let reached = held.map(|(key, _)| {
+        let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
+        (key, (reach.low, reach.high, reach.peak))
+    });
+
+    assert_eq!(held, reached);
+    let peaks = held.map(|(_, kept)| kept.2.second());
+    assert_eq!(peaks, [31, 32, 33, 34].map(|tick| EARLIER_BASE + tick));
+}
+
+/// The interface of tick `tick` of a run whose packets and errors each rise at their own pace and
+/// jump at their own tick of 31 to 34, so each rate reads its highest there.
+fn earlier_network_peaks(tick: u32) -> collector::interfaces::Interface {
+    let tick = u64::from(tick);
+    let counter = |pace: u64, peak: u64| {
+        let rise = if tick >= peak { 49 * pace } else { 0 };
+        pace * tick + rise
+    };
+    let mut name = [0_u8; collector::interfaces::IFNAMSIZ];
+    name[..3].copy_from_slice(b"en0");
+
+    collector::interfaces::Interface {
+        index: 1,
+        name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
+        received_bytes: 1_000 * tick,
+        sent_bytes: 500 * tick,
+        received_packets: counter(3, 31),
+        sent_packets: counter(5, 32),
+        receive_errors: counter(7, 33),
+        send_errors: counter(11, 34),
+        receive_drops: 0,
+    }
+}
+
 /// The memory of tick `tick` of a run whose swap and paging each rise at their own pace and read
 /// their highest at their own tick of 31 to 37.
 fn earlier_memory_peaks(tick: u32) -> collector::machine::Memory {

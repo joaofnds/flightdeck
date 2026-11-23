@@ -941,6 +941,18 @@ mod tests {
             wall_second: u64,
             memory: &collector::machine::Memory,
         ) {
+            self.publish_following_readings(tick, wall_second, memory, &[]);
+        }
+
+        /// Publishes `publish_following_memory`'s reading of `tick` with `interfaces` for its
+        /// network interfaces.
+        fn publish_following_readings(
+            &mut self,
+            tick: u32,
+            wall_second: u64,
+            memory: &collector::machine::Memory,
+            interfaces: &[collector::interfaces::Interface],
+        ) {
             assert!((1..=901).contains(&tick));
 
             let cpus = [collector::machine::CPUTicks {
@@ -961,7 +973,7 @@ mod tests {
                     run_tick: u64::from(tick),
                     cpus: &cpus,
                     memory,
-                    interfaces: &[],
+                    interfaces,
                     ioreport: None,
                     smc: Some(collector::ring::SmcReadings {
                         power_watts: 5.0,
