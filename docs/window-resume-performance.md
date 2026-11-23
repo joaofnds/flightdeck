@@ -34,12 +34,13 @@ minute that changes once its thread checked it fails the launch at the check of 
 before the launch completes.
 
 Overview waits for the Store instead of asking the legacy page reader to load the
-same period. Initial bootstrap, incomplete histories and unavailable Store data retain
-the page-reader path, and so does every reading of the other pages but the chart by App
-the Memory, CPU, Energy, Storage and GPU pages draw from the View. The Store continues
-ingesting while other pages follow the live Mac, so returning to Overview finds its newest
-View ready. A hidden window parks it, and so do a selected or held second and a saved
-recording shown in a live window. A cold
+same period, and the live Memory and Network pages resume the same way. Initial bootstrap,
+incomplete histories and unavailable Store data retain the page-reader path, and so does
+every reading of the other pages but the chart by App the CPU, Energy, Storage and GPU
+pages draw from the View. The Store continues ingesting while other pages follow the live
+Mac, so returning to Overview finds its newest View ready. A hidden window parks it, and so
+does a saved recording shown in a live window, while a selected or held second leaves it
+taking in the live Mac. A cold
 restore validates the complete saved predecessor minute, including refused samples, but
 constructs no discarded presentation objects for its ticks.
 

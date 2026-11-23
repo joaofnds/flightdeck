@@ -235,20 +235,21 @@ mailboxes, cancellation generations, pages of at most 512 rows or 2,048 Apps, an
 bounded cache.
 A 250 ms main-thread timer takes completed results, with prompt polling while the window
 awaits a restoration or another reply.
-Live Overview, while it follows the newest second, draws from the Store instead. The app
+The live Overview, Memory and Network pages, while they follow the newest second, draw from
+the Store instead. The app
 starts the Store before its window opens and keeps it for its life. Its ingestion thread
 uses bounded buffers and publishes immutable Views. Ingestion parks while the window is
 hidden or a saved recording is shown, and goes on while a second is selected or held.
-Restoring live Overview keeps the selected range and reconciles to the newest endpoint
+Restoring one of those pages keeps the selected range and reconciles to the newest endpoint
 before publishing a complete replacement. A covered checkpoint reuses cached history and
 reads the retained ring delta. Otherwise the Store reads the minutes sealed after the newest
 second it holds and follows the ring from the newest of them. It reads the hour's sealed
 minutes again, replacing what it held, where the hour left a minute out, where the Store
 holds no whole sealed minute of that second's run, or where the ring overran while it read
-the ring, which leaves the Store holding seconds past ones it never took. Overview waits for
+the ring, which leaves the Store holding seconds past ones it never took. The page waits for
 the Store instead of starting a duplicate page query.
-While Overview draws from a View the worker rests, and a hover over a second the View holds
-reads it there. The Memory, CPU, Energy, Storage and GPU pages draw their chart by App from
+While such a page draws from a View the worker rests, and a hover over a second the View
+holds reads it there. The CPU, Energy, Storage and GPU pages draw their chart by App from
 the Store's View too. A typed second, a saved recording and every other reading of the other
 pages read through the worker. A held second keeps the charts' window and the View it
 took, and reads only the page ending at that window and the held second's own reading.
