@@ -125,17 +125,7 @@ fn reconciliation_step(held: &mut super::Held, ring: &mut super::Ring, shared: &
 }
 
 fn reconciliation_shared() -> super::Shared {
-    use std::sync::atomic::AtomicBool;
-    super::Shared {
-        queries: crate::store::query::Queries::new(),
-        mailbox: Mailbox::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: std::sync::Arc::new(crate::cancellation::Cancellation::default()),
-    }
+    super::Shared::starting()
 }
 
 #[test]

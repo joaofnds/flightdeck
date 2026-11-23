@@ -51,7 +51,6 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
     // Goal: showing the window never hands it a historical endpoint during reconciliation.
     // Method: reconcile a real sealed minute while newer readings remain in its ring.
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal_minute(0);
@@ -59,16 +58,7 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
     fixture.publish_with_system_rows(160);
     let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
-    let shared = super::Shared {
-        queries: crate::store::query::Queries::new(),
-        mailbox: super::Mailbox::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
-    };
+    let shared = super::Shared::starting();
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
@@ -226,7 +216,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
     // Goal: catch-up processes only ring publications received since the reader rested.
     // Method: use the real ring before and after the actual resume path and inspect its output.
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
     let mut fixture = Fixture::new();
     for second in 100..103 {
         fixture.publish_with_system_rows(second);
@@ -239,16 +229,8 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
     for second in 103..106 {
         fixture.publish_with_system_rows(second);
     }
-    let shared = super::Shared {
-        queries: crate::store::query::Queries::new(),
-        mailbox: super::Mailbox::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(false),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
-    };
+    let shared = super::Shared::starting();
+    shared.catching_up.store(false, Ordering::Release);
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)

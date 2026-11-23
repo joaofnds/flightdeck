@@ -452,17 +452,7 @@ fn recent_fixture() -> Fixture {
 }
 
 fn startup_shared() -> crate::store::Shared {
-    use std::sync::atomic::AtomicBool;
-    crate::store::Shared {
-        mailbox: crate::store::Mailbox::new(),
-        queries: crate::store::query::Queries::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(crate::Cancellation::default()),
-    }
+    crate::store::Shared::starting()
 }
 
 fn assert_recent_resident(apps: &AppsSecond, observation: &Observation) {

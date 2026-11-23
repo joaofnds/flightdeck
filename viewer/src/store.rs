@@ -294,6 +294,12 @@ struct Shared {
     catching_up: AtomicBool,
     paused: AtomicBool,
     cancellation: Arc<Cancellation>,
+    /// How many turns the startup has taken, which a test reads to see it rest between them.
+    #[cfg(test)]
+    startup_turns: std::sync::atomic::AtomicU64,
+    /// How many times the startup let go of what it took in to start again on the recording.
+    #[cfg(test)]
+    startup_restarts: std::sync::atomic::AtomicU64,
 }
 
 impl Shared {
@@ -308,6 +314,10 @@ impl Shared {
             catching_up: AtomicBool::new(true),
             paused: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
+            #[cfg(test)]
+            startup_turns: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            startup_restarts: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -390,6 +400,18 @@ impl Store {
         if let Some(thread) = &self.thread {
             thread.thread().unpark();
         }
+    }
+
+    /// How many turns the startup has taken.
+    #[cfg(test)]
+    pub(crate) fn startup_turns(&self) -> u64 {
+        self.shared.startup_turns.load(Ordering::Acquire)
+    }
+
+    /// How many times the startup let go of what it took in to start again.
+    #[cfg(test)]
+    pub(crate) fn startup_restarts(&self) -> u64 {
+        self.shared.startup_restarts.load(Ordering::Acquire)
     }
 
     /// Whether the store has finished its in-flight read and parked without polling.
@@ -1161,29 +1183,35 @@ fn startup_staged(
     let mut startup = Startup::new();
     let mut blocked = None;
     let mut reported = None;
+    let mut untouched = true; // No turn has gone through since the start or the last restart.
     held.startup = StartupState::Loading;
     for _ in 0..STEPS_MAX {
         operation.check()?;
+        #[cfg(test)]
+        shared.startup_turns.fetch_add(1, Ordering::AcqRel);
         let restart =
             match startup_staged_turn(&input, held, ring, shared, &mut startup, &mut blocked) {
                 Ok(true) => return Ok(()),
-                Ok(false) => false,
+                Ok(false) => {
+                    untouched = false;
+                    false
+                }
+                // A recording the collector has not made yet, a run that changed while the store
+                // read it, or a register naming another recording's runs: met where no turn went
+                // through, the startup waits before it looks again, and otherwise it restarts.
                 Err(StartupFailure::Catalog(
-                    Failure::ChangedIdentity | Failure::ForeignRecording,
-                )) => true,
-                // The collector makes the recording after the window opens.
-                Err(StartupFailure::Catalog(Failure::Recording(io::ErrorKind::NotFound))) => {
-                    thread::park_timeout(WAIT);
+                    Failure::ChangedIdentity
+                    | Failure::ForeignRecording
+                    | Failure::Recording(io::ErrorKind::NotFound),
+                )) => {
+                    if untouched {
+                        thread::park_timeout(WAIT);
+                    }
                     true
                 }
-                // A saved minute that reads badly costs its own seconds, and the load that serves
-                // every later catch-up leaves it out and goes on.
                 Err(StartupFailure::Read(refused)) => {
                     operation.check()?;
-                    eprintln!("flightdeck store startup: {refused:?}");
-                    held.reset();
-                    held.startup = StartupState::Complete;
-                    shared.catch_up.store(true, Ordering::Release);
+                    startup_staged_left_out(held, shared, &refused);
                     return Ok(());
                 }
                 // What refuses now may clear while the window stays open.
@@ -1196,15 +1224,50 @@ fn startup_staged(
                     true
                 }
             };
-        if restart {
-            held.reset();
-            held.startup = StartupState::Loading;
-            *ring = make_ring(root, &budget);
-            startup = Startup::new();
-            blocked = None;
+        // Where no turn went through, a reset undoes nothing, and its freed buffers end the wait.
+        if restart && untouched {
+            startup_staged_untouched(&startup, held);
+        } else if restart {
+            #[cfg(test)]
+            shared.startup_restarts.fetch_add(1, Ordering::AcqRel);
+            startup_staged_restart(root, held, ring, &mut startup, &mut blocked);
+            untouched = true;
         }
     }
     unreachable!("startup finishes or the Store is cancelled");
+}
+
+/// Ends the startup on a saved minute that reads badly, which costs its own seconds: the load
+/// that serves every later catch-up leaves it out and goes on.
+fn startup_staged_left_out(held: &mut Held, shared: &Shared, refused: &crate::recording::Refused) {
+    eprintln!("flightdeck store startup: {refused:?}");
+    held.reset();
+    held.startup = StartupState::Complete;
+    shared.catch_up.store(true, Ordering::Release);
+}
+
+/// Asserts that a startup no turn went through took nothing in, which is what lets it look
+/// again without a restart: only a first turn's failure reaches it, and that turn fails before
+/// it takes a second or checks a catalog.
+fn startup_staged_untouched(startup: &recording::staged::Startup, held: &Held) {
+    assert!(startup.took_nothing_in());
+    assert!(held.newest.is_none());
+    assert!(held.checked_catalog.is_none());
+}
+
+/// Lets go of what the startup took in, so it starts again on the recording as it is now.
+fn startup_staged_restart(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    startup: &mut recording::staged::Startup,
+    blocked: &mut Option<StartupCapacity>,
+) {
+    held.reset();
+    held.startup = StartupState::Loading;
+    *ring = make_ring(root, &held.payload_budget);
+    *startup = recording::staged::Startup::new();
+    *blocked = None;
 }
 
 /// Answers the page's query with why the Store cannot start, and rests before the next attempt,

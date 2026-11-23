@@ -151,6 +151,15 @@ impl Startup {
         }
     }
 
+    /// Whether the launch has taken nothing in, as `new` leaves it: it has found no minute,
+    /// checked no catalog and left the discovery of its first step.
+    pub(in crate::store) fn took_nothing_in(&self) -> bool {
+        self.phase == Phase::Discover
+            && self.minutes.is_empty()
+            && self.checked.is_none()
+            && self.control.is_none()
+    }
+
     /// A launch whose history installs one minute a step, so a test can put a tick between two
     /// of its minutes.
     #[cfg(test)]

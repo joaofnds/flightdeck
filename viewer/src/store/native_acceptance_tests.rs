@@ -343,17 +343,7 @@ fn poll_blocked_source(
 }
 
 fn startup_shared() -> crate::store::Shared {
-    use std::sync::atomic::AtomicBool;
-    crate::store::Shared {
-        mailbox: crate::store::Mailbox::new(),
-        queries: crate::store::query::Queries::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(Cancellation::default()),
-    }
+    crate::store::Shared::starting()
 }
 
 fn deny_sampled_take(

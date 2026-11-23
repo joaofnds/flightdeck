@@ -752,6 +752,187 @@ fn a_second_of_a_damaged_saved_minute_is_left_to_the_saved_minutes() {
 }
 
 #[test]
+fn a_store_started_where_no_recording_exists_rests_between_its_attempts() {
+    // Goal: a Store on a Mac whose collector never made the recording looks for it once a wait
+    // rather than spinning a core. Method: start a Store on a root that does not exist, let a
+    // second pass, then the turns its startup took against the one a wait allows over the time
+    // that passed, with room for twice as many, since a loaded machine only stretches the waits.
+    let root = std::env::temp_dir().join(format!("flightdeck-no-recording-{}", std::process::id()));
+    assert!(!root.exists());
+    let started = Instant::now();
+    let store = Store::start_with_budget(
+        &root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+
+    thread::sleep(Duration::from_secs(1));
+
+    assert_rests_between_turns(&store, started, super::WAIT);
+}
+
+#[test]
+fn a_store_started_on_another_recordings_runs_rests_between_its_attempts() {
+    // Goal: a Store whose recording's register names runs of another recording, which no later
+    // attempt clears, looks again once a wait rather than spinning a core. Method: a recording
+    // whose identity file is then replaced by another identity, a Store started on it, a second,
+    // then the turns its startup took against the one a wait allows, with room for twice as many.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let mut foreign = collector::recording::read_identity(&fixture.root).unwrap();
+    foreign.0[0] ^= 1;
+    fs::write(
+        fixture.root.join("identity"),
+        format!("{}\n", collector::recording::identity_text(foreign)),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let store = Store::start_with_budget(
+        &fixture.root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+
+    thread::sleep(Duration::from_secs(1));
+
+    assert_rests_between_turns(&store, started, super::WAIT);
+}
+
+#[test]
+fn a_store_started_on_another_recordings_runs_starts_once_its_identity_is_written_back() {
+    // Goal: a Store that waits between its looks at a register naming another recording's runs
+    // still looks, so it starts once the recording reads well again. Method: replace a
+    // recording's identity with another, start a Store, ask for the newest reading, wait three
+    // waits, write the identity back, then the recording the Store's first ready context reads.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let identity = fixture.root.join("identity");
+    let own = fs::read(&identity).unwrap();
+    let mut foreign = collector::recording::read_identity(&fixture.root).unwrap();
+    foreign.0[0] ^= 1;
+    fs::write(
+        &identity,
+        format!("{}\n", collector::recording::identity_text(foreign)),
+    )
+    .unwrap();
+    let budget = Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    let handle = store.query_handle();
+    handle.submit(latest_request()).unwrap();
+    thread::sleep(3 * super::WAIT);
+    let while_foreign = handle.take();
+
+    // A rename puts the whole identity in place at once, so the Store never reads it half written,
+    // under the private mode the Store requires of it.
+    let written = fixture.root.join("identity.written");
+    fs::write(&written, own).unwrap();
+    fs::set_permissions(&written, fs::metadata(&identity).unwrap().permissions()).unwrap();
+    fs::rename(&written, &identity).unwrap();
+    let restored = ready_context(&handle);
+
+    assert!(while_foreign.is_none());
+    assert_eq!(
+        restored.source.recording,
+        fixture.writer.identity().unwrap().recording
+    );
+}
+
+#[test]
+fn a_store_started_on_a_recording_it_cannot_read_rests_between_its_attempts() {
+    // Goal: a Store that cannot read its recording's identity reads it again once a retry wait
+    // rather than spinning a core. Method: wall off a recording's identity, start a Store, let
+    // two seconds pass, then the turns its startup took against the one a retry wait allows,
+    // with room for twice as many, and restore the identity.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let identity = fixture.root.join("identity");
+    let mode = fs::metadata(&identity).unwrap().permissions();
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(fs::read(&identity).is_err());
+    let started = Instant::now();
+    let store = Store::start_with_budget(
+        &fixture.root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+
+    thread::sleep(Duration::from_secs(2));
+
+    assert_rests_between_turns(&store, started, super::STARTUP_RETRY_WAIT);
+    fs::set_permissions(&identity, mode).unwrap();
+}
+
+/// Asserts that `store`, started at `started`, took no more than twice the turns of its startup
+/// that one `wait` between them allows over the time since, and two more for the turns at either
+/// end, and never restarted, since no turn went through.
+fn assert_rests_between_turns(store: &Store, started: Instant, wait: Duration) {
+    let turns = store.startup_turns();
+    let elapsed_ms = started.elapsed().as_millis();
+    let allowed = 2 * elapsed_ms / wait.as_millis() + 2;
+    assert!(
+        u128::from(turns) <= allowed,
+        "{turns} turns in {elapsed_ms} ms"
+    );
+    assert!(turns >= 2, "{turns} turns in {elapsed_ms} ms");
+    assert_eq!(store.startup_restarts(), 0);
+}
+
+#[test]
+fn a_startup_whose_recording_changed_after_it_took_some_in_lets_go_of_it() {
+    // Goal: a startup that took part of the recording in and then finds the recording changed
+    // lets go of all it took in, once, rather than go on from it. Method: a Store whose budget
+    // leaves a megabyte of room, so its startup takes the catalog in and waits for room, hidden
+    // there, given another identity and the room, and shown, then its restarts and the bytes
+    // it holds, which fall back to none, as before it took anything in, and that it still looks.
+    let mut fixture = Fixture::new();
+    for minute in 0..6 {
+        fixture.publish_with_system_rows(100 + minute * 60);
+        fixture.seal_minute(minute);
+        fixture.skip_run_ticks(59);
+    }
+    let total = 256 * 1024 * 1024;
+    let budget = Arc::new(super::ByteBudget::new(total));
+    let kept = budget.reserve(total - 1024 * 1024).unwrap();
+    let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
+    wait_for("the startup to take something in", || {
+        budget.used() > kept.bytes()
+    });
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    let mut foreign = collector::recording::read_identity(&fixture.root).unwrap();
+    foreign.0[0] ^= 1;
+    fs::write(
+        fixture.root.join("identity"),
+        format!("{}\n", collector::recording::identity_text(foreign)),
+    )
+    .unwrap();
+    drop(kept);
+
+    store.set_active(true);
+
+    wait_for("the startup to restart", || store.startup_restarts() > 0);
+    let turns = store.startup_turns();
+    thread::sleep(3 * super::WAIT);
+    assert_eq!(store.startup_restarts(), 1);
+    assert_eq!(budget.used(), 0);
+    // A startup still looking for its recording, rather than a thread that ended and let go.
+    assert!(store.startup_turns() > turns);
+}
+
+/// Waits until `condition` holds, failing the test with `what` if it does not within ten seconds.
+fn wait_for(what: &str, condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1_000 {
+        if condition() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "waited too long for {what}");
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("waited too long for {what}");
+}
+
+#[test]
 fn a_recording_not_yet_made_holds_a_query_with_no_failure() {
     // Goal: the first launch opens the window before the collector makes the recording, which is
     // no failure of the recording, so the page waits for its readings.
