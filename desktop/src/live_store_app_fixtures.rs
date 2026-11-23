@@ -122,9 +122,25 @@ pub fn worker_observation(observation: &Observation) -> Value {
 pub fn apps_at(second: &MachineSecond, apps: &[(&str, u64)]) -> AppsSecond {
     let rows: Vec<AppRow> = apps
         .iter()
-        .map(|(name, cpu_ns)| apps_at_row(name, *cpu_ns))
+        .map(|(name, cpu_ns)| apps_at_row(name, *cpu_ns, 0))
         .collect();
 
+    apps_at_rows(second, rows)
+}
+
+/// The Apps of `second` as `apps_at` gives them, each of `apps` also reading and writing that
+/// many bytes of disk I/O in the second. `apps` is in key order.
+pub fn apps_with_disk_at(second: &MachineSecond, apps: &[(&str, u64, u64)]) -> AppsSecond {
+    let rows: Vec<AppRow> = apps
+        .iter()
+        .map(|(name, cpu_ns, disk_bytes)| apps_at_row(name, *cpu_ns, *disk_bytes))
+        .collect();
+
+    apps_at_rows(second, rows)
+}
+
+/// The Apps of `second` whose rows are `rows`, every process of the second found.
+fn apps_at_rows(second: &MachineSecond, rows: Vec<AppRow>) -> AppsSecond {
     AppsSecond {
         metadata: viewer::store::AppMetadata::default(),
         processes: Err(viewer::store::Missing::Unread),
@@ -158,9 +174,10 @@ pub fn apps_at_observation(second: &MachineSecond) -> Observation {
     }
 }
 
-/// The App of one process, the executable `name`, that spent `cpu_ns` of CPU time and held as
-/// many bytes resident.
-fn apps_at_row(name: &str, cpu_ns: u64) -> AppRow {
+/// The App of one process, the executable `name`, that spent `cpu_ns` of CPU time, held as many
+/// bytes resident and read and wrote `disk_bytes` of disk I/O, half of them each way.
+fn apps_at_row(name: &str, cpu_ns: u64, disk_bytes: u64) -> AppRow {
+    assert!(disk_bytes.is_multiple_of(2));
     let measure = |known| Measure {
         known,
         measured_members: 1,
@@ -180,9 +197,9 @@ fn apps_at_row(name: &str, cpu_ns: u64) -> AppRow {
         cpu_ns: measure(cpu_ns),
         energy_nj: measure(0),
         gpu_ns: measure(0),
-        disk_read_bytes: measure(0),
-        disk_written_bytes: measure(0),
-        disk_io_bytes: measure(0),
+        disk_read_bytes: measure(disk_bytes / 2),
+        disk_written_bytes: measure(disk_bytes / 2),
+        disk_io_bytes: measure(disk_bytes),
         resident_bytes: measure(cpu_ns),
         footprint_bytes: measure(0),
     };

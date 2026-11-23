@@ -252,3 +252,80 @@ fn storage_context_at(store: &crate::store::Store, second: u64) -> Arc<crate::st
 
     panic!("the Store never selected {second} within its attempts");
 }
+
+#[test]
+fn a_stretch_keeps_each_storage_reading_the_session_tail_keeps() {
+    // Goal: an older stretch keeps the lowest and highest of each operation, error and mean
+    // service time rate the Storage page draws, with the reading that read the highest, as the
+    // session's older tail keeps them for the same seconds, so a peak of the Storage charts drawn
+    // from a store is the peak the tail draws. Method: each counter of one disk rises at its own
+    // pace and jumps at its own second of the stretch of 1,030, and the stretch's summaries are
+    // set beside the reach of the tail's point.
+    let mut fixture = storage_fixture_with_slots(120);
+    for tick in 1..=70 {
+        storage_publish(&mut fixture, tick, Some(&storage_peaks(tick)));
+    }
+    fixture.seal_held();
+    let store = crate::store::Store::start(&fixture.root).unwrap();
+    // The stretch of 1,030 to 1,039, which the tail's point of 1,030 reaches over.
+    let stretch_number = 103;
+    let view = crate::store::tests::view_where(&store, |view| {
+        view.seconds.len() == 70 && view.stretches.iter().any(|held| held.stretch == stretch_number)
+    });
+    let stretch = view
+        .stretches
+        .iter()
+        .find(|held| held.stretch == stretch_number)
+        .map(|held| held.machine.as_ref())
+        .unwrap();
+    let tail = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(1070 + CHARTED_SECONDS - 1)
+        .unwrap();
+    let point = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| {
+            point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND / 10 == stretch_number
+        })
+        .unwrap();
+
+    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
+        let measured = reduction.measured.unwrap();
+        (
+            measured.minimum.value,
+            measured.maximum.value,
+            measured.maximum.place,
+        )
+    };
+    let held =
+        crate::store::StorageRate::ALL.map(|rate| (rate.key(), kept(stretch.storage_rate(rate))));
+    let reached = held.map(|(key, _)| {
+        let path = crate::session::number_path(Some("storage"), key, None);
+        let reach = crate::number_reach(&point["reach"], &path).unwrap().unwrap();
+        (key, (reach.low, reach.high, reach.peak))
+    });
+
+    assert_eq!(held, reached);
+    let peaks = held.map(|(_, kept)| kept.2.second());
+    assert_eq!(peaks, [1031, 1032, 1033, 1034, 1035, 1036]);
+}
+
+/// The disks of tick `tick` of a run whose one disk's operations, errors and times each rise at
+/// their own pace and jump at their own tick of 31 to 36, so each rate reads its highest there.
+fn storage_peaks(tick: u64) -> DiskSnapshot {
+    let counter = |pace: u64, peak: u64| {
+        let rise = if tick >= peak { 49 * pace } else { 0 };
+        pace * tick + rise
+    };
+    let mut snapshot = storage_snapshot(tick);
+    let record = &mut snapshot.records[0];
+    record.read_operations = Some(counter(2, 31));
+    record.write_operations = Some(counter(4, 32));
+    record.read_errors = Some(counter(1, 33));
+    record.write_errors = Some(counter(3, 34));
+    record.read_time_ns = Some(counter(6_000_000, 35));
+    record.write_time_ns = Some(counter(20_000_000, 36));
+    snapshot
+}

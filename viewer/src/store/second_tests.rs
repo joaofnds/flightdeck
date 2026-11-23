@@ -5,7 +5,8 @@ use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::system::{FactText, PerformanceLevel};
 
 use super::{
-    BatterySecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Reading, Traffic, readings,
+    BatterySecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Reading, StorageRate,
+    Traffic, readings,
 };
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
@@ -551,6 +552,46 @@ fn a_second_reads_each_network_rate_its_complete_reading_holds() {
             ("network_tx_packets_per_second", Some(5.0)),
             ("network_rx_errors_per_second", Some(7.0)),
             ("network_tx_errors_per_second", Some(11.0)),
+        ]
+    );
+}
+
+#[test]
+fn a_second_reads_each_storage_rate_its_complete_reading_holds() {
+    // Goal: the Storage page reads a second's operations, errors and mean service times from the
+    // second's complete reading, as its summary writes them. Method: each counter of one disk
+    // grows by its own amount over one second, and each rate the second reads is set beside the
+    // summary's.
+    let before = Machine::at(1)
+        .cpus(&[(0, 0)])
+        .disks(&[(1, 0, 0)])
+        .whole_disks()
+        .disk_counters([0; 6]);
+    let current = Machine::at(2)
+        .cpus(&[(25, 75)])
+        .disks(&[(1, 4_096, 8_192)])
+        .whole_disks()
+        .disk_counters([4, 8, 3, 5, 12_000_000, 40_000_000]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    let summary = second.complete().unwrap().summary(&second);
+    let read = StorageRate::ALL.map(|rate| (rate.key(), second.storage_rate(rate)));
+    let written =
+        StorageRate::ALL.map(|rate| (rate.key(), summary["storage"][rate.key()].as_f64()));
+    assert_eq!(read, written);
+    assert_eq!(
+        read,
+        [
+            ("read_ops_per_second", Some(4.0)),
+            ("write_ops_per_second", Some(8.0)),
+            ("read_errors_per_second", Some(3.0)),
+            ("write_errors_per_second", Some(5.0)),
+            ("read_mean_ms", Some(3.0)),
+            ("write_mean_ms", Some(5.0)),
         ]
     );
 }
@@ -1310,6 +1351,46 @@ impl Machine {
             };
         }
         self.tick.disks = Some(snapshot);
+        self
+    }
+
+    /// Gives every disk a media id and a name of its own, `disk0` onwards, which a disk's record
+    /// needs to be read whole, so the second's complete reading takes its disks in rather than
+    /// refusing them.
+    fn whole_disks(mut self) -> Self {
+        let Some(snapshot) = &mut self.tick.disks else {
+            unreachable!("a disk's media and name are set after its disks");
+        };
+        for (index, record) in snapshot.records[..snapshot.count].iter_mut().enumerate() {
+            record.media_id = record.driver_id + 100;
+            let name = format!("disk{index}");
+            record.name[..name.len()].copy_from_slice(name.as_bytes());
+        }
+        self
+    }
+
+    /// Gives every disk the operations it completed reading and writing, the errors it met
+    /// reading and writing, and the time it spent reading and writing, in that order.
+    fn disk_counters(mut self, counters: [u64; 6]) -> Self {
+        let Some(snapshot) = &mut self.tick.disks else {
+            unreachable!("a disk's counters are set after its disks");
+        };
+        let [
+            read_operations,
+            write_operations,
+            read_errors,
+            write_errors,
+            read_time,
+            write_time,
+        ] = counters;
+        for record in &mut snapshot.records[..snapshot.count] {
+            record.read_operations = Some(read_operations);
+            record.write_operations = Some(write_operations);
+            record.read_errors = Some(read_errors);
+            record.write_errors = Some(write_errors);
+            record.read_time_ns = Some(read_time);
+            record.write_time_ns = Some(write_time);
+        }
         self
     }
 

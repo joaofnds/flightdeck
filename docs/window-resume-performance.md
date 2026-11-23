@@ -34,9 +34,9 @@ minute that changes once its thread checked it fails the launch at the check of 
 before the launch completes.
 
 Overview waits for the Store instead of asking the legacy page reader to load the
-same period, and the live Memory and Network pages resume the same way. Initial bootstrap,
+same period, and the live Memory, Network and Storage pages resume the same way. Initial bootstrap,
 incomplete histories and unavailable Store data retain the page-reader path, and so does
-every reading of the other pages but the chart by App the CPU, Energy, Storage and GPU
+every reading of the other pages but the chart by App the CPU, Energy and GPU
 pages draw from the View. The Store continues ingesting while other pages follow the live
 Mac, so returning to Overview finds its newest View ready. A hidden window parks it, and so
 does a saved recording shown in a live window, while a selected or held second leaves it

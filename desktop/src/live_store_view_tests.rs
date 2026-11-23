@@ -14,11 +14,11 @@ use crate::live_hover::{Origin, Preview, Target};
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Update, Worker};
-use crate::live_store_app_fixtures::apps_at;
+use crate::live_store_app_fixtures::{apps_at, apps_with_disk_at};
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    levels, levels_named, network_rates, reading_at, store_levels_named, trend_point, view,
-    with_memory_reading, with_network_reading,
+    levels, levels_named, network_rates, reading_at, storage_rates, store_levels_named,
+    trend_point, view, with_memory_reading, with_network_reading, with_storage_reading,
 };
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -335,6 +335,20 @@ fn assert_shows_the_record_of_a_refused_second(route: &str) {
         )
     );
     assert_shows_the_traffic_of_the_record(&shown, refused.network.unwrap());
+    assert_shows_the_storage_of_the_record(&shown, &refused);
+}
+
+/// Asserts that `shown` holds the bytes the disks read and wrote as `second`'s record holds them,
+/// and no operation, error or service time rate, which the record does not hold.
+fn assert_shows_the_storage_of_the_record(shown: &Value, second: &MachineSecond) {
+    let storage = &shown["storage"];
+    assert!(second.disk_read_bps.is_some());
+    assert!(second.disk_written_bps.is_some());
+    assert_eq!(storage["read_bps"].as_f64(), second.disk_read_bps);
+    assert_eq!(storage["write_bps"].as_f64(), second.disk_written_bps);
+    for rate in viewer::store::StorageRate::ALL {
+        assert!(storage[rate.key()].is_null(), "{}", rate.key());
+    }
 }
 
 /// Asserts that `shown` holds the bytes received and sent of `traffic`, a second's record of its
@@ -615,6 +629,130 @@ fn a_rested_network_page_shows_the_traffic_of_a_refused_second_the_worker_read()
     assert_shows_the_traffic_of_the_record(&shown, traffic);
     assert_ne!(cards[0].1, "Unavailable", "{cards:?}");
     assert_ne!(cards[1].1, "Unavailable", "{cards:?}");
+}
+
+#[test]
+fn a_followed_storage_page_rests_its_reader_and_draws_each_newer_view() {
+    // Goal: a Storage page following the newest second rests its reader after its first reading
+    // and draws each second after it from the store's View, as Network does. Method: the worker's
+    // first reading of Storage ends at 10,000 and the page takes a View of the same seconds,
+    // then three Views each one second newer arrive with no reading, and after each the page's
+    // machine charts are that View's and its readings show the View's newest second.
+    let first = storage_seconds(&[9_999, 10_000]);
+    let mut dashboard = opening_on("storage");
+    let mut reading = worker_reading(&first);
+    reading.generation = dashboard.generation;
+    assert!(dashboard.receive(Update::Ready(reading)));
+    let generation = dashboard.generation;
+
+    dashboard.take_view(Arc::new(view(1, &[], &first)));
+    dashboard.tick_rest();
+
+    assert!(dashboard.reader_rested());
+    for (version, newest) in [(2, 10_001), (3, 10_002), (4, 10_003)] {
+        let seconds = storage_seconds(&(9_999..=newest).collect::<Vec<_>>());
+        let view = Arc::new(view(version, &[], &seconds));
+        assert!(dashboard.take_view(Arc::clone(&view)));
+        let panels =
+            crate::live_projection::held_projection::view_panels("storage", &view, None).unwrap();
+        assert!(!panels.is_empty());
+        for panel in &panels {
+            assert_eq!(
+                drawn(&dashboard, &panel.id).lines,
+                panel.lines,
+                "{}",
+                panel.id
+            );
+        }
+        assert_eq!(dashboard.shown_second(), Some(newest));
+        assert_eq!(
+            dashboard.shown_summary()["storage"]["read_ops_per_second"].as_f64(),
+            storage_rates(&seconds[seconds.len() - 1])[0]
+        );
+    }
+    assert_eq!(dashboard.generation, generation);
+}
+
+#[test]
+fn a_rested_storage_page_shows_the_storage_of_a_newest_second_without_a_complete_reading() {
+    // Goal: a Storage page whose reader rests shows the bytes the View records for its newest
+    // second where the store holds no complete reading of that second, since the resting reader
+    // never reads that second, and shows the rates that record does not hold as missing. Method:
+    // the worker reads storage seconds 9,999 and 10,000, the View of them rests the reader, then
+    // a View adds 10,001 with the storage of its record alone, and what the readings show.
+    let first = storage_seconds(&[9_999, 10_000]);
+    let mut dashboard = rested_on("storage", &first, worker_reading(&first));
+    let newest = reading_at(10_001, 0);
+    let seconds = [first[0].clone(), first[1].clone(), newest.clone()];
+
+    assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
+
+    let shown = dashboard.shown_summary();
+    assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_shows_the_storage_of_the_record(&shown, &newest);
+}
+
+#[test]
+fn a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read() {
+    // Goal and method: those of the Overview test of a refused second, on the Storage page.
+    assert_shows_the_record_of_a_refused_second("storage");
+}
+
+#[test]
+fn a_rested_storage_page_reads_its_cards_of_a_refused_second_as_its_record_holds_them() {
+    // Goal: at a second the store refused a complete reading of, the Storage page's cards of the
+    // bytes read and written show the record's, and its cards of operations read unavailable,
+    // since no reading of that second holds them. Method: rest the Storage page over a refused
+    // second the worker read, whose bytes read and written differ, then the page's cards against
+    // the cards of a summary holding only the record's bytes read and written.
+    let (dashboard, refused) = rested_over_a_refused_second("storage");
+
+    let cards = texts(&summary::cards_of_summary(
+        "storage",
+        &dashboard.shown_summary(),
+    ));
+
+    let record = json!({"storage": {
+        "read_bps": refused.disk_read_bps, "write_bps": refused.disk_written_bps}});
+    assert_ne!(refused.disk_read_bps, refused.disk_written_bps);
+    assert_eq!(cards, texts(&summary::cards_of_summary("storage", &record)));
+    let readings: Vec<&str> = cards.iter().map(|card| card.1.as_str()).collect();
+    assert_ne!(readings[0], readings[1], "{cards:?}");
+    assert_eq!(readings[2], "Unavailable", "{cards:?}");
+    assert_eq!(readings[3], "Unavailable", "{cards:?}");
+}
+
+#[test]
+fn a_rested_storage_page_ranks_the_apps_of_the_views_newest_second() {
+    // Goal: once Storage's reader rests, its top Apps show the newest second the store holds, as
+    // Memory's do. Method: the worker's reading of storage seconds 9,999 and 10,000, which ranks
+    // no Apps, the View of them that rests the reader, then a View whose newest second, at
+    // 10,005, holds one App that read and wrote 6 MB of disk I/O, and the second the top Apps
+    // name and the App and amount of the disk ranking the page shows.
+    let first = storage_seconds(&[9_999, 10_000]);
+    let mut dashboard = rested_on("storage", &first, worker_reading(&first));
+    let seconds = storage_seconds(&[9_999, 10_000, 10_005]);
+    let mut newer = view(2, &[], &seconds);
+    newer.apps.replace(
+        2,
+        Arc::new(apps_with_disk_at(
+            &seconds[2],
+            &[("Brave Browser", 1_000_000, 6_000_000)],
+        )),
+    );
+
+    assert!(dashboard.take_view(Arc::new(newer)));
+
+    let (rankings, target) = dashboard.ranking_reading().unwrap();
+    let disk = rankings
+        .metrics
+        .iter()
+        .find(|ranking| ranking.metric == crate::live_rankings::Metric::Disk)
+        .unwrap();
+    assert!(dashboard.reader_rested());
+    assert_eq!(target.second, 10_005);
+    assert_eq!(disk.entries[0].app.name, "Brave Browser");
+    assert_eq!(disk.entries[0].amount, 6_000_000);
 }
 
 #[test]
@@ -2301,6 +2439,15 @@ fn network_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
     wall_seconds
         .iter()
         .map(|&wall_second| with_network_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
+/// The seconds at `wall_seconds`, each with a complete reading of the bytes its disks read and
+/// wrote and of the disks' rates, as the store holds a second it read.
+fn storage_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_storage_reading(reading_at(wall_second, 0)))
         .collect()
 }
 

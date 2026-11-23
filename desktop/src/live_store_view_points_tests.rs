@@ -24,8 +24,8 @@ const LIVE: u64 = HOUR_NEWEST - 500;
 /// draws a second apart.
 const LATER: u64 = 12_000;
 
-/// Runs the test `$name`, which takes the route of the page, on Overview, Memory and Network, the
-/// pages drawn from the store's View, as a test of its own each.
+/// Runs the test `$name`, which takes the route of the page, on Overview, Memory, Network and
+/// Storage, the pages drawn from the store's View, as a test of its own each.
 macro_rules! on_each_drawn_page {
     ($name:ident) => {
         mod $name {
@@ -42,6 +42,11 @@ macro_rules! on_each_drawn_page {
             #[test]
             fn network() {
                 super::$name("network");
+            }
+
+            #[test]
+            fn storage() {
+                super::$name("storage");
             }
         }
     };
@@ -60,6 +65,11 @@ macro_rules! on_each_drawn_page {
             #[gpui::test]
             fn network(cx: &mut gpui::TestAppContext) {
                 super::$name(cx, "network");
+            }
+
+            #[gpui::test]
+            fn storage(cx: &mut gpui::TestAppContext) {
+                super::$name(cx, "storage");
             }
         }
     };

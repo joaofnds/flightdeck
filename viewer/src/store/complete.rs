@@ -228,6 +228,13 @@ impl CompleteMachine {
         self.point.rates[rate.point_index()]
     }
 
+    /// The reading's `rate` over the interval before it, `None` where the readings give none,
+    /// as where no disk scan completed.
+    #[must_use]
+    pub fn storage_rate(&self, rate: super::StorageRate) -> Option<f64> {
+        self.point.storage.as_ref()?.rate(rate.point_index())
+    }
+
     /// The reservation charges one physical owner even when Views and sampled tails share it.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -408,6 +415,29 @@ impl CompleteMachine {
         for (rate, value) in super::NetworkRate::ALL.into_iter().zip(rates) {
             point.rates[rate.point_index()] = value;
         }
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// The complete reading of `second` whose storage reads the bytes the second's record holds
+    /// and `rates`, in the order of `StorageRate::ALL`, charged to `budget`, so a test outside
+    /// the viewer can give a second the complete reading the Storage page draws.
+    #[must_use]
+    pub fn of_storage(
+        second: &MachineSecond,
+        rates: [Option<f64>; super::StorageRate::ALL.len()],
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let mut storage = [None; crate::metrics::storage::RATE_FIELDS.len()];
+        storage[0] = second.disk_read_bps;
+        storage[1] = second.disk_written_bps;
+        for (rate, value) in super::StorageRate::ALL.into_iter().zip(rates) {
+            storage[rate.point_index()] = value;
+        }
+        let point = Point {
+            storage: Some(crate::metrics::storage::StoragePoint::of_rates(storage)),
+            ..Point::default()
+        };
 
         Self::of_point(second, point, budget)
     }

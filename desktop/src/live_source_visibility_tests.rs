@@ -686,6 +686,61 @@ fn a_hover_wakes_a_resting_network_page_s_reader_and_letting_go_rests_it_again(
     assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
 
+#[gpui::test]
+fn a_storage_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a followed Storage page shown again draws the store's newest View and asks its
+    // reader for no page, as Network does, since the View holds each second the page shows.
+    // Method: hide a Storage page drawn from a View, give it a newer View as it shows again,
+    // step its dashboard, then the second the page shows and the reader's mailbox.
+    let mut window = VisibilityHarness::open_resting_on(cx, "storage");
+    assert!(window.reader_rested());
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+    let generation = window.generation();
+    window.report(WindowVisibility::Visible);
+    window.take_view(&[reading_at(10_001, 0), reading_at(10_002, 0)]);
+
+    window.tick();
+
+    assert_eq!(window.shown_second(), Some(10_002));
+    assert!(window.reader_rested());
+    assert_eq!(window.generation(), generation);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
+fn a_hover_wakes_a_resting_storage_page_s_reader_and_letting_go_rests_it_again(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover of a second the View does not hold wakes the reader of a Storage page that
+    // rested it, as on Memory, and letting go of the hover rests the reader again once the page
+    // it asks for then arrives. The page ranks Apps, so the hover reads its second, as Memory's
+    // does. Method: rest the reader of a Storage page drawn from a View, hover a second the View
+    // does not hold, step the dashboard, answer the page's request, step it again and step the
+    // reader's mailbox, then end the hover, step the dashboard, answer the page it asked for,
+    // step it again and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_resting_on(cx, "storage");
+    window.hover_with_pointer();
+    window.tick();
+    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
+    window.tick();
+    assert!(!window.reader_rested());
+    assert_eq!(window.reader.receive(), (Received::Taken, true));
+    assert_eq!(Some(window.reader_generation()), window.hover_read());
+
+    window.leave();
+    window.tick();
+    assert!(!window.hovering());
+    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
+
+    window.tick();
+
+    assert!(window.reader_rested());
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
 struct VisibilityHarness {
     cx: TestAppContext,
     window: WindowHandle<LiveDashboard>,

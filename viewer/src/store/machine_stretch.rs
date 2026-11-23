@@ -7,7 +7,9 @@ use model::rates::number;
 pub use model::summary::MachinePlace;
 use model::summary::{CategorySummary, GaugeSummary, RateSummary};
 
-use super::{MachineSecond, MemoryRate, NetworkRate, STRETCHES_HELD_MAX, STRETCHES_MAX};
+use super::{
+    MachineSecond, MemoryRate, NetworkRate, STRETCHES_HELD_MAX, STRETCHES_MAX, StorageRate,
+};
 use crate::EARLIER_STRIDE_SECONDS;
 
 /// The changes of category a stretch keeps. One run's stretch holds a reading a second.
@@ -18,10 +20,10 @@ const _: () = {
     assert!(EARLIER_STRIDE_SECONDS == 10);
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
-    // `MachineStretch`, so the Mac's readings cost a store about 2.8 MiB.
-    assert!(size_of::<MachineStretch>() <= 8 * 1024);
+    // `MachineStretch`, so the Mac's readings cost a store about 3.3 MiB.
+    assert!(size_of::<MachineStretch>() <= 9 * 1024);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 2_900 * 1024);
+    assert!(allocated * size_of::<MachineStretch>() <= 3_400 * 1024);
 };
 
 pub type Gauge = GaugeSummary<MachinePlace>;
@@ -41,6 +43,8 @@ pub struct MachineStretch {
     pub network_sent_bps: Rate,
     /// The rates of `NetworkRate::ALL`, in its order.
     pub network_rates: [Rate; NetworkRate::ALL.len()],
+    /// The rates of `StorageRate::ALL`, in its order.
+    pub storage_rates: [Rate; StorageRate::ALL.len()],
     pub memory_app_bytes: Gauge,
     pub memory_compressed_bytes: Gauge,
     pub memory_total_bytes: Gauge,
@@ -92,6 +96,12 @@ impl MachineStretch {
         &self.network_rates[rate.index()]
     }
 
+    /// The stretch's `rate`.
+    #[must_use]
+    pub fn storage_rate(&self, rate: StorageRate) -> &Rate {
+        &self.storage_rates[rate.index()]
+    }
+
     fn add_rates(&mut self, second: &MachineSecond, follows: bool, place: &MachinePlace) {
         let place = *place;
         let rate = |value: Option<f64>| value.zip(second.elapsed_ns);
@@ -127,6 +137,9 @@ impl MachineStretch {
         }
         for (series, network_rate) in self.network_rates.iter_mut().zip(NetworkRate::ALL) {
             series.push(rate(second.network_rate(network_rate)), follows, place);
+        }
+        for (series, storage_rate) in self.storage_rates.iter_mut().zip(StorageRate::ALL) {
+            series.push(rate(second.storage_rate(storage_rate)), follows, place);
         }
     }
 

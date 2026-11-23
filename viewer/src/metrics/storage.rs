@@ -6,7 +6,7 @@ use super::{compatible, get, number, only};
 use crate::metric_view::{Sources, View};
 use crate::session::Observation;
 
-const RATE_FIELDS: [&str; 8] = [
+pub(crate) const RATE_FIELDS: [&str; 8] = [
     "read_bps",
     "write_bps",
     "read_ops_per_second",
@@ -33,8 +33,24 @@ struct DevicePoint {
 }
 
 impl StoragePoint {
+    /// The Mac's storage at a second whose rates over all its disks are `rates`, in the order of
+    /// `RATE_FIELDS`, as a test gives a second the readings the Storage page draws.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn of_rates(rates: [Option<f64>; RATE_FIELDS.len()]) -> Self {
+        Self {
+            state: ScanState::Complete,
+            rates,
+            devices: Vec::new(),
+        }
+    }
+
     pub fn byte_rates(&self) -> [Option<f64>; 2] {
         [self.rates[0], self.rates[1]]
+    }
+
+    /// The rate over all the disks at `index` of `RATE_FIELDS`.
+    pub(crate) fn rate(&self, index: usize) -> Option<f64> {
+        self.rates[index]
     }
 
     pub fn json(&self) -> Value {

@@ -116,7 +116,7 @@ boundaries, recovery, diagnostic delivery and remaining resource limits in detai
 
 `viewer::store::Store` retains the live Mac's machine and App readings and publishes
 immutable `View`s. The Store owns its ingestion thread and bounded buffers. The live
-Overview, Memory and Network pages project a View into their machine charts and
+Overview, Memory, Network and Storage pages project a View into their machine charts and
 readouts, and Overview and the Memory, CPU, Energy, Storage and GPU pages draw their
 charts by App from one, without querying the recording on the UI thread.
 
@@ -131,17 +131,17 @@ flowchart TD
     Ring[Live ring] --> Store
     Saved --> Worker[Page query worker]
     Store --> View[Immutable View]
-    View --> Machine[Machine charts and readouts of live Overview, Memory and Network]
+    View --> Machine[Machine charts and readouts of live Overview, Memory, Network and Storage]
     View --> AppCharts[Charts by App of Overview and the Memory, CPU, Energy, Storage and GPU pages]
     Worker --> Pages[Bootstrap, inspection and the other readings of other pages]
     Machine -->|detail absent from View| Worker
 ```
 
-Once Overview, Memory or Network has complete initial histories and follows a Store
-View, its page worker rests, and any chart by App it shows comes from that View as well.
+Once Overview, Memory, Network or Storage has complete initial histories and follows a
+Store View, its page worker rests, and any chart by App it shows comes from that View as well.
 A hover retained in the View reads there; a missing detail can request the worker. The
 Store continues ingesting while another page follows the live Mac. Once the worker has answered
-them, the CPU, Energy, Storage and GPU pages draw their chart by App from the newest View,
+them, the CPU, Energy and GPU pages draw their chart by App from the newest View,
 since the worker's App histories stop 960 s back and the View holds every App's ten-second
 sums for the loaded hour. A View older than a reading that brought the chart by App draws
 nothing, so the chart never holds less than the worker read. Their other readings, and
@@ -177,14 +177,14 @@ drawn again show the seconds they showed when it was held.
 
 | State before hiding or closing | Restore behavior |
 | --- | --- |
-| Live Overview, Memory or Network, five minutes selected | Keep five minutes selected, reconcile to the newest endpoint and continue live |
-| Live Overview, Memory or Network, another range selected | Preserve that range and follow the newest endpoint |
+| Live Overview, Memory, Network or Storage, five minutes selected | Keep five minutes selected, reconcile to the newest endpoint and continue live |
+| Live Overview, Memory, Network or Storage, another range selected | Preserve that range and follow the newest endpoint |
 | Held second whose reading is complete over the page's readings | Keep the held second, its window and its View without a read |
 | Held second whose reading is still being read, or whose page has no readings yet | Read the page whose context ends at the held window's last second, then the held second's own reading |
 | Complete pinned snapshot | Keep the exact observation and range without a live read |
 | Pin with incomplete histories and a running reader, or with no retained snapshot | Restore that selected observation through the page worker without ingesting new live arrivals |
 | Pin with a retained snapshot whose reader stopped | Keep the snapshot and range without a new request; canceled histories are no longer pending |
-| Another page, or one of those three with incomplete initial histories | Restore through the existing page-worker path |
+| Another page, or one of those four with incomplete initial histories | Restore through the existing page-worker path |
 
 ```mermaid
 flowchart TD
@@ -193,7 +193,7 @@ flowchart TD
     Held -->|still being read| HeldRead[Read the page ending at the held window's last second, then the held second]
     Held -->|no| Pin{Complete pin?}
     Pin -->|yes| Keep[Keep snapshot and range; readers stay parked]
-    Pin -->|no| Eligible{Live Overview, Memory or Network with complete initial histories and Store?}
+    Pin -->|no| Eligible{Live Overview, Memory, Network or Storage with complete initial histories and Store?}
     Eligible -->|no| Worker[Restore through page worker]
     Eligible -->|yes| Covered{Loaded hour held and unread publications retained?}
     Covered -->|yes| Delta[Keep cached history and predecessors; read bounded ring delta]

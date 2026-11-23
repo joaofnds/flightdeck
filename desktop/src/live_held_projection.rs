@@ -7,7 +7,7 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 use viewer::store::{
     AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, NetworkRate,
-    Reduction, Second, View,
+    Reduction, Second, StorageRate, View,
 };
 
 use super::{
@@ -59,6 +59,7 @@ fn view_panels_specifications(
         "overview" => Ok(super::overview(levels)),
         "memory" => Ok(super::memory_specifications()),
         "network" => Ok(super::network()),
+        "storage" => Ok(super::storage_specifications()),
         _ => Err(format!("The store draws no charts of {route}")),
     }
 }
@@ -421,9 +422,14 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, key, None) if let Some(rate) = network_rate_named(key) => {
             stretch_reach_measured(stretch.network_rate(rate))
         }
-        (None, "network_apps_bytes_per_second", None) => None,
+        // No reading records traffic by App or the storage area's temperature, so their charts
+        // draw none.
+        (None, "network_apps_bytes_per_second" | "storage_area_celsius", None) => None,
         (Some("storage"), "read_bps", None) => stretch_reach_measured(&stretch.disk_read_bps),
         (Some("storage"), "write_bps", None) => stretch_reach_measured(&stretch.disk_written_bps),
+        (Some("storage"), key, None) if let Some(rate) = storage_rate_named(key) => {
+            stretch_reach_measured(stretch.storage_rate(rate))
+        }
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
         (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
         (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
@@ -485,10 +491,14 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, key, None) if let Some(rate) = network_rate_named(key) => {
             narrow(second.network_rate(rate))
         }
-        // No reading records traffic by App, so its chart draws none wherever it is drawn.
-        (None, "network_apps_bytes_per_second", None) => None,
+        // No reading records traffic by App or the storage area's temperature, so their charts
+        // draw none wherever they are drawn.
+        (None, "network_apps_bytes_per_second" | "storage_area_celsius", None) => None,
         (Some("storage"), "read_bps", None) => narrow(second.disk_read_bps),
         (Some("storage"), "write_bps", None) => narrow(second.disk_written_bps),
+        (Some("storage"), key, None) if let Some(rate) = storage_rate_named(key) => {
+            narrow(second.storage_rate(rate))
+        }
         (None, "power_watts", None) => second.power_watts,
         (None, "soc_celsius", None) => second.soc_celsius,
         (None, FAN_MEAN_KEY, None) => second.fan_mean_rpm,
@@ -511,6 +521,12 @@ fn memory_rate_named(key: &str) -> Option<MemoryRate> {
 /// second's complete reading holds.
 fn network_rate_named(key: &str) -> Option<NetworkRate> {
     NetworkRate::ALL.into_iter().find(|rate| rate.key() == key)
+}
+
+/// The rate of the disks' operation, error and service time counters a trend point names `key`
+/// inside its `storage`, which only a second's complete reading holds.
+fn storage_rate_named(key: &str) -> Option<StorageRate> {
+    StorageRate::ALL.into_iter().find(|rate| rate.key() == key)
 }
 
 /// The nearest `f32` to `value`.

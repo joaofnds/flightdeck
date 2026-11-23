@@ -193,6 +193,58 @@ const _: () = {
     assert!(NetworkRate::ALL.len() + 2 == TRAFFIC_RATES.len());
 };
 
+/// A rate of the Mac's disks the Storage page draws beside the bytes read and written, as a
+/// complete reading holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageRate {
+    ReadOperations,
+    WriteOperations,
+    ReadErrors,
+    WriteErrors,
+    ReadMeanMilliseconds,
+    WriteMeanMilliseconds,
+}
+
+impl StorageRate {
+    pub const ALL: [Self; 6] = [
+        Self::ReadOperations,
+        Self::WriteOperations,
+        Self::ReadErrors,
+        Self::WriteErrors,
+        Self::ReadMeanMilliseconds,
+        Self::WriteMeanMilliseconds,
+    ];
+
+    /// The name a trend point gives the rate, inside its `storage`.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        crate::metrics::storage::RATE_FIELDS[self.point_index()]
+    }
+
+    /// Where `ALL` holds the rate.
+    pub(super) fn index(self) -> usize {
+        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
+            unreachable!("`ALL` holds every rate");
+        };
+        index
+    }
+
+    /// Where a complete reading's storage holds the rate, after the bytes read and written.
+    fn point_index(self) -> usize {
+        match self {
+            Self::ReadOperations => 2,
+            Self::WriteOperations => 3,
+            Self::ReadErrors => 4,
+            Self::WriteErrors => 5,
+            Self::ReadMeanMilliseconds => 6,
+            Self::WriteMeanMilliseconds => 7,
+        }
+    }
+}
+
+// The storage rates are the bytes read and written, then `StorageRate::ALL`.
+const _: () = assert!(StorageRate::ALL.len() + 2 == crate::metrics::storage::RATE_FIELDS.len());
+
 /// External traffic over a second, in bytes per second.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Traffic {
@@ -400,6 +452,14 @@ impl MachineSecond {
     pub fn network_rate(&self, rate: NetworkRate) -> Option<f64> {
         self.complete()
             .and_then(|complete| complete.network_rate(rate))
+    }
+
+    /// The second's `rate` as its complete reading holds it, `None` where the second has no
+    /// complete reading, as an unread or refused second has none.
+    #[must_use]
+    pub fn storage_rate(&self, rate: StorageRate) -> Option<f64> {
+        self.complete()
+            .and_then(|complete| complete.storage_rate(rate))
     }
 
     #[must_use]

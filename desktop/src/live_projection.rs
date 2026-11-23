@@ -1367,11 +1367,7 @@ fn specifications(route: &str, points: &JoinedPoints<'_>) -> Result<Vec<Specific
         ],
         "energy" => energy(points)?,
         "network" => network(),
-        "storage" => {
-            let mut specifications = resource_projection::storage();
-            specifications.push(storage_temperature());
-            specifications
-        }
+        "storage" => storage_specifications(),
         "battery" => resource_projection::battery(),
         "apps" => app_specifications(),
         _ => Vec::new(),
@@ -1730,6 +1726,13 @@ fn memory_specifications() -> Vec<Specification> {
 }
 
 pub const STORAGE_TEMPERATURE_ID: &str = "live-storage-temperature";
+
+/// The Storage page's machine charts, drawn from the worker's readings and the store's View.
+fn storage_specifications() -> Vec<Specification> {
+    let mut specifications = resource_projection::storage();
+    specifications.push(storage_temperature());
+    specifications
+}
 
 fn storage_temperature() -> Specification {
     let mut specification = specification(

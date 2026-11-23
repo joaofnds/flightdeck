@@ -93,7 +93,7 @@ pub(crate) use second::reading_at;
 pub use second::{
     BatterySecond, CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious,
     MachineAdmission, MachineCaptureError, MachineSecond, MemoryRate, MemorySecond, NetworkRate,
-    Reading, Traffic, readings,
+    Reading, StorageRate, Traffic, readings,
 };
 pub use stretch::AppsStretch;
 

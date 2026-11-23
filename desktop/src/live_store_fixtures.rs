@@ -8,7 +8,7 @@ use collector::recording::identity_text;
 use collector::ring::Identity;
 use serde_json::{Value, json};
 use viewer::store::{
-    AppsSecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Traffic, View,
+    AppsSecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, StorageRate, Traffic, View,
 };
 
 use crate::live_inventory::{PerformanceLevel, performance_levels};
@@ -198,6 +198,40 @@ pub fn with_network_rates(
 ) -> MachineSecond {
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
     let complete = viewer::store::CompleteMachine::of_network(&second, rates, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
+/// `second` with a complete reading of the bytes its disks read and wrote and of the disks'
+/// operation, error and mean service time rates, as the store holds a second it read. Each rate
+/// differs from the other rates and from the rates of every other second.
+pub fn with_storage_reading(second: MachineSecond) -> MachineSecond {
+    let rates = storage_rates(&second);
+    with_storage_rates(second, rates)
+}
+
+/// The rates `with_storage_reading` gives `second`, in the order of `StorageRate::ALL`.
+pub fn storage_rates(second: &MachineSecond) -> [Option<f64>; StorageRate::ALL.len()] {
+    let wall_second = f64::from(u32::try_from(second.wall_ns / NANOSECONDS_PER_SECOND).unwrap());
+
+    [
+        Some(wall_second * 5.0 + 0.25),
+        Some(wall_second * 3.0 + 0.5),
+        Some(wall_second / 2.0 + 0.75),
+        Some(wall_second / 16.0),
+        Some(wall_second / 100.0 + 0.125),
+        Some(wall_second / 50.0 + 0.375),
+    ]
+}
+
+/// `second` with a complete reading of the bytes its disks read and wrote and of the disks'
+/// rates `rates`.
+pub fn with_storage_rates(
+    mut second: MachineSecond,
+    rates: [Option<f64>; StorageRate::ALL.len()],
+) -> MachineSecond {
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_storage(&second, rates, &budget);
     second.complete = viewer::store::CompleteMachineState::Available(complete);
     second
 }

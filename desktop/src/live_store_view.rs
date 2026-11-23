@@ -1,10 +1,10 @@
 //! The page drawn from the store's newest View, which the window takes each tick. While they
-//! follow the newest second, Overview, Memory and Network draw their machine charts and readouts
-//! from it. Overview also draws its CPU, memory, energy and disk charts by App, its top Apps and
-//! its hardware figure from it, and Memory its chart of resident memory by App and its top Apps.
-//! The CPU, Energy, Storage and GPU pages draw only their chart by App from it while they follow
-//! the newest second, and a chosen second, a hover's reading and every other chart draw from the
-//! worker's readings.
+//! follow the newest second, Overview, Memory, Network and Storage draw their machine charts and
+//! readouts from it. Overview also draws its CPU, memory, energy and disk charts by App, its top
+//! Apps and its hardware figure from it, Memory its chart of resident memory by App and its top
+//! Apps, and Storage its chart of disk bytes by App and its top Apps. The CPU, Energy and GPU
+//! pages draw only their chart by App from it while they follow the newest second, and a chosen
+//! second, a hover's reading and every other chart draw from the worker's readings.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -244,8 +244,8 @@ impl StorePanels {
 
 impl LiveDashboard {
     /// Takes `view`, the store's newest, and draws from it the charts the page draws from the
-    /// store, the machine charts of Overview, Memory and Network among them. Answers whether the
-    /// page changed.
+    /// store, the machine charts of Overview, Memory, Network and Storage among them. Answers
+    /// whether the page changed.
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
         self.store_view_place(view);
         // The hover holds the charts where they were until it ends.
@@ -1162,8 +1162,9 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
 
     // The second's record keeps app memory with the purgeable part already taken out, and holds
     // neither anonymous, purgeable nor file-backed memory, so those and the cached memory they
-    // make stay unknown. It keeps the bytes the network moved but no packets or errors, so those
-    // stay unknown too.
+    // make stay unknown. It keeps the bytes the network moved but no packets or errors, and the
+    // bytes the disks read and wrote but no operations, errors or service times, so those stay
+    // unknown too.
     json!({
         "memory_app_bytes": memory.and_then(|memory| memory.app_bytes),
         "memory_wired_bytes": memory.map(|memory| memory.wired_bytes),
@@ -1177,7 +1178,7 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
         "gpu_active_percent": second.gpu_active_percent,
         "pressure": pressure,
         "power_watts": second.power_watts,
-        "storage": {"read_bps": second.disk_read_bps},
+        "storage": {"read_bps": second.disk_read_bps, "write_bps": second.disk_written_bps},
         "network_rx_bps": second.network.map(|traffic| traffic.received_bps),
         "network_tx_bps": second.network.map(|traffic| traffic.sent_bps),
         "soc_celsius": second.soc_celsius,
@@ -1277,9 +1278,9 @@ fn draw_store_view_splice_apps(route: &str, panels: &mut Vec<Rc<Panel>>, apps: &
 
 /// Whether the page `route` draws its machine charts and readouts from the store's View, and its
 /// top Apps where it shows any, while it follows the live Mac's newest second, so its reader
-/// rests. Overview, Memory and Network do. Every gate that lets a page
-/// draw from the View, rest its reader on it and resume from it asks this, so a page joins them
-/// by being named here.
+/// rests. Overview, Memory, Network and Storage do. Every gate that lets a page draw from the
+/// View, rest its reader on it and resume from it asks this, so a page joins them by being named
+/// here.
 pub(crate) fn store_view_draws_machine(route: &str) -> bool {
     store_panels_machine(route).is_some()
 }
@@ -1292,6 +1293,7 @@ fn store_panels_machine(route: &str) -> Option<&'static str> {
         "overview" => Some("overview"),
         "memory" => Some("memory"),
         "network" => Some("network"),
+        "storage" => Some("storage"),
         _ => None,
     }
 }

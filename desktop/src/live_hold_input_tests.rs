@@ -17,6 +17,7 @@ use crate::live_store_app_fixtures::{
 };
 use crate::live_store_fixtures::{
     reading_at, summary_point, trend_point, view, with_memory_reading, with_network_reading,
+    with_storage_reading,
 };
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
@@ -3353,9 +3354,11 @@ fn the_network_readouts_of_the_views_newest_second_read_as_the_workers_reading_o
         read["network_rx_packets_per_second"],
         expected["network_rx_packets_per_second"]
     );
-    harness
-        .driver
-        .assert_network_readouts(&view, &newest.complete().unwrap().summary(newest));
+    harness.driver.assert_readouts(
+        "network",
+        &view,
+        &newest.complete().unwrap().summary(newest),
+    );
     harness.teardown();
 }
 
@@ -3383,7 +3386,7 @@ fn pause_on_a_rested_network_page_shows_the_views_newest_second_without_reading(
     );
     let newest = view.seconds.last().unwrap();
     let expected = newest.complete().unwrap().summary(newest);
-    harness.driver.assert_network_readouts(&view, &expected);
+    harness.driver.assert_readouts("network", &view, &expected);
     harness.teardown();
 }
 
@@ -3408,7 +3411,135 @@ fn holding_an_older_second_the_view_lacks_on_network_reads_the_workers_reading_o
 
     assert_eq!(harness.driver.shown_reading_second(), Some(TAIL));
     let expected = trend_point(&reading_at(TAIL, 0));
-    harness.driver.assert_network_readouts(&view, &expected);
+    harness.driver.assert_readouts("network", &view, &expected);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_followed_storage_page_at_the_hour_draws_its_older_tail_from_the_view(cx: &mut TestAppContext) {
+    // Goal: a followed Storage page whose reader rests draws the older part of the hour from
+    // the store's View once the last 60 minutes are picked, with no new reading, as Network does.
+    // Method: Storage over the worker's first reply and the View of the hour at the newest
+    // fifteen minutes, a tick that rests the reader, then the last 60 minutes, and the commands
+    // the reader was sent, the window the charts span, each machine chart of Storage against
+    // the View's chart fitted to that window, and where the throughput chart starts. The hour
+    // holds no complete reading, so only the bytes read and written draw points, and the
+    // operation, service time and error charts draw none on either side.
+    let mut harness = InputHarness::open_route(cx, "storage");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.tick_page();
+    assert!(harness.driver.reader_rested());
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.show_range(Range::Last(3_600));
+
+    assert_eq!(harness.driver.reader_commands(), commands);
+    let window = harness.driver.view_window().unwrap();
+    assert_eq!(window.span, 3_600);
+    let (view, _) = hour();
+    let drawn = harness.driver.drawn_panels();
+    let machine =
+        crate::live_projection::held_projection::view_panels("storage", &view, None).unwrap();
+    assert!(!machine.is_empty());
+    for mut expected in machine {
+        crate::time_range::zoom(std::rc::Rc::make_mut(&mut expected), window);
+        let panel = drawn.iter().find(|panel| panel.id == expected.id).unwrap();
+        assert_eq!(panel.lines, expected.lines, "{}", expected.id);
+        assert_eq!(panel.positions, expected.positions, "{}", expected.id);
+    }
+    let throughput = drawn
+        .iter()
+        .find(|panel| panel.id == "live-storage-throughput")
+        .unwrap();
+    let first = throughput.positions.as_ref().unwrap()[0];
+    assert!(first < window.fraction_of(HOUR_NEWEST - 900).unwrap());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_storage_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a followed Storage page whose reader rests renders every readout of the newest
+    // second the store's View shows as the worker's reading of that second reads it. Method:
+    // Storage over a View of storage seconds up to 10,005, each with a complete reading whose
+    // every rate differs from every other second's, and the worker's reading of 10,000, the
+    // reader rested, then the readings the page shows, the cards and the chart legends it
+    // renders against what the worker's summary of 10,005 reads.
+    let mut harness = InputHarness::open_route(cx, "storage");
+    let view = harness.driver.show_storage_view_over_tail();
+
+    harness.driver.rest_reader();
+
+    let newest = view.seconds.last().unwrap();
+    let read = summary_point(&view.seconds[1]);
+    let expected = summary_point(newest);
+    assert_ne!(
+        read["storage"]["read_ops_per_second"],
+        expected["storage"]["read_ops_per_second"]
+    );
+    harness.driver.assert_readouts(
+        "storage",
+        &view,
+        &newest.complete().unwrap().summary(newest),
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pause_on_a_rested_storage_page_shows_the_views_newest_second_without_reading(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Pause on a followed Storage page whose reader rests holds the View's newest second,
+    // which the worker never read, shows that second's readings as the View records them and
+    // asks the reader for nothing, as on Network. Method: Storage over a View of storage seconds
+    // up to 10,005 and the worker's readings up to 10,000, the reader rested, Pause, then the
+    // commands the reader was sent, the second the readings show, and the readings, cards and
+    // chart legends against those of the View's complete reading of 10,005.
+    let mut harness = InputHarness::open_route(cx, "storage");
+    let view = harness.driver.show_storage_view_over_tail();
+    harness.driver.rest_reader();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.reader_commands(), commands);
+    assert_eq!(
+        harness.driver.shown_reading_second(),
+        Some(TAIL_VIEW_NEWEST)
+    );
+    let newest = view.seconds.last().unwrap();
+    let expected = newest.complete().unwrap().summary(newest);
+    harness.driver.assert_readouts("storage", &view, &expected);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn holding_an_older_second_the_view_lacks_on_storage_reads_the_workers_reading_of_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a second held on a followed Storage page in the View's older tail, of which the View
+    // keeps no record the page shows, shows the worker's reading of that second, as on Network.
+    // Method: Storage over a View whose older tail holds 9,500 without a complete reading, over
+    // the worker's readings that hold 9,500 in their older tail, a hover there that reads its
+    // second, a click there and the answer to that read, then the second the readings show, and
+    // the readings, cards and chart legends against the summary the worker's reading of 9,500
+    // carries.
+    let mut harness = InputHarness::open_route(cx, "storage");
+    let view = harness.driver.show_storage_view_over_tail();
+    harness
+        .driver
+        .hover_second_on("live-storage-operations-plot", TAIL);
+    harness.driver.tick_hover();
+    harness
+        .driver
+        .click_second_on("live-storage-operations-plot", TAIL);
+
+    harness.driver.answer_held_read_of(&reading_at(TAIL, 0));
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(TAIL));
+    let expected = trend_point(&reading_at(TAIL, 0));
+    harness.driver.assert_readouts("storage", &view, &expected);
     harness.teardown();
 }
 
@@ -3442,6 +3573,15 @@ impl InputDriver {
     fn show_network_view_over_tail(&mut self) -> Arc<viewer::store::View> {
         let seconds: Vec<_> = (9_999..=TAIL_VIEW_NEWEST)
             .map(|second| with_network_reading(reading_at(second, 0)))
+            .collect();
+        self.show_view_of_over_tail(&seconds)
+    }
+
+    /// Shows Storage over the View of the storage seconds 9,999 to 10,005, as
+    /// `show_network_view_over_tail` shows Network over the View of network seconds.
+    fn show_storage_view_over_tail(&mut self) -> Arc<viewer::store::View> {
+        let seconds: Vec<_> = (9_999..=TAIL_VIEW_NEWEST)
+            .map(|second| with_storage_reading(reading_at(second, 0)))
             .collect();
         self.show_view_of_over_tail(&seconds)
     }
@@ -3527,10 +3667,11 @@ impl InputDriver {
         self.assert_chart_legends_read("memory", view, summary);
     }
 
-    /// Asserts that the Network page shows the readings of `expected`: the readings it reads,
-    /// and what `assert_network_page_reads` reads of them.
-    fn assert_network_readouts(
+    /// Asserts that the page `route` shows the readings of `expected`: the readings it reads, and
+    /// what `assert_page_reads` reads of them.
+    fn assert_readouts(
         &mut self,
+        route: &str,
         view: &viewer::store::View,
         expected: &serde_json::Value,
     ) {
@@ -3538,22 +3679,23 @@ impl InputDriver {
             dashboard.shown_summary().into_owned()
         });
         assert_eq!(&shown, expected);
-        self.assert_network_page_reads(view, expected);
+        self.assert_page_reads(route, view, expected);
     }
 
-    /// Asserts that the Network page renders what `summary` reads: the text of each summary card,
+    /// Asserts that the page `route` renders what `summary` reads: the text of each summary card,
     /// and the reading of each line of each of its machine charts of `view` that the chart's
     /// legend renders.
-    fn assert_network_page_reads(
+    fn assert_page_reads(
         &mut self,
+        route: &str,
         view: &viewer::store::View,
         summary: &serde_json::Value,
     ) {
         assert_eq!(
             self.readout_texts(),
-            texts(&summary::cards_of_summary("network", summary))
+            texts(&summary::cards_of_summary(route, summary))
         );
-        self.assert_chart_legends_read("network", view, summary);
+        self.assert_chart_legends_read(route, view, summary);
     }
 
     /// Asserts that the page `route` renders what `summary` reads on each line of each of its
