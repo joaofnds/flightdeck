@@ -7,7 +7,7 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 use viewer::store::{
     AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, NetworkRate,
-    Reduction, Second, StorageRate, View,
+    PointRate, Reduction, Second, StorageRate, View,
 };
 
 use super::{
@@ -413,13 +413,13 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "memory_used_bytes", None) => stretch_reach_measured(&stretch.memory_used_bytes),
         (None, "swap_used_bytes", None) => stretch_reach_measured(&stretch.swap_used_bytes),
         (None, "swap_total_bytes", None) => stretch_reach_measured(&stretch.swap_total_bytes),
-        (None, key, None) if let Some(rate) = memory_rate_named(key) => {
+        (None, key, None) if let Some(rate) = rate_named::<MemoryRate>(key) => {
             stretch_reach_measured(stretch.memory_rate(rate))
         }
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => stretch_reach_measured(&stretch.network_received_bps),
         (None, "network_tx_bps", None) => stretch_reach_measured(&stretch.network_sent_bps),
-        (None, key, None) if let Some(rate) = network_rate_named(key) => {
+        (None, key, None) if let Some(rate) = rate_named::<NetworkRate>(key) => {
             stretch_reach_measured(stretch.network_rate(rate))
         }
         // No reading records traffic by App or the storage area's temperature, so their charts
@@ -427,7 +427,7 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "network_apps_bytes_per_second" | "storage_area_celsius", None) => None,
         (Some("storage"), "read_bps", None) => stretch_reach_measured(&stretch.disk_read_bps),
         (Some("storage"), "write_bps", None) => stretch_reach_measured(&stretch.disk_written_bps),
-        (Some("storage"), key, None) if let Some(rate) = storage_rate_named(key) => {
+        (Some("storage"), key, None) if let Some(rate) = rate_named::<StorageRate>(key) => {
             stretch_reach_measured(stretch.storage_rate(rate))
         }
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
@@ -481,14 +481,14 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, "pressure", None) => memory.map(|memory| f32::from(pressure_level(memory.pressure))),
         (None, "swap_used_bytes", None) => bytes(memory.map(|memory| memory.swap_used_bytes)),
         (None, "swap_total_bytes", None) => bytes(memory.map(|memory| memory.swap_total_bytes)),
-        (None, key, None) if let Some(rate) = memory_rate_named(key) => {
+        (None, key, None) if let Some(rate) = rate_named::<MemoryRate>(key) => {
             narrow(second.memory_rate(rate))
         }
         // The collector records neither, so their charts draw no reading wherever they are drawn.
         (None, "pageout_bytes_per_second" | "memory_area_celsius", None) => None,
         (None, "network_rx_bps", None) => narrow(network.map(|traffic| traffic.received_bps)),
         (None, "network_tx_bps", None) => narrow(network.map(|traffic| traffic.sent_bps)),
-        (None, key, None) if let Some(rate) = network_rate_named(key) => {
+        (None, key, None) if let Some(rate) = rate_named::<NetworkRate>(key) => {
             narrow(second.network_rate(rate))
         }
         // No reading records traffic by App or the storage area's temperature, so their charts
@@ -496,7 +496,7 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, "network_apps_bytes_per_second" | "storage_area_celsius", None) => None,
         (Some("storage"), "read_bps", None) => narrow(second.disk_read_bps),
         (Some("storage"), "write_bps", None) => narrow(second.disk_written_bps),
-        (Some("storage"), key, None) if let Some(rate) = storage_rate_named(key) => {
+        (Some("storage"), key, None) if let Some(rate) = rate_named::<StorageRate>(key) => {
             narrow(second.storage_rate(rate))
         }
         (None, "power_watts", None) => second.power_watts,
@@ -511,22 +511,11 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
 
 pub(crate) use viewer::store::pressure_level;
 
-/// The rate of memory's counters a trend point names `key`, which only a second's complete
-/// reading holds.
-fn memory_rate_named(key: &str) -> Option<MemoryRate> {
-    MemoryRate::ALL.into_iter().find(|rate| rate.key() == key)
-}
-
-/// The rate of the network's packet and error counters a trend point names `key`, which only a
-/// second's complete reading holds.
-fn network_rate_named(key: &str) -> Option<NetworkRate> {
-    NetworkRate::ALL.into_iter().find(|rate| rate.key() == key)
-}
-
-/// The rate of the disks' operation, error and service time counters a trend point names `key`
-/// inside its `storage`, which only a second's complete reading holds.
-fn storage_rate_named(key: &str) -> Option<StorageRate> {
-    StorageRate::ALL.into_iter().find(|rate| rate.key() == key)
+/// The rate of the family `Family` a trend point names `key`, which only a second's complete
+/// reading holds: memory's counters, the network's packets and errors, or the disks' operations,
+/// errors and service times inside the point's `storage`.
+fn rate_named<Family: PointRate>(key: &str) -> Option<Family> {
+    Family::RATES.iter().copied().find(|rate| rate.key() == key)
 }
 
 /// The nearest `f32` to `value`.

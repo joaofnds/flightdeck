@@ -5,7 +5,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::{Value, json};
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, BatterySecond, Cohorts, MachineSecond, Totals, View};
+use viewer::store::{
+    AppRow, AppsSecond, BatterySecond, Cohorts, MachineSecond, PointRate, Totals, View,
+};
 
 use super::super::LiveDashboard;
 use crate::data::{Line, Panel};

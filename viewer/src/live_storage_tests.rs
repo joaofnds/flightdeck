@@ -1,6 +1,8 @@
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::ring::{DictionaryCapacity, IdentityPublication, SupplementalReadings};
 
+use crate::store::PointRate;
+
 #[test]
 fn follows_selects_and_reopens_disk_values_with_observation_gaps() {
     // Goal: exact per-device rates and unavailable observations survive the full recorded path.

@@ -1,3 +1,5 @@
+use crate::store::PointRate;
+
 /// The wall second of the first reading the fixture publishes.
 const EARLIER_BASE: u64 = 10_000;
 /// The limit of the tail most tests read: its readings span minutes 1 to 12, and minute 0 holds

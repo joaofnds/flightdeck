@@ -5,8 +5,8 @@ use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::system::{FactText, PerformanceLevel};
 
 use super::{
-    BatterySecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, Reading, StorageRate,
-    Traffic, readings,
+    BatterySecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, PointRate, Reading,
+    StorageRate, Traffic, readings,
 };
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,

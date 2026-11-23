@@ -88,6 +88,26 @@ pub struct MemorySecond {
     pub swap_total_bytes: u64,
 }
 
+/// A family of rates the complete reading of a second holds and the second's record does not,
+/// each named by the key a trend point gives it, which a stretch keeps in the order of `RATES`.
+pub trait PointRate: Copy + PartialEq + 'static {
+    /// Every rate of the family, in the order a stretch keeps them.
+    const RATES: &'static [Self];
+
+    /// The name a trend point gives the rate.
+    #[must_use]
+    fn key(self) -> &'static str;
+
+    /// Where `RATES` holds the rate.
+    #[must_use]
+    fn index(self) -> usize {
+        let Some(index) = Self::RATES.iter().position(|rate| *rate == self) else {
+            unreachable!("`RATES` holds every rate");
+        };
+        index
+    }
+}
+
 /// A rate of memory's counters the complete reading of a second holds and the second does not,
 /// since only the Memory page draws it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,20 +128,6 @@ impl MemoryRate {
         Self::SwapOut,
     ];
 
-    /// The name a trend point gives the rate.
-    #[must_use]
-    pub fn key(self) -> &'static str {
-        crate::metrics::MEMORY_RATES[self.point_index()].0
-    }
-
-    /// Where `ALL` holds the rate.
-    pub(super) fn index(self) -> usize {
-        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
-            unreachable!("`ALL` holds every rate");
-        };
-        index
-    }
-
     /// Where a complete reading holds the rate among memory's rates, which hold page-outs at 1.
     fn point_index(self) -> usize {
         match self {
@@ -131,6 +137,14 @@ impl MemoryRate {
             Self::SwapIn => 4,
             Self::SwapOut => 5,
         }
+    }
+}
+
+impl PointRate for MemoryRate {
+    const RATES: &'static [Self] = &Self::ALL;
+
+    fn key(self) -> &'static str {
+        crate::metrics::MEMORY_RATES[self.point_index()].0
     }
 }
 
@@ -152,20 +166,6 @@ impl NetworkRate {
         Self::SendErrors,
     ];
 
-    /// The name a trend point gives the rate.
-    #[must_use]
-    pub fn key(self) -> &'static str {
-        crate::metrics::TRAFFIC_RATES[self.traffic_index()].0
-    }
-
-    /// Where `ALL` holds the rate.
-    pub(super) fn index(self) -> usize {
-        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
-            unreachable!("`ALL` holds every rate");
-        };
-        index
-    }
-
     /// Where a complete reading holds the rate among its rates, which hold memory's six rates
     /// and then the traffic's.
     fn point_index(self) -> usize {
@@ -180,6 +180,14 @@ impl NetworkRate {
             Self::ReceiveErrors => 4,
             Self::SendErrors => 5,
         }
+    }
+}
+
+impl PointRate for NetworkRate {
+    const RATES: &'static [Self] = &Self::ALL;
+
+    fn key(self) -> &'static str {
+        crate::metrics::TRAFFIC_RATES[self.traffic_index()].0
     }
 }
 
@@ -215,20 +223,6 @@ impl StorageRate {
         Self::WriteMeanMilliseconds,
     ];
 
-    /// The name a trend point gives the rate, inside its `storage`.
-    #[must_use]
-    pub fn key(self) -> &'static str {
-        crate::metrics::storage::RATE_FIELDS[self.point_index()]
-    }
-
-    /// Where `ALL` holds the rate.
-    pub(super) fn index(self) -> usize {
-        let Some(index) = Self::ALL.iter().position(|rate| *rate == self) else {
-            unreachable!("`ALL` holds every rate");
-        };
-        index
-    }
-
     /// Where a complete reading's storage holds the rate, after the bytes read and written.
     fn point_index(self) -> usize {
         match self {
@@ -239,6 +233,15 @@ impl StorageRate {
             Self::ReadMeanMilliseconds => 6,
             Self::WriteMeanMilliseconds => 7,
         }
+    }
+}
+
+impl PointRate for StorageRate {
+    const RATES: &'static [Self] = &Self::ALL;
+
+    /// The name a trend point gives the rate, inside its `storage`.
+    fn key(self) -> &'static str {
+        crate::metrics::storage::RATE_FIELDS[self.point_index()]
     }
 }
 

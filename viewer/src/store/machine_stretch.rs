@@ -8,7 +8,8 @@ pub use model::summary::MachinePlace;
 use model::summary::{CategorySummary, GaugeSummary, RateSummary};
 
 use super::{
-    MachineSecond, MemoryRate, NetworkRate, STRETCHES_HELD_MAX, STRETCHES_MAX, StorageRate,
+    MachineSecond, MemoryRate, NetworkRate, PointRate, STRETCHES_HELD_MAX, STRETCHES_MAX,
+    StorageRate,
 };
 use crate::EARLIER_STRIDE_SECONDS;
 
