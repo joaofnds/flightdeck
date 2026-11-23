@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
 pub use crate::cpu_history::{
@@ -174,8 +174,36 @@ const WAIT: Duration = Duration::from_millis(100);
 /// The rest between attempts to start on a recording that refused, each of which reads it again.
 const STARTUP_RETRY_WAIT: Duration = Duration::from_secs(1);
 
-// The store looks for a collector started again at least once a second.
+/// The wait on the ring of a store with nothing to do until the ring publishes, which a
+/// publication ends, so a store that follows a ring that publishes steps once a publication. It
+/// is the longest a steady store goes before it looks for a new run, not the collector's tick
+/// period, so a tick later than this, or a slower tick setting, costs one empty turn and one look
+/// at the runs registry, as a quiet ring does.
+const STEADY_WAIT: Duration = Duration::from_millis(1_100);
+
+/// How long a store goes without a request before it may wait long, so a page the worker reads
+/// about once a second keeps the store's short wait.
+const QUIET_BEFORE_STEADY: Duration = Duration::from_secs(2);
+
+/// The pause between a stop's wakes of a steady store's ring.
+const STOP_WAKE_INTERVAL: Duration = Duration::from_millis(5);
+
+/// The stop's wakes of the ring, which last longer than a steady wait, so a stop ends however
+/// many of them are lost.
+const STOP_WAKES_MAX: u32 = 400;
+
+// A store that is not steady looks for a collector started again at least once a second.
 const _: () = assert!(WAIT.saturating_mul(ring::FOLLOW_STEPS).as_millis() <= 1_000);
+// A steady store looks for one once its ring is quiet for longer than the collector's default
+// tick of one second, so a tick a little late is not read as a quiet ring.
+const _: () = assert!(STEADY_WAIT.as_millis() > 1_000);
+const _: () = assert!(WAIT.as_millis() < STEADY_WAIT.as_millis());
+const _: () = assert!(
+    STOP_WAKE_INTERVAL
+        .saturating_mul(STOP_WAKES_MAX)
+        .as_millis()
+        > STEADY_WAIT.as_millis()
+);
 
 /// The steps of the store thread, which it never reaches, since it steps until the app quits.
 const STEPS_MAX: u64 = u64::MAX;
@@ -300,6 +328,9 @@ struct Shared {
     /// How many times the startup let go of what it took in to start again on the recording.
     #[cfg(test)]
     startup_restarts: std::sync::atomic::AtomicU64,
+    /// How many turns the store has taken once started, which a test reads to see it rest.
+    #[cfg(test)]
+    run_turns: std::sync::atomic::AtomicU64,
 }
 
 impl Shared {
@@ -318,6 +349,8 @@ impl Shared {
             startup_turns: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             startup_restarts: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            run_turns: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -400,6 +433,20 @@ impl Store {
         if let Some(thread) = &self.thread {
             thread.thread().unpark();
         }
+        // A steady store waits on its ring, which the unpark does not end. A hide leaves that
+        // wait to run, since a wake of the ring would wake its other readers too, so a hidden
+        // steady store parks at the end of its wait, within `STEADY_WAIT`, as the turn after the
+        // wait parks before it steps. A show ends the wait, since the hide dropped the window's
+        // View and the window shows nothing until the store hands over the next.
+        if active {
+            self.shared.queries.wake_steady_store();
+        }
+    }
+
+    /// Whether the store is in its steady wait.
+    #[cfg(test)]
+    pub(crate) fn steady_waiting(&self) -> bool {
+        self.shared.queries.steady_waiting()
     }
 
     /// How many turns the startup has taken.
@@ -412,6 +459,12 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn startup_restarts(&self) -> u64 {
         self.shared.startup_restarts.load(Ordering::Acquire)
+    }
+
+    /// How many turns the store has taken once started.
+    #[cfg(test)]
+    pub(crate) fn run_turns(&self) -> u64 {
+        self.shared.run_turns.load(Ordering::Acquire)
     }
 
     /// Whether the store has finished its in-flight read and parked without polling.
@@ -487,6 +540,18 @@ impl Drop for Store {
         };
 
         thread.thread().unpark();
+        // A steady store waits on its ring, which an unpark does not end, and a wake that lands
+        // before the thread sleeps in the kernel is lost, so the stop wakes the ring until the
+        // thread has finished, and only while the store is in its steady wait, so a stop of a
+        // store that is not wakes no other reader. The ring's other reader, the persister, looks
+        // and waits again.
+        for _ in 0..STOP_WAKES_MAX {
+            self.shared.queries.wake_steady_store();
+            if thread.is_finished() {
+                break;
+            }
+            thread::sleep(STOP_WAKE_INTERVAL);
+        }
         if let Err(panic) = thread.join() {
             if !thread::panicking() {
                 std::panic::resume_unwind(panic);
@@ -1446,6 +1511,8 @@ fn run_turn(
     operation: &Operation,
     waited: &mut Result<(), Failure>,
 ) -> ControlFlow<()> {
+    #[cfg(test)]
+    shared.run_turns.fetch_add(1, Ordering::AcqRel);
     if shared.stop.load(Ordering::Acquire) {
         return ControlFlow::Break(());
     }
@@ -1495,22 +1562,81 @@ fn run_turn(
     }
     run_ready(held, ring, shared);
     run_owed(root, held, &shared.mailbox);
-    *waited = if held.failure.is_some() {
-        // A ring that failed may fail again at once, so the thread sleeps instead.
-        thread::sleep(WAIT);
-        Ok(())
-    } else {
-        run_wait(ring, shared)
-    };
+    *waited = run_turn_wait(held, ring, shared);
 
     ControlFlow::Continue(())
 }
 
-/// Waits on the ring, leaving where a consumer can reach it what ends that wait.
-fn run_wait(ring: &Ring, shared: &Shared) -> Result<(), Failure> {
+/// The wait that ends a turn: a sleep of `WAIT` after a failure, the long wait of a steady store
+/// that no request has asked of for `QUIET_BEFORE_STEADY`, and otherwise `WAIT` on the ring.
+fn run_turn_wait(held: &Held, ring: &mut Ring, shared: &Shared) -> Result<(), Failure> {
+    if held.failure.is_some() {
+        // A ring that failed may fail again at once, so the thread sleeps instead.
+        thread::sleep(WAIT);
+        return Ok(());
+    }
+    let started = Instant::now();
+    if !run_turn_wait_steady(held, ring, shared) {
+        return run_wait(ring, shared, WAIT);
+    }
+    // A stop's wakes of the ring last a bounded time, so a turn that ran past them must not
+    // begin a wait only a publication ends.
+    if shared.stop.load(Ordering::Acquire) {
+        return run_wait(ring, shared, WAIT);
+    }
+    if !shared
+        .queries
+        .steady_wait_begins(started, QUIET_BEFORE_STEADY, ring.waker())
+    {
+        return run_wait(ring, shared, WAIT);
+    }
+
+    // A submit that finds the wait begun wakes the ring, but one that lands after this and before
+    // the thread sleeps in the kernel is lost, since the ring's wait compares its publication word,
+    // which a local wake does not change, so that one request waits up to `STEADY_WAIT`.
+    let waited = ring.wait(STEADY_WAIT);
+    shared.queries.steady_wait_ends();
+    // A publication, a request, a show and a stop each end the wait early. One that ran its whole
+    // bound most often means the ring went quiet, which is when a collector started again
+    // registers its run, though a lost wake or a tick later than the bound runs it too and costs
+    // one more look. A failed wait sleeps only `WAIT`, so it is no sign of a quiet ring.
+    if waited.is_ok() && started.elapsed() >= STEADY_WAIT {
+        ring.look_at_registry_next();
+    }
+    waited
+}
+
+/// Whether the store has nothing to do until its ring publishes: it follows a ring whose
+/// publication ends its wait, catches nothing up, owes a launch no Apps, has handed over a View
+/// of all it holds, and waits for no answer of the packing thread. Nothing tells the thread that a
+/// View buffer came free, and the packing thread's answer comes by an unpark, which does not end
+/// a wait on a ring.
+fn run_turn_wait_steady(held: &Held, ring: &Ring, shared: &Shared) -> bool {
+    if !ring.wakes_on_publication() {
+        return false;
+    }
+    if shared.catch_up.load(Ordering::Acquire) {
+        return false;
+    }
+    if shared.catching_up.load(Ordering::Acquire) {
+        return false;
+    }
+    if held.owed.is_some() {
+        return false;
+    }
+    if held.unpublished {
+        return false;
+    }
+
+    !held.apps.waits_on_packing()
+}
+
+/// Waits on the ring for at most `bound`, leaving where a consumer can reach it what ends that
+/// wait.
+fn run_wait(ring: &Ring, shared: &Shared, bound: Duration) -> Result<(), Failure> {
     shared.queries.set_ring_waker(ring.waker());
 
-    ring.wait(WAIT)
+    ring.wait(bound)
 }
 
 /// Answers the queries after a step but one the Store would answer only that it has not checked

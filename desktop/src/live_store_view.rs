@@ -67,6 +67,12 @@ pub(crate) fn store_active(cx: &App) -> bool {
     cx.global::<LiveStore>().0.is_active()
 }
 
+/// Whether the installed store has parked.
+#[cfg(test)]
+pub(crate) fn store_paused(cx: &App) -> bool {
+    cx.global::<LiveStore>().0.is_paused()
+}
+
 /// Takes the installed store out of the app, which stops it once the caller drops it.
 #[cfg(all(test, feature = "automation"))]
 pub(crate) fn uninstall_store(cx: &mut App) -> Store {
@@ -75,7 +81,7 @@ pub(crate) fn uninstall_store(cx: &mut App) -> Store {
 
 /// Wakes the page through `waker` each time the app's store hands it a View, and answers
 /// whether the app runs a store to do so.
-pub(super) fn wake_store_with(waker: viewer::store::Waker, cx: &App) -> bool {
+pub(crate) fn wake_store_with(waker: viewer::store::Waker, cx: &App) -> bool {
     let Some(store) = cx.try_global::<LiveStore>() else {
         return false;
     };

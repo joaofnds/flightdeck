@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{AppContext, TestAppContext, WindowHandle, WindowOptions, WindowVisibility};
 use serde_json::{Value, json};
@@ -335,11 +337,14 @@ fn an_overview_shown_again_over_a_view_leaves_its_reader_resting(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn an_overview_shown_again_waits_for_its_installed_store_without_a_second_reader(
+fn an_overview_shown_again_draws_its_installed_stores_view_without_a_second_reader(
     cx: &mut TestAppContext,
 ) {
-    // Goal: a restored Overview reads its range once, through the authoritative store.
-    // Method: show a completed page before its real store's replacement View and step both.
+    // Goal: an Overview shown again, whose installed store hands it a View before its next step,
+    // draws that View and rests its reader, so the page reads its range once, through the store.
+    // Method: answer the window's first request, install a real store, hide the window until the
+    // store parks, show it, wait until the store hands over a View, step the dashboard and step
+    // the reader's mailbox.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
     let store = recording.start_store();
@@ -349,28 +354,13 @@ fn an_overview_shown_again_waits_for_its_installed_store_without_a_second_reader
     window
         .cx
         .update(|cx| crate::live_dashboard::install_store(store, cx));
-    window.change(WindowVisibility::Hidden);
+    window.hide_until_the_store_parks();
     let generation = window.generation();
+    window.show_until_the_store_hands_over_a_view();
 
-    window.change(WindowVisibility::Visible);
+    window.tick();
 
-    assert_eq!(window.generation(), generation);
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-    for _ in 0..2_000 {
-        window.tick();
-        if window
-            .cx
-            .update(|cx| window.window.read(cx).unwrap().reader_rested())
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(
-        window
-            .cx
-            .update(|cx| window.window.read(cx).unwrap().reader_rested())
-    );
+    assert!(window.reader_rested());
     assert_eq!(window.generation(), generation);
     assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
@@ -416,14 +406,15 @@ fn reopening_a_completed_live_overview_waits_for_the_store_without_a_second_read
 }
 
 #[gpui::test]
-fn an_overview_opened_again_and_shown_again_over_its_installed_store_reads_its_page(
+fn an_overview_opened_again_and_shown_again_draws_its_installed_stores_view_without_a_reader(
     cx: &mut TestAppContext,
 ) {
-    // Goal: an Overview opened again, whose window macOS hides and shows again before its next
-    // reading, asks the reader for that reading rather than wait for the store's View, since the
-    // reading it kept holds none of its charts' points and only the reader brings them. Method:
-    // answer the window's first request, install a real store, open the CPU page and Overview
-    // again, hide and show the window, and step the reader's mailbox.
+    // Goal: an Overview opened again, whose window macOS hides and shows again and whose
+    // installed store hands it a View before its next step, draws that View and rests its reader,
+    // since the View holds every chart, readout and top App the page draws. Method: answer the
+    // window's first request, install a real store, open the CPU page and Overview again, hide
+    // the window until the store parks, show it, wait until the store hands over a View, step
+    // the dashboard and step the reader's mailbox.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
     let store = recording.start_store();
@@ -434,11 +425,15 @@ fn an_overview_opened_again_and_shown_again_over_its_installed_store_reads_its_p
         .cx
         .update(|cx| crate::live_dashboard::install_store(store, cx));
     window.open_overview_again();
-    window.change(WindowVisibility::Hidden);
+    window.hide_until_the_store_parks();
+    let generation = window.generation();
+    window.show_until_the_store_hands_over_a_view();
 
-    window.change(WindowVisibility::Visible);
+    window.tick();
 
-    assert_eq!(window.reader.receive(), (Received::Taken, true));
+    assert!(window.reader_rested());
+    assert_eq!(window.generation(), generation);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
 
 #[gpui::test]
@@ -815,6 +810,44 @@ impl VisibilityHarness {
     fn change(&mut self, visibility: WindowVisibility) {
         self.report(visibility);
         self.tick();
+    }
+
+    /// Hides the window and steps its dashboard, then waits until the installed store parks, as
+    /// it does once the window stays hidden past the store's wait.
+    fn hide_until_the_store_parks(&mut self) {
+        self.change(WindowVisibility::Hidden);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for _ in 0..5_000 {
+            if self.cx.update(|cx| crate::live_dashboard::store_paused(cx)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the store never parked");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the store never parked");
+    }
+
+    /// Shows the window and waits until the installed store hands over a View, with no step of
+    /// the dashboard between, so the View is at hand at the dashboard's next step. The test's
+    /// waker takes the place of the page's, since the test steps the dashboard itself.
+    fn show_until_the_store_hands_over_a_view(&mut self) {
+        let handed = Arc::new(AtomicBool::new(false));
+        let woken = Arc::clone(&handed);
+        let waker = Box::new(move || woken.store(true, Ordering::Release));
+        let installed = self
+            .cx
+            .update(|cx| crate::live_dashboard::wake_store_with(waker, cx));
+        assert!(installed);
+        self.report(WindowVisibility::Visible);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for _ in 0..5_000 {
+            if handed.load(Ordering::Acquire) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the store handed over no View");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the store handed over no View");
     }
 
     /// Changes whether macOS presents the window, with no step of its dashboard after it.

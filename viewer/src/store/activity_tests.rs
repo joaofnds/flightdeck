@@ -200,8 +200,9 @@ fn a_store_paused_while_it_starts_answers_a_query() {
 }
 
 pub(super) fn wait_until_paused(store: &Store) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    for _ in 0..2_000 {
+    // A hidden steady store parks at the end of its long wait.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for _ in 0..5_000 {
         if store.is_paused() {
             return;
         }

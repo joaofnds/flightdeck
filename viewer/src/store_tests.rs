@@ -1566,6 +1566,426 @@ fn each_view_has_a_higher_version_than_the_one_before() {
     assert!(second.version > first.version);
 }
 
+mod while_the_store_is_steady {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use collector::ring::RingReader;
+
+    use super::super::ring::FOLLOW_STEPS;
+    use super::super::{QUIET_BEFORE_STEADY, STEADY_WAIT, WAIT};
+    use super::{Fixture, Store, view_where};
+
+    // A steady store finds a collector started again sooner than one that looks once in ten
+    // steps, with room for a few steps after its long wait.
+    const _: () = assert!(
+        STEADY_WAIT
+            .saturating_add(WAIT.saturating_mul(4))
+            .as_millis()
+            < WAIT.saturating_mul(2 * FOLLOW_STEPS).as_millis()
+    );
+
+    /// A store that follows the ring of `fixture` and took its publications of 100 and 101 in,
+    /// with nothing pending. The step that took 101 in may have handed the packing thread work,
+    /// whose answer the store takes within one short wait after it.
+    fn steady(fixture: &mut Fixture) -> Store {
+        fixture.publish_with_system_rows(100);
+        let store = Store::start(&fixture.root).unwrap();
+        view_where(&store, |view| view.seconds.len() == 1);
+        fixture.publish_with_system_rows(101);
+        view_where(&store, |view| view.seconds.len() == 2);
+        thread::sleep(3 * WAIT);
+        store
+    }
+
+    /// Waits until `store` is in its steady wait.
+    fn in_steady_wait(store: &Store) {
+        let deadline = Instant::now() + 2 * STEADY_WAIT;
+        for _ in 0..4_000 {
+            if store.steady_waiting() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the store began no steady wait");
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the store began no steady wait");
+    }
+
+    /// A second reader of the ring of `fixture`, as the persister is, past every publication,
+    /// waiting on its own thread for at most `bound` and answering how long it waited, once a
+    /// short wait has let it fall asleep.
+    fn other_reader_waits(fixture: &Fixture, bound: Duration) -> thread::JoinHandle<Duration> {
+        let name = fixture.writer.name().to_owned();
+        let waiting = thread::spawn(move || {
+            let mut reader = RingReader::open_generation(&name).unwrap();
+            let newest = reader.publication_newest().unwrap();
+            reader.seek_publication(newest + 1).unwrap();
+            let started = Instant::now();
+            reader.wait(bound).unwrap();
+            started.elapsed()
+        });
+        thread::sleep(WAIT);
+        waiting
+    }
+
+    #[test]
+    fn a_steady_store_takes_no_step_between_publications() {
+        // Goal: a store that follows a ring and has nothing pending waits for the ring's next
+        // publication rather than stepping ten times a second. Method: a steady store, then the
+        // turns it takes over half its long wait with no publication, no query and no hide,
+        // with room for one turn where its long wait began just before.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        let turns = store.run_turns();
+
+        thread::sleep(STEADY_WAIT / 2);
+
+        let taken = store.run_turns() - turns;
+        assert!(taken <= 1, "{taken} turns");
+    }
+
+    #[test]
+    fn a_stop_ends_a_steady_stores_wait_at_once() {
+        // Goal: quitting does not wait out a steady store's long wait. Method: a steady store
+        // takes one more publication in and begins its long wait, then the time its drop takes
+        // against half the long wait.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        fixture.publish_with_system_rows(102);
+        view_where(&store, |view| view.seconds.len() == 3);
+        in_steady_wait(&store);
+        let started = Instant::now();
+
+        drop(store);
+
+        assert!(
+            started.elapsed() < STEADY_WAIT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_plain_query_ends_a_steady_stores_wait() {
+        // Goal: the first request after a quiet stretch, which no page wakes the store for, is
+        // answered as soon as it is today rather than at the end of the store's long wait.
+        // Method: a steady store takes one more publication in and begins its long wait, then a
+        // request submitted with no wake, and the time until its answer, against half the long
+        // wait.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        let handle = store.query_handle();
+        fixture.publish_with_system_rows(102);
+        view_where(&store, |view| view.seconds.len() == 3);
+        in_steady_wait(&store);
+        let started = Instant::now();
+
+        handle.submit(super::latest_request()).unwrap();
+
+        super::next_reply(&handle);
+        assert!(
+            started.elapsed() < STEADY_WAIT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_collector_started_again_is_found_within_a_second_of_its_predecessor_going_quiet() {
+        // Goal: a steady store whose ring goes quiet looks for a new run as soon as its long
+        // wait runs out, so a collector started again is followed within about a second.
+        // Method: a steady store in its long wait, then a second run registered after the first
+        // with a tick, and the time until the store's View holds that tick, against the long
+        // wait and a few steps, short of the two seconds the store took while it looked at most
+        // once in ten steps.
+        let mut first = Fixture::new();
+        let store = steady(&mut first);
+        in_steady_wait(&store);
+        let mut second = Fixture::new_mode(false, 2, Some(&first));
+        let started = Instant::now();
+
+        second.publish_with_system_rows(102);
+
+        view_where(&store, |view| view.seconds.len() == 3);
+        assert!(
+            started.elapsed() < STEADY_WAIT + 4 * WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_show_ends_a_steady_stores_wait() {
+        // Goal: a window shown again before the store noticed its hide, which dropped the
+        // window's View, gets a View as soon as it did with the short wait rather than at the
+        // end of the long one. Method: a steady store takes one more publication in and begins
+        // its long wait, then a hide and a show, and the time until it hands over a View,
+        // against half the long wait.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        fixture.publish_with_system_rows(102);
+        view_where(&store, |view| view.seconds.len() == 3);
+        in_steady_wait(&store);
+        let started = Instant::now();
+
+        store.set_active(false);
+        store.set_active(true);
+
+        view_where(&store, |view| view.seconds.len() == 3);
+        assert!(
+            started.elapsed() < STEADY_WAIT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn requests_to_a_store_that_is_not_steady_wake_no_other_reader() {
+        // Goal: a page the worker asks about once a second wakes no other reader of the ring,
+        // as before the long wait, and only the request that ends a long wait does. Method: a
+        // steady store in its long wait answers a request, which ends that wait, then a second
+        // reader's wait on the ring while the store answers a request a second, which keeps it
+        // from waiting long, and whether the reader waited its whole bound.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        let handle = store.query_handle();
+        in_steady_wait(&store);
+        handle.submit(super::latest_request()).unwrap();
+        super::next_reply(&handle);
+        let bound = QUIET_BEFORE_STEADY + QUIET_BEFORE_STEADY / 4;
+        let waiting = other_reader_waits(&fixture, bound);
+
+        for _ in 0..2 {
+            thread::sleep(QUIET_BEFORE_STEADY / 2);
+            handle.submit(super::latest_request()).unwrap();
+            super::next_reply(&handle);
+        }
+
+        let waited = waiting.join().unwrap();
+        assert!(waited >= bound, "{waited:?}");
+    }
+
+    #[test]
+    fn a_hide_wakes_no_other_reader() {
+        // Goal: hiding the window wakes no other reader of the ring, so a hidden steady store
+        // parks at the end of its long wait. Method: a steady store in its long wait, a second
+        // reader's wait on the ring past that wait, a hide, and whether the reader waited its
+        // whole bound.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        in_steady_wait(&store);
+        let bound = 2 * STEADY_WAIT;
+        let waiting = other_reader_waits(&fixture, bound);
+
+        store.set_active(false);
+
+        let waited = waiting.join().unwrap();
+        assert!(waited >= bound, "{waited:?}");
+    }
+
+    #[test]
+    fn a_stop_of_a_parked_store_wakes_no_other_reader() {
+        // Goal: quitting with the window hidden wakes no other reader of the ring, as before the
+        // long wait. Method: a steady store hidden until it parks, a second reader's wait on the
+        // ring, the store's drop, and whether the reader waited its whole bound.
+        let mut fixture = Fixture::new();
+        let store = steady(&mut fixture);
+        store.set_active(false);
+        super::super::activity_tests::wait_until_paused(&store);
+        let bound = STEADY_WAIT;
+        let waiting = other_reader_waits(&fixture, bound);
+
+        drop(store);
+
+        let waited = waiting.join().unwrap();
+        assert!(waited >= bound, "{waited:?}");
+    }
+}
+
+mod which_store_is_steady {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    use super::super::recording::Owed;
+    use super::super::{Held, QUIET_BEFORE_STEADY, Ring, Shared, run_turn_wait_steady};
+    use super::Fixture;
+
+    /// The parts of a store that follows the ring of `fixture` with nothing pending: what it
+    /// holds, with no recording behind it and a packing end the test keeps, the ring's reader past
+    /// its one tick, and the shared state of a store done catching up.
+    fn steady_parts(fixture: &mut Fixture) -> (Held, Ring, Shared) {
+        fixture.publish_with_system_rows(100);
+        let mut ring = Ring::new(fixture.root.clone());
+        ring.follow().unwrap();
+        ring.read(|_, _, _| true).unwrap();
+        let (held, shared) = steady_held_and_shared();
+
+        (held, ring, shared)
+    }
+
+    /// What a store with nothing pending holds, having handed over a View of all of it, and the
+    /// shared state of a store done catching up.
+    fn steady_held_and_shared() -> (Held, Shared) {
+        let mut held = Held::without_recording();
+        held.unpublished = false;
+        let shared = Shared::starting();
+        shared.catching_up.store(false, Ordering::Release);
+
+        (held, shared)
+    }
+
+    #[test]
+    fn a_store_that_follows_a_ring_with_nothing_pending_is_steady() {
+        // Goal: a store with nothing to do until its ring publishes waits long. Method: the
+        // parts of such a store, and whether it is steady.
+        let mut fixture = Fixture::new();
+        let (held, ring, shared) = steady_parts(&mut fixture);
+
+        assert!(run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_that_follows_no_ring_is_not_steady() {
+        // Goal: a store that follows no ring yet, whose wait sleeps its whole bound, keeps the
+        // short wait. Method: a steady store's parts with a ring that has not followed one.
+        let mut fixture = Fixture::new();
+        let (held, _, shared) = steady_parts(&mut fixture);
+        let ring = Ring::new(fixture.root.clone());
+
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_holding_a_second_it_could_not_take_is_not_steady() {
+        // Goal: a store that holds a second it could not take, whose wait sleeps its whole
+        // bound, keeps the short wait, so it takes that second as soon as it does today.
+        // Method: a steady store's parts over a ring whose only second the store refused to
+        // take.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        let (held, shared) = steady_held_and_shared();
+        let budget = std::sync::Arc::new(super::super::ByteBudget::new(256 * 1024 * 1024));
+        let operation = std::sync::Arc::new(crate::cancellation::Cancellation::default())
+            .operation(0)
+            .unwrap();
+        let mut ring = Ring::with_budget(fixture.root.clone(), std::sync::Arc::clone(&budget));
+        ring.follow().unwrap();
+
+        let read = ring.read_prepared(&budget, &operation, None, |_, _| false);
+
+        assert!(matches!(
+            read,
+            Ok(super::super::native::NativeRead::Blocked)
+        ));
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_holding_what_no_view_it_handed_over_shows_is_not_steady() {
+        // Goal: a store that could not hand over a View of all it holds, as when the main thread
+        // holds every View buffer, keeps the short wait, since nothing tells it that a buffer
+        // came free. Method: a steady store's parts, holding what it has not handed over.
+        let mut fixture = Fixture::new();
+        let (mut held, ring, shared) = steady_parts(&mut fixture);
+        held.unpublished = true;
+
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_asked_within_two_seconds_keeps_the_short_wait() {
+        // Goal: a store a page asks about once a second keeps today's short wait, and begins
+        // its long wait only once no request has come for two seconds. Method: a request
+        // submitted and then cancelled, so none waits, then whether the steady wait begins at
+        // once and two seconds later.
+        let shared = Shared::starting();
+        let handle = shared.queries.handle(std::thread::current());
+        handle.submit(super::latest_request()).unwrap();
+        handle.cancel().unwrap();
+        let asked = Instant::now();
+
+        let at_once = shared
+            .queries
+            .steady_wait_begins(asked, QUIET_BEFORE_STEADY, None);
+        let later = shared.queries.steady_wait_begins(
+            asked + QUIET_BEFORE_STEADY,
+            QUIET_BEFORE_STEADY,
+            None,
+        );
+
+        assert!(!at_once);
+        assert!(later);
+    }
+
+    #[test]
+    fn a_store_with_a_request_waiting_keeps_the_short_wait() {
+        // Goal: a store that has a request to answer never begins its long wait, so the request
+        // is not left to the end of it. Method: a request submitted long after any other, and
+        // whether the steady wait begins.
+        let shared = Shared::starting();
+        let handle = shared.queries.handle(std::thread::current());
+        handle.submit(super::latest_request()).unwrap();
+
+        let begun = shared.queries.steady_wait_begins(
+            Instant::now() + 2 * QUIET_BEFORE_STEADY,
+            QUIET_BEFORE_STEADY,
+            None,
+        );
+
+        assert!(!begun);
+    }
+
+    #[test]
+    fn a_store_catching_up_is_not_steady() {
+        // Goal: a store that has not caught up since a return keeps the short wait, so its
+        // catch-up ends as soon as it does today. Method: a steady store's parts, catching up.
+        let mut fixture = Fixture::new();
+        let (held, ring, shared) = steady_parts(&mut fixture);
+        shared.catching_up.store(true, Ordering::Release);
+
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_told_to_catch_up_is_not_steady() {
+        // Goal: a store told to catch up, as a hide tells it, keeps the short wait. Method: a
+        // steady store's parts, told to catch up.
+        let mut fixture = Fixture::new();
+        let (held, ring, shared) = steady_parts(&mut fixture);
+        shared.catch_up.store(true, Ordering::Release);
+
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_that_owes_a_launch_its_apps_is_not_steady() {
+        // Goal: a store that waits for the main thread to take its View before it adds up the
+        // Apps a launch owes keeps the short wait, since nothing wakes it when the View is
+        // taken. Method: a steady store's parts, owing the Apps of the recording's hour.
+        let mut fixture = Fixture::new();
+        let (mut held, ring, shared) = steady_parts(&mut fixture);
+        held.owed = Some(Owed::of_hour(&fixture.root));
+
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+
+    #[test]
+    fn a_store_waiting_on_the_packing_thread_is_not_steady() {
+        // Goal: a store with work out at the packing thread, whose answer comes by an unpark
+        // that does not end a wait on the ring, keeps the short wait. Method: a steady store's
+        // parts after a reset leaves its buffers to free and an exchange hands them over to a
+        // packing end nothing runs.
+        let mut fixture = Fixture::new();
+        let (mut held, ring, shared) = steady_parts(&mut fixture);
+        held.reset();
+
+        held.apps.exchange();
+
+        assert!(held.apps.waits_on_packing());
+        assert!(!run_turn_wait_steady(&held, &ring, &shared));
+    }
+}
+
 mod when_the_collector_starts_again {
     use super::super::ring::{FOLLOW_STEPS, Ring};
     use super::{Fixture, Store, view_where, wall_seconds_of};
@@ -1614,6 +2034,36 @@ mod when_the_collector_starts_again {
         });
 
         assert_eq!(steps, Some(2 * FOLLOW_STEPS));
+    }
+
+    #[test]
+    fn a_ring_gone_quiet_looks_for_the_new_run_at_its_next_step() {
+        // Goal: once a steady store's long wait ran out with nothing published, the step after
+        // it reads the runs registry, though the ring published since the last look, so a new
+        // run is followed one step after its predecessor went quiet. Method: follow a run
+        // through the ring adapter and take its tick, register a second run with a tick, tell
+        // the ring it went quiet, and count the steps until the adapter hands that tick over.
+        let mut first = Fixture::new();
+        first.publish_with_system_rows(100);
+        let mut ring = Ring::new(first.root.clone());
+        ring.follow().unwrap();
+        ring.read(|_, _, _| true).unwrap();
+        let mut second = Fixture::new_mode(false, 2, Some(&first));
+        second.publish_with_system_rows(101);
+
+        ring.look_at_registry_next();
+
+        let steps = (1..=2 * FOLLOW_STEPS + 1).find(|_| {
+            ring.follow().unwrap();
+            let mut taken = false;
+            ring.read(|_, _, _| {
+                taken = true;
+                true
+            })
+            .unwrap();
+            taken
+        });
+        assert_eq!(steps, Some(1));
     }
 }
 

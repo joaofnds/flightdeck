@@ -1781,8 +1781,6 @@ pub(crate) use store_view::{MAILBOX_LOOKS, MailboxLooks};
 
 pub use store_view::install_store;
 pub(crate) use store_view::set_store_active;
-#[cfg(test)]
-pub(crate) use store_view::store_active;
 #[cfg(feature = "automation")]
 pub(crate) use store_view::store_activity;
 pub(crate) use store_view::store_query_handle;
@@ -1790,6 +1788,8 @@ pub(crate) use store_view::store_query_handle;
 pub(crate) use store_view::store_view_draws_machine;
 #[cfg(all(test, feature = "automation"))]
 pub(crate) use store_view::uninstall_store;
+#[cfg(test)]
+pub(crate) use store_view::{store_active, store_paused, wake_store_with};
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

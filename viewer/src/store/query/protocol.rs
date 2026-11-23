@@ -2,6 +2,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::Thread;
+use std::time::{Duration, Instant};
 
 use collector::ring::RingWaker;
 
@@ -74,9 +75,107 @@ struct State {
     reply: Option<QueryReply>,
     replied: Option<Arc<dyn Fn() + Send + Sync>>,
     ring_waker: Option<Arc<RingWaker>>,
+    /// When the last request came, or none before the first.
+    requested_at: Option<Instant>,
+    /// Whether the Store is in its steady wait, which a submit ends through the ring.
+    steady_waiting: bool,
+}
+
+impl Shared {
+    /// Ends the Store's wait on its ring where it waits on one, waking every reader of the ring.
+    fn wake_ring(&self) {
+        let ring_waker = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ring_waker
+            .clone();
+        wake(ring_waker);
+    }
+
+    /// Ends the Store's steady wait through its ring where the Store is in one, so a Store that
+    /// is not wakes no other reader of the ring.
+    fn wake_steady_ring(&self) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.steady_waiting {
+            return;
+        }
+        let ring_waker = state.ring_waker.clone();
+        drop(state);
+        wake(ring_waker);
+    }
+}
+
+/// Wakes every reader of the ring `ring_waker` wakes, where there is one.
+fn wake(ring_waker: Option<Arc<RingWaker>>) {
+    if let Some(ring_waker) = ring_waker {
+        if let Err(errno) = ring_waker.wake() {
+            eprintln!("flightdeck Store wake: errno {errno}");
+        }
+    }
 }
 
 impl Queries {
+    /// Ends the Store's steady wait where it is in one, for a stop or a show, which the Store's
+    /// thread hears by an unpark that does not end that wait.
+    pub(crate) fn wake_steady_store(&self) {
+        self.shared.wake_steady_ring();
+    }
+
+    /// Begins the Store's steady wait on the ring `ring_waker` wakes, answering whether it began:
+    /// only where no request waits and none came within `quiet` before `now`. Under the lock a
+    /// submit takes, with the waker in place before the wait begins, so a request either waits
+    /// here or finds the wait begun and ends it on the ring the Store waits on.
+    pub(crate) fn steady_wait_begins(
+        &self,
+        now: Instant,
+        quiet: Duration,
+        ring_waker: Option<Arc<RingWaker>>,
+    ) -> bool {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!state.steady_waiting);
+        state.ring_waker = ring_waker;
+        if state.request.is_some() {
+            return false;
+        }
+        if let Some(requested_at) = state.requested_at {
+            if now.saturating_duration_since(requested_at) < quiet {
+                return false;
+            }
+        }
+
+        state.steady_waiting = true;
+        true
+    }
+
+    /// Ends the Store's steady wait, after which a submit wakes only the Store's thread.
+    pub(crate) fn steady_wait_ends(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.steady_waiting);
+        state.steady_waiting = false;
+    }
+
+    /// Whether the Store is in its steady wait.
+    #[cfg(test)]
+    pub(crate) fn steady_waiting(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .steady_waiting
+    }
+
     /// Leaves where a consumer can reach it what ends the Store's wait on its ring.
     pub(crate) fn set_ring_waker(&self, ring_waker: Option<Arc<RingWaker>>) {
         self.shared
@@ -235,8 +334,12 @@ impl QueryHandle {
         };
         state.reply = None;
         state.request = Some((token, request));
+        state.requested_at = Some(Instant::now());
         drop(state);
         self.thread.unpark();
+        // A Store in its steady wait waits on its ring, which an unpark does not end. One that
+        // begins it after the request is in place finds the request and does not.
+        self.shared.wake_steady_ring();
 
         Ok(token)
     }
@@ -245,18 +348,7 @@ impl QueryHandle {
     /// A refusal leaves the request to the end of that wait. The wake reaches every reader of the
     /// ring, so a request that only refreshes a page leaves the Store to its own pace.
     pub fn wake_store(&self) {
-        let ring_waker = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .ring_waker
-            .clone();
-        if let Some(ring_waker) = ring_waker {
-            if let Err(errno) = ring_waker.wake() {
-                eprintln!("flightdeck Store wake: errno {errno}");
-            }
-        }
+        self.shared.wake_ring();
     }
 
     /// Cancels pending and in-flight work while leaving contexts already displayed usable.

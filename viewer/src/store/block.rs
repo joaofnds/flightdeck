@@ -368,6 +368,16 @@ impl BlockSpan {
         }
     }
 
+    /// Whether a block or a batch is out with the packing thread, whose answer the store takes
+    /// at its next exchange, holding a plain block beside its packed replacement until then.
+    pub(super) fn waits_on_packing(&self) -> bool {
+        if !self.out.is_empty() {
+            return true;
+        }
+
+        self.batches_out > 0
+    }
+
     /// Takes each answer the packing thread has given and puts it in its plain block's place,
     /// then hands over the oldest ready blocks while fewer than `BLOCKS_OUT_MAX` are out, and
     /// what is to be freed. Waits for nothing.
@@ -1854,7 +1864,7 @@ impl BlockSpan {
         let bound = self.span.blocks.capacity() + self.buffers.count() + DEPARTED_KEPT_MAX + 1;
         for _ in 0..bound {
             self.exchange();
-            if self.out.is_empty() && self.batches_out == 0 {
+            if !self.waits_on_packing() {
                 return;
             }
             self.answer_handed();
@@ -1891,10 +1901,7 @@ impl BlockSpan {
     /// Whether nothing is out and nothing waits: no ready block plain, no free buffer holding
     /// readings, and no packed block that left the row that nothing else holds.
     pub(super) fn settled(&self) -> bool {
-        if !self.out.is_empty() {
-            return false;
-        }
-        if self.batches_out > 0 {
+        if self.waits_on_packing() {
             return false;
         }
         if self.ready_plain_count() > 0 {

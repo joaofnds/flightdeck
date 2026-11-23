@@ -359,11 +359,17 @@ impl Ring {
         })
     }
 
+    /// Makes the next `follow` look at the runs registry, which it otherwise does once in
+    /// `FOLLOW_STEPS` steps and then only where the ring published nothing since the last look.
+    pub(super) fn look_at_registry_next(&mut self) {
+        self.unlooked_steps = FOLLOW_STEPS;
+        self.published = false;
+    }
+
     /// Rechecks the source on show while keeping the current run's reader and rate predecessor.
     pub(super) fn resume(&mut self) -> Result<(), Failure> {
         self.finish_resume();
-        self.unlooked_steps = FOLLOW_STEPS;
-        self.published = false;
+        self.look_at_registry_next();
         self.follow()
     }
 
@@ -520,6 +526,20 @@ impl Ring {
         Ok(newest.ring_name == source.reader.name())
     }
 
+    /// Whether a wait on the ring ends at its next publication and at a consumer's wake: the
+    /// store follows a ring it can wake and holds no second it could not take, where `wait`
+    /// would sleep its whole bound.
+    pub(super) fn wakes_on_publication(&self) -> bool {
+        let Some(source) = &self.source else {
+            return false;
+        };
+        if source.native_pending.is_some() {
+            return false;
+        }
+
+        source.waker.is_some()
+    }
+
     /// What ends a wait on the ring the store follows.
     pub(super) fn waker(&self) -> Option<Arc<RingWaker>> {
         self.source.as_ref()?.waker.clone()
@@ -527,7 +547,8 @@ impl Ring {
 
     /// Sleeps until the ring publishes past what the store read, for at most `timeout`. Where
     /// the store follows no ring yet, or holds a second it could not take, the ring would not
-    /// wake it, so it sleeps all of `timeout`.
+    /// wake it, so it sleeps all of `timeout`. A wait that fails sleeps at most `WAIT`, since
+    /// nothing ends that sleep.
     pub(super) fn wait(&self, timeout: Duration) -> Result<(), Failure> {
         let Some(source) = &self.source else {
             thread::sleep(timeout);
@@ -539,7 +560,7 @@ impl Ring {
         }
 
         if let Err(error) = source.reader.wait(timeout) {
-            thread::sleep(timeout);
+            thread::sleep(timeout.min(super::WAIT));
             return Err(Failure::Ring(error.kind()));
         }
         Ok(())

@@ -2585,8 +2585,9 @@ fn showing_a_pinned_window_wakes_the_store_and_keeps_the_second(cx: &mut gpui::T
 }
 
 fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    for _ in 0..2_000 {
+    // A hidden steady store parks at the end of its long wait, up to about a second.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    for _ in 0..5_000 {
         cx.run_until_parked();
         if cx.update(|cx| cx.global::<super::LiveStore>().0.is_paused()) == paused {
             return;
@@ -3657,5 +3658,86 @@ mod when_the_store_or_the_worker_wakes_the_page {
                 drop(cx.remove_global::<super::super::LiveStore>());
             });
         }
+    }
+}
+
+#[gpui::test]
+fn an_overview_opened_again_and_shown_over_a_parked_store_draws_what_a_followed_overview_draws(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: an Overview opened again, hidden until the store parks and shown again, which the
+    // store hands its View before the page's next tick, draws every chart, readout and top App
+    // a followed Overview draws, and rests its reader. Method: an Overview over a real store
+    // and reader settles on the View, and what it draws is kept. The page opens the CPU page and
+    // Overview again, hides until the store parks, and shows. A waker in place of the page's
+    // says when the store hands over its View, and the page then ticks once.
+    let (recording, page) = followed_page_settled(cx, "overview");
+    let followed = cx.update(|cx| overview_drawn(page.read(cx)));
+    page.update(cx, |page, cx| {
+        page.navigate("cpu", cx);
+        page.navigate("overview", cx);
+    });
+    page.update(cx, |page, cx| page.observe_visibility_callback(false, cx));
+    page.update(cx, LiveDashboard::tick);
+    wait_for_store_activity(cx, true);
+    let handed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let woken = Arc::clone(&handed);
+    cx.update(|cx| {
+        cx.global::<super::LiveStore>()
+            .0
+            .wake_with(Box::new(move || {
+                woken.store(true, std::sync::atomic::Ordering::Release);
+            }));
+    });
+
+    page.update(cx, |page, cx| page.observe_visibility_callback(true, cx));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    for _ in 0..5_000 {
+        if handed.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the store handed over no View"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    page.update(cx, LiveDashboard::tick);
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        assert!(page.reader_rested());
+        let shown = overview_drawn(page);
+        assert_eq!(shown.charts, followed.charts);
+        assert_eq!(shown.readouts, followed.readouts);
+        assert_eq!(shown.ranked, followed.ranked);
+        assert_eq!(shown.hardware, followed.hardware);
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+/// What an Overview draws: each chart's id, title and lines, the readouts, the top Apps of its
+/// newest second, and the hardware figure.
+struct OverviewDrawn {
+    charts: Vec<(String, String, Vec<Line>)>,
+    readouts: Vec<(String, String, String, u32)>,
+    ranked: String,
+    hardware: String,
+}
+
+/// What `page` draws, as an Overview draws it.
+fn overview_drawn(page: &LiveDashboard) -> OverviewDrawn {
+    let charts = page
+        .panels
+        .iter()
+        .map(|panel| (panel.id.clone(), panel.title.clone(), panel.lines.clone()))
+        .collect();
+
+    OverviewDrawn {
+        charts,
+        readouts: texts(&page.summary_cards()),
+        ranked: format!("{:?}", page.ranking_reading()),
+        hardware: format!("{:?}", page.live_hardware_readings()),
     }
 }
