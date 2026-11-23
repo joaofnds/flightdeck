@@ -139,6 +139,15 @@ impl LiveSession {
         }
     }
 
+    /// Lets go of the older tail: the sealed minutes it keeps and the points last assembled from
+    /// them. A later read of the tail reads those minutes again, as the first read did.
+    pub fn forget_earlier_tail(&mut self) {
+        self.earlier = KeptTail::default();
+        if let Some(history) = &mut self.history {
+            history.forget_earlier_tail();
+        }
+    }
+
     /// The bytes of the App histories the session caches from the saved minutes.
     #[must_use]
     pub fn app_history_bytes(&self) -> usize {

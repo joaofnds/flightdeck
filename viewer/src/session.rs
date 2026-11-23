@@ -478,6 +478,12 @@ impl Session {
         self.parts_read.get_mut().take();
     }
 
+    /// Lets go of the older tail last assembled from these windows. A later read of it assembles
+    /// it again from the minutes the live session keeps, or reads them again.
+    pub(crate) fn forget_earlier_tail(&mut self) {
+        self.earlier_tail.get_mut().take();
+    }
+
     /// The context of `range` the last select read, unless a reading of it has expired since.
     fn select_inner_context_kept(&self, range: ContextRange) -> Option<&LastContext> {
         let last = self

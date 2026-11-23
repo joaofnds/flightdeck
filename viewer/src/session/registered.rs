@@ -293,7 +293,7 @@ impl Session {
             Some(observation)
         });
         self.forget_page_caches();
-        self.earlier_tail.get_mut().take();
+        self.forget_earlier_tail();
         self.registered.span = Some(Span {
             needed,
             loaded: span,

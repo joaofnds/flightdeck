@@ -350,6 +350,12 @@ struct Reader {
     /// notes a new instant, so a page the Store goes on answering lets go once an interval, and
     /// finds nothing to let go of after the first.
     page_caches_unread_since: Option<Instant>,
+    /// Since when nothing reads the older tail: since the reader's rest, until a request that
+    /// reads the tail. The session lets go of the tail `EARLIER_TAIL_KEEP_INTERVAL` later,
+    /// which clears this. It keys on the rest and not on the Store's answer, since a page the
+    /// Store goes on answering reads the tail every reading, and letting go of it then would
+    /// read it again cold once an interval.
+    earlier_tail_unread_since: Option<Instant>,
     retry_after: Instant,
 }
 
@@ -385,6 +391,11 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// context's App histories from saved minutes can take seconds, so a return within the interval
 /// reads what the session kept.
 const PAGE_CACHES_KEEP_INTERVAL: Duration = Duration::from_secs(viewer::CHARTED_SECONDS);
+/// How long the session keeps a page's older tail once nothing reads it. A return within the
+/// interval draws the tail the session kept. A later return reads the tail again as the first
+/// read did, and a rest that long has sealed as many minutes for it to read in any case. The
+/// interval is the page caches' own, so a return finds both kept or both let go.
+const EARLIER_TAIL_KEEP_INTERVAL: Duration = PAGE_CACHES_KEEP_INTERVAL;
 const WORKER_STEPS_MAX: u64 = 7 * 24 * 60 * 60 * 4;
 // Bounds the renewed runs of steps, including those a new window starts.
 const WORKER_LEASES_MAX: u64 = 1 << 20;
@@ -790,6 +801,7 @@ fn worker_run(
         pending: None,
         deferred_listing_last_second: None,
         page_caches_unread_since: None,
+        earlier_tail_unread_since: None,
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
@@ -880,7 +892,9 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
                 // A resting reader reads nothing until a window asks for a page again. A window
                 // shown again on a held second draws the snapshot it kept, so a hold is no
                 // reason to keep what the session cached for longer.
-                reader_page_caches_unread(reader, Instant::now());
+                let now = Instant::now();
+                reader_page_caches_unread(reader, now);
+                reader_earlier_tail_unread(reader, now);
                 *command = None;
                 reader_rest(reader);
             }
@@ -889,6 +903,11 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
                 return Received::Continued;
             };
             mailbox.resting = false;
+            // A hover's read of one second goes without the older tail, so it leaves the tail
+            // as unread as the rest before it did.
+            if !reader_earlier_skips(&next.request) {
+                reader.earlier_tail_unread_since = None;
+            }
             let resting = command.is_none();
             *command = Some(next);
             reader.retry_after = Instant::now();
@@ -907,9 +926,10 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
 }
 
 /// Reads the page the worker reads, if any, and returns how long the worker waits before its
-/// next step. A listing of the saved minutes the step left comes after what it published, and so
-/// does letting go of what the session cached for a page nothing has read for long enough at
-/// `now`, the instant of the step.
+/// next step. A listing of the saved minutes the step left comes after what it published. So
+/// does letting go of what the session cached for a page nothing has read for long enough, and
+/// of an older tail nothing has read for long enough. Both count to `now`, the instant of the
+/// step.
 fn worker_step(
     root: &std::path::Path,
     shared: &Shared,
@@ -920,6 +940,7 @@ fn worker_step(
     let pause = worker_step_read(root, shared, reader, command);
     worker_step_list(reader);
     worker_step_forget(reader, now);
+    worker_step_forget_earlier_tail(reader, now);
 
     pause
 }
@@ -1002,11 +1023,37 @@ fn worker_step_forget(reader: &mut Reader, now: Instant) {
     }
 }
 
+/// Lets go of the older tail once nothing has read it for `EARLIER_TAIL_KEEP_INTERVAL` at
+/// `now`. Left to stay, it would last as long as the app runs, in a shown window whose page the
+/// store's View draws and in a closed one alike. A return within the interval draws the tail the
+/// session kept, and a later one reads it again as the first read did.
+fn worker_step_forget_earlier_tail(reader: &mut Reader, now: Instant) {
+    let Some(since) = reader.earlier_tail_unread_since else {
+        return;
+    };
+    if now.saturating_duration_since(since) < EARLIER_TAIL_KEEP_INTERVAL {
+        return;
+    }
+
+    reader.earlier_tail_unread_since = None;
+    if let Some(session) = &mut reader.session {
+        session.forget_earlier_tail();
+    }
+}
+
 /// Notes that nothing reads what the session cached for a page from `now` on, unless that was
 /// noted already.
 fn reader_page_caches_unread(reader: &mut Reader, now: Instant) {
     if reader.page_caches_unread_since.is_none() {
         reader.page_caches_unread_since = Some(now);
+    }
+}
+
+/// Notes that nothing reads the older tail from `now` on, unless that was noted already: a
+/// window hidden or shown again rests its reader again with no read of the tail between.
+fn reader_earlier_tail_unread(reader: &mut Reader, now: Instant) {
+    if reader.earlier_tail_unread_since.is_none() {
+        reader.earlier_tail_unread_since = Some(now);
     }
 }
 

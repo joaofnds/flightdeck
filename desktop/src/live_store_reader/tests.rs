@@ -389,6 +389,7 @@ fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
         }),
         deferred_listing_last_second: None,
         page_caches_unread_since: None,
+        earlier_tail_unread_since: None,
         retry_after: Instant::now(),
     };
     let mut command = Command {
@@ -1316,6 +1317,7 @@ fn reader(store: &viewer::store::chart_fixture::Charted) -> crate::live_source::
         }),
         deferred_listing_last_second: None,
         page_caches_unread_since: None,
+        earlier_tail_unread_since: None,
         retry_after: Instant::now(),
     }
 }

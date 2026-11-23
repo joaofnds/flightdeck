@@ -383,6 +383,28 @@ fn drops_the_minutes_a_tail_leaves() {
 }
 
 #[test]
+fn a_forgotten_tail_read_again_gives_the_points_it_gave_first() {
+    // Goal: a session that let go of its older tail, as the reader of a page left long enough
+    // does, draws the same points once the tail is read again. Method: seal an hour of minutes,
+    // read the tail, forget it, check that the session can no longer answer it from what it
+    // keeps, read it again, and compare the two answers and the minutes the second read took.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let last = earlier_context_last(EARLIER_LIMIT);
+    let first = session.earlier_context(last).unwrap();
+    let filled = earlier_reads(&session);
+
+    session.forget_earlier_tail();
+
+    assert!(session.earlier_context_kept(last).unwrap().is_none());
+    let again = session.earlier_context(last).unwrap();
+    assert_eq!(again, first);
+    assert_eq!(earlier_reads(&session) - filled, 13);
+}
+
+#[test]
 fn numbers_one_segment_for_each_run_of_consecutive_seconds() {
     // Goal: the tail draws one line through each run of consecutive seconds, across the edge
     // of two minutes, and breaks it at each missing stretch. Method: read the tail, whose

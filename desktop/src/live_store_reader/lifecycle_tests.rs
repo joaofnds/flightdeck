@@ -444,6 +444,7 @@ fn a_page_the_store_published_lists_the_saved_minutes_again_once_it_falls_to_the
         }),
         deferred_listing_last_second: None,
         page_caches_unread_since: None,
+        earlier_tail_unread_since: None,
         retry_after: Instant::now(),
     };
 
@@ -1070,6 +1071,86 @@ fn a_page_reads_the_older_tail_it_left_before_the_window_takes_its_readings() {
 }
 
 #[test]
+fn a_page_the_store_answers_keeps_its_older_tail_past_the_interval() {
+    // Goal: a page the Store goes on answering reads its older tail every reading, so its reader
+    // keeps the tail however long ago the Store first answered, rather than reading it again
+    // cold once an interval.
+    // Method: open the Network page on a Store over more minutes sealed before its full detail
+    // than its session reads at once, read its first part and the tail it left, step the worker
+    // with the page as it reads it once the interval since the Store's answer is over, and ask
+    // the session for the tail it keeps.
+    let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+    let last = adapter.page_with_its_older_tail();
+    let answered = adapter.reader.page_caches_unread_since.unwrap();
+
+    adapter.worker_step_at(answered + crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert!(
+        adapter
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_closed_windows_reader_lets_go_of_its_older_tail_once_the_interval_is_over() {
+    // Goal: the reader a closed window leaves to the background keeps none of the page's older
+    // tail for as long as no window opens, although the Store answered the page before the
+    // window closed.
+    // Method: open the Network page on a Store over more minutes sealed before its full detail
+    // than its session reads at once, read its first part and the tail it left, close the
+    // window, step the worker as it steps with no page once the interval since the close is
+    // over, and ask the session for the tail it keeps.
+    let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+    let last = adapter.page_with_its_older_tail();
+    let _kept = adapter.close_window();
+    let closed = Instant::now();
+
+    adapter.worker_step_resting_at(closed + crate::live_source::EARLIER_TAIL_KEEP_INTERVAL);
+
+    assert!(
+        adapter
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_window_closed_after_the_store_answered_keeps_its_older_tail_an_interval_from_the_close() {
+    // Goal: the Store answered the page before the window closed, and the page went on reading
+    // its older tail until the close, so a return within an interval of the close finds the
+    // tail kept, although an interval since the Store's answer is over.
+    // Method: open the Network page on a Store over more minutes sealed before its full detail
+    // than its session reads at once, read its first part and the tail it left, close the
+    // window, step the worker as it steps with no page a nanosecond before the interval since
+    // the close is over, and ask the session for the tail it keeps.
+    let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+    let last = adapter.page_with_its_older_tail();
+    let answered = adapter.reader.page_caches_unread_since.unwrap();
+    let _kept = adapter.close_window();
+    let closed = adapter.reader.earlier_tail_unread_since.unwrap();
+    assert!(answered < closed);
+
+    adapter.worker_step_resting_at(
+        (closed + crate::live_source::EARLIER_TAIL_KEEP_INTERVAL)
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap(),
+    );
+
+    assert!(
+        adapter
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn a_newly_opened_page_shows_before_the_step_that_read_it_lists_the_saved_minutes() {
     // Goal: a newly opened page the Store answers shows without the listing of the saved minutes
     // its session owes, which reopens the recording, and the worker's step that published the
@@ -1223,7 +1304,7 @@ struct Adapter {
     root: std::path::PathBuf,
     reader: crate::live_source::Reader,
     command: crate::live_source::Command,
-    shared: crate::live_source::Shared,
+    shared: Arc<crate::live_source::Shared>,
 }
 
 impl Adapter {
@@ -1243,6 +1324,7 @@ impl Adapter {
                 pending: None,
                 deferred_listing_last_second: None,
                 page_caches_unread_since: None,
+                earlier_tail_unread_since: None,
                 retry_after: Instant::now(),
             },
             command: crate::live_source::Command {
@@ -1251,7 +1333,7 @@ impl Adapter {
                 request: request("memory"),
                 context: crate::live_source::Context::Select,
             },
-            shared: crate::live_source::Shared::new(),
+            shared: Arc::new(crate::live_source::Shared::new()),
         }
     }
 
@@ -1301,6 +1383,52 @@ impl Adapter {
             now,
         );
         self.command = command.unwrap();
+    }
+
+    /// Hands the reader over as a closing window does, through a handle without a thread, and
+    /// takes the mailbox as the worker does at the top of its next step, which leaves it no page
+    /// to read. Returns the handle the background keeps.
+    fn close_window(&mut self) -> crate::live_source::Worker {
+        let mut closing = crate::live_source::Worker {
+            store: None,
+            root: std::path::PathBuf::new(),
+            shared: Arc::clone(&self.shared),
+            thread: None,
+            mode: crate::live_source_mode::SourceMode::Live,
+        };
+        let kept = closing.hand_over().unwrap().unwrap();
+        let mut command = Some(std::mem::replace(&mut self.command, Self::placeholder()));
+
+        let received =
+            crate::live_source::worker_receive(&self.shared, &mut self.reader, &mut command);
+
+        assert_eq!(received, crate::live_source::Received::Continued);
+        assert!(command.is_none());
+        kept
+    }
+
+    /// Steps the worker once at `now` as it steps while no page reads.
+    fn worker_step_resting_at(&mut self, now: Instant) {
+        crate::live_source::worker_step(&self.root, &self.shared, &mut self.reader, &mut None, now);
+    }
+
+    /// Reads the first part of the page and then the older tail it left, as the worker's steps
+    /// straight after each other do, and returns the last second of its context once the session
+    /// keeps the tail.
+    fn page_with_its_older_tail(&mut self) -> u64 {
+        let first = self.update_within(Duration::from_secs(10));
+        self.shared.mailbox.lock().unwrap().output = Some(first);
+        let Some(Update::Ready(rest)) = self.read() else {
+            panic!("the step left the older tail unread");
+        };
+        assert_eq!(
+            rest.selection["earlier_trends"].as_array().unwrap().len(),
+            8
+        );
+        let last = rest.selection["context_last_second"].as_u64().unwrap();
+        assert!(self.session().earlier_context_kept(last).unwrap().is_some());
+
+        last
     }
 
     /// What the worker's steps publish first, stepping as the worker does with a page to read.

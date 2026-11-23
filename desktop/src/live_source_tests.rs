@@ -630,6 +630,154 @@ fn a_rested_reader_lets_go_of_what_its_session_cached_once_the_interval_is_over(
 }
 
 #[test]
+fn a_rested_reader_lets_go_of_its_older_tail_once_the_interval_is_over() {
+    // Goal: the app keeps none of a page's older tail for as long as its reader rests, so the
+    // worker of a reader that has rested for the kept interval lets go of it.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader as a hidden window's rests, step it as the worker does once the interval is over,
+    // and ask the session for the tail it keeps.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let _kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+
+    reader.step_resting_at(&recording.root, rested + super::EARLIER_TAIL_KEEP_INTERVAL);
+
+    assert!(
+        reader
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_reader_rested_again_lets_go_of_its_older_tail_an_interval_after_its_first_rest() {
+    // Goal: a rested window that macOS hides or shows again rests its reader again and asks it
+    // for nothing, so nothing has read the tail since the first rest, and the interval counts
+    // from that rest however often the window is hidden and shown.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader, rest it again as a hidden window's rests, step it as the worker does an interval
+    // after the first rest, and ask the session for the tail it keeps.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let _kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+    let _kept_again = reader.hand_over();
+    reader.receive();
+
+    reader.step_resting_at(&recording.root, rested + super::EARLIER_TAIL_KEEP_INTERVAL);
+
+    assert!(
+        reader
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_rested_reader_asked_for_a_read_without_the_tail_lets_go_of_it_an_interval_after_its_rest() {
+    // Goal: a hover's read of one second goes without the older tail, so such a request to a
+    // rested reader reads none of the tail, and the interval still counts from the rest.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader, ask it through the kept handle for the page without its older tail, step it with
+    // that page as the worker does an interval after the rest, and ask the session for the tail
+    // it keeps.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let mut kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+    let mut request = SealedRecording::request();
+    request.route = "network".into();
+    request.earlier = crate::live_source::Earlier::Skip;
+    kept.request(request).unwrap();
+    assert!(reader.receive().1);
+
+    reader.step_at(&recording.root, rested + super::EARLIER_TAIL_KEEP_INTERVAL);
+
+    assert!(
+        reader
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_page_asked_for_again_after_its_reader_rested_keeps_its_older_tail_past_the_interval() {
+    // Goal: a page asked for again reads its older tail every reading, so the rest before the
+    // request lets go of nothing once the interval since that rest is over.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader, ask for the page again through the kept handle, step the reader with the page as
+    // the worker does once the interval since the rest is over, and ask the session for the
+    // tail it keeps.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let mut kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+    let mut request = SealedRecording::request();
+    request.route = "network".into();
+    request.earlier = crate::live_source::Earlier::Load;
+    kept.request(request).unwrap();
+    assert!(reader.receive().1);
+
+    reader.step_at(&recording.root, rested + super::EARLIER_TAIL_KEEP_INTERVAL);
+
+    assert!(
+        reader
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_page_returned_to_within_the_interval_after_its_reader_rested_reads_no_older_minute() {
+    // Goal: a return to a page soon after its reader rests draws the older tail the session
+    // kept, so the reader keeps the tail until the kept interval is over.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader, step it as the worker does a nanosecond before the interval is over, ask for the
+    // page again through the kept handle, then read its older tail as the returned page does,
+    // counting the saved tables it decodes.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let mut kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+    reader.step_resting_at(
+        &recording.root,
+        (rested + super::EARLIER_TAIL_KEEP_INTERVAL)
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap(),
+    );
+    let mut request = SealedRecording::request();
+    request.route = "network".into();
+    request.earlier = crate::live_source::Earlier::Load;
+    kept.request(request).unwrap();
+    assert!(reader.receive().1);
+    let measured = persistence::work::observe();
+
+    let returned = reader.earlier(&recording, last);
+
+    assert_eq!(returned["earlier_trends"].as_array().unwrap().len(), 1);
+    assert_eq!(measured.counts().saved_tables, 0);
+}
+
+#[test]
 fn a_page_the_saved_minutes_answer_after_its_reader_rested_keeps_what_the_session_cached() {
     // Goal: the saved minutes answer a page with what the session cached, so a page they answer
     // after the reader rested keeps it however long ago the reader rested.
@@ -1089,6 +1237,7 @@ impl SnapshotReader {
                 pending: None,
                 deferred_listing_last_second: None,
                 page_caches_unread_since: None,
+                earlier_tail_unread_since: None,
                 retry_after: std::time::Instant::now(),
             },
             command: Self::command(),
@@ -1194,6 +1343,13 @@ impl SnapshotReader {
         super::worker_step(root, &self.shared, &mut self.reader, &mut None, now)
     }
 
+    /// Steps the reader as the worker does at `now` with the page it reads.
+    fn step_at(&mut self, root: &std::path::Path, now: std::time::Instant) {
+        let mut command = Some(std::mem::replace(&mut self.command, Self::command()));
+        super::worker_step(root, &self.shared, &mut self.reader, &mut command, now);
+        self.command = command.unwrap();
+    }
+
     fn lease(
         &mut self,
         root: &std::path::Path,
@@ -1228,6 +1384,22 @@ impl SnapshotReader {
             }
         }
         panic!("The reader left its App histories pending");
+    }
+
+    /// Reads the Network page with its older tail to the end from `recording`'s saved minutes,
+    /// and returns the last second of its context, once the session keeps the tail.
+    fn network_with_its_older_tail(&mut self, recording: &SealedRecording) -> u64 {
+        self.command.request.route = "network".into();
+        self.command.request.earlier = crate::live_source::Earlier::Load;
+        let read = self.read_complete(recording);
+        assert_eq!(
+            read.selection["earlier_trends"].as_array().unwrap().len(),
+            1
+        );
+        let last = read.selection["context_last_second"].as_u64().unwrap();
+        assert!(self.session().earlier_context_kept(last).unwrap().is_some());
+
+        last
     }
 }
 
