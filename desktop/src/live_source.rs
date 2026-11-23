@@ -383,6 +383,11 @@ enum Histories {
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a resting reader waits where nothing it keeps waits to be let go of. A request, a rest
+/// or a stop ends such a rest, and so does a reply of the Store on the reader's handle where the
+/// reader read a page before its rest, since that page's first reading stays awaited. The bound
+/// only keeps the wait finite.
+const REST_PAUSE_MAX: Duration = Duration::from_hours(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the session keeps what it cached for a page the saved minutes answered once
 /// nothing reads it, because the Store took that page over or its reader rested: the seconds a
@@ -410,6 +415,9 @@ const _: () = {
     assert!(WORKER_LEASES_MAX > 0);
     assert!(APP_KEY_BYTES_MAX > 0);
     assert!(ALTERNATIVES_MAX <= 4096);
+    assert!(POLL_INTERVAL.as_millis() < REST_PAUSE_MAX.as_millis());
+    assert!(PAGE_CACHES_KEEP_INTERVAL.as_millis() <= REST_PAUSE_MAX.as_millis());
+    assert!(EARLIER_TAIL_KEEP_INTERVAL.as_millis() <= REST_PAUSE_MAX.as_millis());
 };
 
 impl Worker {
@@ -735,7 +743,18 @@ impl Worker {
         if let Err(error) = self.shared.cancellation.cancel() {
             eprintln!("flightdeck GPUI reader cancellation: {error}");
         }
-        self.shared.wake.notify_one();
+        // The pause holds this lock from its check of `stopped` to its wait, so a stop that
+        // takes it after the store either lands before that check or wakes that wait.
+        match self.shared.mailbox.lock() {
+            Ok(mailbox) => {
+                self.shared.wake.notify_one();
+                drop(mailbox);
+            }
+            Err(error) => {
+                eprintln!("flightdeck GPUI reader mailbox: {error}");
+                self.shared.wake.notify_one();
+            }
+        }
     }
 }
 
@@ -930,7 +949,7 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
 /// next step. A listing of the saved minutes the step left comes after what it published. So
 /// does letting go of what the session cached for a page nothing has read for long enough, and
 /// of an older tail nothing has read for long enough. Both count to `now`, the instant of the
-/// step.
+/// step. A resting reader waits until the next of the two is due.
 fn worker_step(
     root: &std::path::Path,
     shared: &Shared,
@@ -938,48 +957,64 @@ fn worker_step(
     command: &mut Option<Command>,
     now: Instant,
 ) -> Duration {
-    let pause = worker_step_read(root, shared, reader, command);
+    let mut read_pause = None;
+    if let Some(command) = command.as_mut() {
+        read_pause = Some(worker_step_read(root, shared, reader, command));
+    }
     worker_step_list(reader);
     worker_step_forget(reader, now);
     worker_step_forget_earlier_tail(reader, now);
 
-    pause
+    if let Some(pause) = read_pause {
+        pause
+    } else {
+        worker_step_rest_pause(reader, now)
+    }
+}
+
+/// How long a resting reader waits at `now`: until the first of its page caches and its older
+/// tail is due to be let go of, or `REST_PAUSE_MAX` where neither waits.
+fn worker_step_rest_pause(reader: &Reader, now: Instant) -> Duration {
+    let page_caches_due = reader_page_caches_due(reader);
+    let earlier_tail_due = reader_earlier_tail_due(reader);
+
+    [page_caches_due, earlier_tail_due]
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(REST_PAUSE_MAX, |due| due.saturating_duration_since(now))
 }
 
 fn worker_step_read(
     root: &std::path::Path,
     shared: &Shared,
     reader: &mut Reader,
-    command: &mut Option<Command>,
+    command: &mut Command,
 ) -> Duration {
-    if let Some(command) = command {
-        #[cfg(test)]
-        if reader_pending(reader, command.generation) {
-            measurement::checkpoint(shared, command.generation, measurement::Stage::Pending);
-        }
-        let told = shared.reading_on_its_way.load(Ordering::Acquire);
-        let asked = worker_step_read_keyed_question(reader);
-        if let Some(output) = reader_read(reader, root, command, shared) {
-            #[cfg(test)]
-            shared.measurement_staged.store(
-                reader_published(reader, command.generation),
-                Ordering::Release,
-            );
-            #[cfg(test)]
-            measurement::finished(shared, command.generation);
-            worker_publish(shared, command.generation, output);
-        } else if told {
-            // The page left the store's View to the reading of the keyed question it was told
-            // of. Where the step ended that question with no reading, the page takes the View
-            // now rather than at its next tick.
-            if worker_step_read_keyed_question(reader) != asked {
-                shared.wake_page();
-            }
-        }
-        worker_pause(reader, command)
-    } else {
-        POLL_INTERVAL
+    #[cfg(test)]
+    if reader_pending(reader, command.generation) {
+        measurement::checkpoint(shared, command.generation, measurement::Stage::Pending);
     }
+    let told = shared.reading_on_its_way.load(Ordering::Acquire);
+    let asked = worker_step_read_keyed_question(reader);
+    if let Some(output) = reader_read(reader, root, command, shared) {
+        #[cfg(test)]
+        shared.measurement_staged.store(
+            reader_published(reader, command.generation),
+            Ordering::Release,
+        );
+        #[cfg(test)]
+        measurement::finished(shared, command.generation);
+        worker_publish(shared, command.generation, output);
+    } else if told {
+        // The page left the store's View to the reading of the keyed question it was told
+        // of. Where the step ended that question with no reading, the page takes the View
+        // now rather than at its next tick.
+        if worker_step_read_keyed_question(reader) != asked {
+            shared.wake_page();
+        }
+    }
+    worker_pause(reader, command)
 }
 
 /// The token of the keyed question the reader has out to the Store, if any.
@@ -1011,10 +1046,10 @@ fn worker_step_list(reader: &mut Reader) {
 /// read it for `PAGE_CACHES_KEEP_INTERVAL` at `now`. Left to stay, it would last as long as the
 /// app runs. It comes after what the step published, so freeing it holds up no reading.
 fn worker_step_forget(reader: &mut Reader, now: Instant) {
-    let Some(since) = reader.page_caches_unread_since else {
+    let Some(due) = reader_page_caches_due(reader) else {
         return;
     };
-    if now.saturating_duration_since(since) < PAGE_CACHES_KEEP_INTERVAL {
+    if now < due {
         return;
     }
 
@@ -1029,10 +1064,10 @@ fn worker_step_forget(reader: &mut Reader, now: Instant) {
 /// store's View draws and in a closed one alike. A return within the interval draws the tail the
 /// session kept, and a later one reads it again as the first read did.
 fn worker_step_forget_earlier_tail(reader: &mut Reader, now: Instant) {
-    let Some(since) = reader.earlier_tail_unread_since else {
+    let Some(due) = reader_earlier_tail_due(reader) else {
         return;
     };
-    if now.saturating_duration_since(since) < EARLIER_TAIL_KEEP_INTERVAL {
+    if now < due {
         return;
     }
 
@@ -1040,6 +1075,22 @@ fn worker_step_forget_earlier_tail(reader: &mut Reader, now: Instant) {
     if let Some(session) = &mut reader.session {
         session.forget_earlier_tail();
     }
+}
+
+/// When the session lets go of what it cached for a page, `PAGE_CACHES_KEEP_INTERVAL` after
+/// nothing read it, or None while something reads it.
+fn reader_page_caches_due(reader: &Reader) -> Option<Instant> {
+    reader
+        .page_caches_unread_since
+        .map(|since| since + PAGE_CACHES_KEEP_INTERVAL)
+}
+
+/// When the session lets go of the older tail, `EARLIER_TAIL_KEEP_INTERVAL` after nothing read
+/// it, or None while something reads it.
+fn reader_earlier_tail_due(reader: &Reader) -> Option<Instant> {
+    reader
+        .earlier_tail_unread_since
+        .map(|since| since + EARLIER_TAIL_KEEP_INTERVAL)
 }
 
 /// Notes that nothing reads what the session cached for a page from `now` on, unless that was

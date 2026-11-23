@@ -835,6 +835,118 @@ fn a_reader_rested_on_a_held_second_lets_go_once_the_interval_is_over() {
 }
 
 #[test]
+fn a_resting_reader_with_nothing_to_let_go_of_waits_to_be_asked() {
+    // Goal: a resting reader whose session keeps nothing it waits to let go of steps only when a
+    // request, a rest or a stop wakes it, and not at the worker's pace.
+    // Method: step a reader that never read as the worker does while no page reads, and read
+    // its pause.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+
+    let pause = reader.step_resting_at(&recording.root, std::time::Instant::now());
+
+    assert_eq!(pause, super::REST_PAUSE_MAX);
+}
+
+#[test]
+fn a_rested_reader_pauses_until_its_page_caches_are_due_and_then_lets_go_of_them() {
+    // Goal: a resting reader steps once for what its session cached for a page, at the instant
+    // the kept interval is over, and lets go of it in that step.
+    // Method: read Overview to the end from the saved minutes, rest the reader, leave only the
+    // page caches pending, as an older tail let go of first leaves them, step it at the rest and
+    // again once the pause it returned is over, and read the session's cache.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    assert!(reader.session().app_history_bytes() > 0);
+    let _kept = reader.hand_over();
+    reader.receive();
+    reader.reader.earlier_tail_unread_since = None;
+    let rested = reader.reader.page_caches_unread_since.unwrap();
+
+    let pause = reader.step_resting_at(&recording.root, rested);
+    let after = reader.step_resting_at(&recording.root, rested + pause);
+
+    assert_eq!(pause, super::PAGE_CACHES_KEEP_INTERVAL);
+    assert_eq!(reader.session().app_history_bytes(), 0);
+    assert_eq!(after, super::REST_PAUSE_MAX);
+}
+
+#[test]
+fn a_rested_reader_pauses_until_its_older_tail_is_due_and_then_lets_go_of_it() {
+    // Goal: a resting reader steps once for its older tail, at the instant the kept interval is
+    // over, and lets go of it in that step.
+    // Method: read Network with its older tail to the end from the saved minutes, rest the
+    // reader, leave only the tail pending, as page caches let go of first leave it, step it at
+    // the rest and again once the pause it returned is over, and ask the session for the tail.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let last = reader.network_with_its_older_tail(&recording);
+    let _kept = reader.hand_over();
+    reader.receive();
+    reader.reader.page_caches_unread_since = None;
+    let rested = reader.reader.earlier_tail_unread_since.unwrap();
+
+    let pause = reader.step_resting_at(&recording.root, rested);
+    reader.step_resting_at(&recording.root, rested + pause);
+
+    assert_eq!(pause, super::EARLIER_TAIL_KEEP_INTERVAL);
+    assert!(
+        reader
+            .session()
+            .earlier_context_kept(last)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_resting_reader_pauses_until_the_first_of_what_it_keeps_is_due() {
+    // Goal: where the page caches and the older tail both wait to be let go of, the one due
+    // first sets the pause, so neither is let go of late.
+    // Method: a resting reader whose older tail went unread a second before its page caches,
+    // stepped at the later of the two instants, and its pause.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let caches_unread = std::time::Instant::now();
+    let tail_unread = caches_unread.checked_sub(Duration::from_secs(1)).unwrap();
+    reader.reader.page_caches_unread_since = Some(caches_unread);
+    reader.reader.earlier_tail_unread_since = Some(tail_unread);
+
+    let pause = reader.step_resting_at(&recording.root, caches_unread);
+
+    assert_eq!(
+        pause,
+        super::EARLIER_TAIL_KEEP_INTERVAL
+            .checked_sub(Duration::from_secs(1))
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_resting_reader_pauses_until_its_page_caches_are_due_where_they_go_unread_first() {
+    // Goal: where the page caches went unread before the older tail, they set the pause, so
+    // the pause takes the earlier of the two and not the tail's whenever it waits.
+    // Method: a resting reader whose page caches went unread a second before its older tail,
+    // stepped at the later of the two instants, and its pause.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let tail_unread = std::time::Instant::now();
+    let caches_unread = tail_unread.checked_sub(Duration::from_secs(1)).unwrap();
+    reader.reader.page_caches_unread_since = Some(caches_unread);
+    reader.reader.earlier_tail_unread_since = Some(tail_unread);
+
+    let pause = reader.step_resting_at(&recording.root, tail_unread);
+
+    assert_eq!(
+        pause,
+        super::PAGE_CACHES_KEEP_INTERVAL
+            .checked_sub(Duration::from_secs(1))
+            .unwrap()
+    );
+}
+
+#[test]
 fn a_handed_over_reader_leaves_its_session_where_it_is() {
     // Goal: a reader reads and publishes nothing while it rests, since the store goes on
     // following the recording and reading it here too would take in each minute twice.
@@ -847,10 +959,11 @@ fn a_handed_over_reader_leaves_its_session_where_it_is() {
     recording.seal_older_minute(3000);
 
     let received = reader.receive();
-    let pause = reader.step_resting(&recording.root);
+    let rested = reader.reader.page_caches_unread_since.unwrap();
+    let pause = reader.step_resting_at(&recording.root, rested);
 
     assert_eq!(received, (super::Received::Continued, false));
-    assert_eq!(pause, super::POLL_INTERVAL);
+    assert_eq!(pause, super::PAGE_CACHES_KEEP_INTERVAL);
     assert!(reader.shared.mailbox.lock().unwrap().output.is_none());
     assert_eq!(reader.session().catalog()["last_second"], 2200);
 }
@@ -1958,13 +2071,7 @@ fn keeps_the_same_observation_when_loss_metadata_changes() {
 fn refuses_superseded_results_after_accepting_a_new_request() {
     // Goal: an old worker result cannot replace the latest requested generation.
     // Method: publish both generations through the real mailbox without a background thread.
-    let mut worker = Worker {
-        store: None,
-        root: std::path::PathBuf::new(),
-        shared: Arc::new(Shared::new()),
-        thread: None,
-        mode: crate::live_source_mode::SourceMode::Live,
-    };
+    let mut worker = a_worker_without_a_thread();
     let request = Request {
         route: "overview".to_owned(),
         second: None,
@@ -2011,13 +2118,7 @@ fn a_new_request_ends_the_pause_between_polls() {
     // the app reads local files and should show at once. Method: pause a thread for a minute on
     // the real mailbox, see it wait, send a request, and wait up to ten seconds for the pause to
     // end, which keeps the verdict independent of how busy the machine is.
-    let mut worker = Worker {
-        store: None,
-        root: std::path::PathBuf::new(),
-        shared: Arc::new(Shared::new()),
-        thread: None,
-        mode: crate::live_source_mode::SourceMode::Live,
-    };
+    let mut worker = a_worker_without_a_thread();
     // The pause sets this back to `Time` under the mailbox's lock and lets the lock go only by
     // waiting, so finding `Time` again means the pause waits.
     worker.shared.mailbox.lock().unwrap().pause_end = crate::live_source::PauseEnd::StoreAnswer;
@@ -2041,6 +2142,84 @@ fn a_new_request_ends_the_pause_between_polls() {
 
     ending.recv_timeout(Duration::from_secs(10)).unwrap();
     pausing.join().unwrap();
+}
+
+#[test]
+fn a_stop_ends_a_resting_readers_pause() {
+    // Goal: closing the app does not wait out a resting reader's pause, which can last an hour.
+    // Method: pause a thread for the rest's bound on the real mailbox, see it wait, stop the
+    // reader, and wait up to ten seconds for the pause to end, which keeps the verdict
+    // independent of how busy the machine is.
+    let mut worker = a_worker_without_a_thread();
+    // The pause sets this back to `Time` under the mailbox's lock and lets the lock go only by
+    // waiting, so finding `Time` again means the pause waits.
+    worker.shared.mailbox.lock().unwrap().pause_end = crate::live_source::PauseEnd::StoreAnswer;
+    let (ended, ending) = std::sync::mpsc::channel();
+    let shared = Arc::clone(&worker.shared);
+    let pausing = std::thread::spawn(move || {
+        worker_pause_for(&shared, super::REST_PAUSE_MAX, None);
+        ended.send(()).unwrap();
+    });
+    let waiting = (0..2_000).any(|_| {
+        let waiting =
+            worker.shared.mailbox.lock().unwrap().pause_end == crate::live_source::PauseEnd::Time;
+        if !waiting {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        waiting
+    });
+    assert!(waiting, "the pause never began");
+
+    worker.stop();
+
+    ending.recv_timeout(Duration::from_secs(10)).unwrap();
+    pausing.join().unwrap();
+}
+
+#[test]
+fn a_stop_waits_for_the_mailbox_a_pause_holds() {
+    // Goal: a stop ends a resting reader's pause, which can last an hour, even where it lands
+    // after the pause found the reader running and before the pause waits. Method: hold the real
+    // mailbox's lock as the pause holds it from its check to its wait, stop the reader on another
+    // thread, see the stop wait for the lock, then wait on the reader's wake as the pause does
+    // and expect the stop to end that wait, well before its minute.
+    let mut worker = a_worker_without_a_thread();
+    let shared = Arc::clone(&worker.shared);
+    let mailbox = shared.mailbox.lock().unwrap();
+    let stopping = std::thread::spawn(move || worker.stop());
+    let stored = (0..2_000).any(|_| {
+        let stored = shared.stopped.load(std::sync::atomic::Ordering::Acquire);
+        if !stored {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stored
+    });
+    assert!(stored, "the stop never began");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !stopping.is_finished(),
+        "the stop finished without the mailbox's lock"
+    );
+
+    let (mailbox, wait) = shared
+        .wake
+        .wait_timeout(mailbox, Duration::from_secs(60))
+        .unwrap();
+
+    assert!(!wait.timed_out());
+    drop(mailbox);
+    stopping.join().unwrap();
+}
+
+/// A live reader's handle with no thread behind it, so a test drives its mailbox itself.
+fn a_worker_without_a_thread() -> Worker {
+    Worker {
+        store: None,
+        root: std::path::PathBuf::new(),
+        shared: Arc::new(Shared::new()),
+        thread: None,
+        mode: crate::live_source_mode::SourceMode::Live,
+    }
 }
 
 #[path = "live_native_measurement_tests.rs"]

@@ -2188,7 +2188,7 @@ mod when_a_page_follows_the_newest_second {
                 std::path::Path::new(NO_RECORDING),
                 shared,
                 reader,
-                command,
+                command.as_mut().unwrap(),
             );
             let on_its_way =
                 crate::live_source::worker_lease_reading_on_its_way(reader, command.as_ref());

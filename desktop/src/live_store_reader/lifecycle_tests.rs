@@ -215,6 +215,27 @@ fn a_store_that_takes_the_page_back_keeps_the_saved_app_histories_cached_within_
 }
 
 #[test]
+fn a_page_the_store_answers_keeps_the_workers_pace_just_before_its_page_caches_are_due() {
+    // Goal: only a resting reader waits until what it keeps is due, so a page the Store answers
+    // steps at the worker's pace even a moment before its page caches are let go of.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, step the worker a millisecond
+    // before the interval is over, and read the pause.
+    let (recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.memory_page_from_the_saved_minutes();
+    let taken_over = adapter.store_takes_over(&store);
+
+    let pause = adapter.worker_step_at(
+        (taken_over + crate::live_source::PAGE_CACHES_KEEP_INTERVAL)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap(),
+    );
+
+    assert_eq!(pause, crate::live_source::POLL_INTERVAL);
+}
+
+#[test]
 fn a_store_that_takes_the_page_back_lets_the_saved_app_histories_go_once_the_interval_is_over() {
     // Goal: the App histories a page cached from the saved minutes go once the Store has had the
     // page for the kept interval, so the app keeps none of them for as long as it runs.
@@ -1372,10 +1393,10 @@ impl Adapter {
         self.reader.page_caches_unread_since.unwrap()
     }
 
-    /// Steps the worker once at `now` with the page it reads.
-    fn worker_step_at(&mut self, now: Instant) {
+    /// Steps the worker once at `now` with the page it reads, and returns its pause.
+    fn worker_step_at(&mut self, now: Instant) -> Duration {
         let mut command = Some(std::mem::replace(&mut self.command, Self::placeholder()));
-        crate::live_source::worker_step(
+        let pause = crate::live_source::worker_step(
             &self.root,
             &self.shared,
             &mut self.reader,
@@ -1383,6 +1404,8 @@ impl Adapter {
             now,
         );
         self.command = command.unwrap();
+
+        pause
     }
 
     /// Hands the reader over as a closing window does, through a handle without a thread, and
