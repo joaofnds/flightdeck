@@ -1251,6 +1251,7 @@ impl LiveDashboard {
         let Some(mut snapshot) = self.snapshot.take() else {
             return;
         };
+        self.store_view_keep(&mut snapshot);
         // An App's parts keep the whole context they borrow from, and the Store holds two at most.
         // The page's next reading brings them again.
         snapshot.app_parts = None;

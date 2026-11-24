@@ -21,11 +21,10 @@ use crate::hardware::Readings;
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_hover::{HeldSecond, Target};
 use crate::live_inventory::PerformanceLevel;
-use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::held_projection;
 use crate::live_rankings::{Rankings, from_sampled, from_selected, stamp_identity};
 use crate::live_resident_history::ResidentHistory;
-use crate::live_source::AppChartSource;
+use crate::live_source::{AppChartSource, Presentation, Snapshot};
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
 use crate::live_views::summary;
@@ -190,11 +189,91 @@ impl MailboxLooks {
     }
 }
 
-/// The App charts the page drew from its last View, which the charts of a newer View take the
-/// points of the seconds both Views hold from.
-struct OlderAppCharts {
-    histories: Option<OverviewAppHistories>,
-    resident: Option<ResidentHistory>,
+/// The histories by App a page drew from a View, one for each chart by App it draws, which
+/// say why a chart is left out and which the charts of a newer View take the points of the
+/// seconds both Views hold from. A page kept while its reading left its chart to the View shares
+/// the history of that chart, so the store builds the next one from scratch while it is shared.
+#[derive(Default)]
+struct AppHistories {
+    cpu: Option<Arc<AppAttributionHistory>>,
+    power: Option<Arc<AppAttributionHistory>>,
+    disk: Option<Arc<AppAttributionHistory>>,
+    gpu: Option<Arc<AppAttributionHistory>>,
+    resident: Option<Arc<ResidentHistory>>,
+}
+
+impl AppHistories {
+    /// The history of `metric`, where these were built for its chart.
+    fn attribution(&self, metric: Metric) -> Option<&Arc<AppAttributionHistory>> {
+        match metric {
+            Metric::Cpu => self.cpu.as_ref(),
+            Metric::Power => self.power.as_ref(),
+            Metric::Disk => self.disk.as_ref(),
+            Metric::Gpu => self.gpu.as_ref(),
+        }
+    }
+}
+
+/// Whether a page draws one chart by App from the store's View, and so builds its history.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum ChartShown {
+    #[default]
+    Hidden,
+    Shown,
+}
+
+impl ChartShown {
+    fn of(shown: bool) -> Self {
+        if shown { Self::Shown } else { Self::Hidden }
+    }
+}
+
+/// The charts by App a page draws from the store's View, as `store_view_draws_app_chart` names
+/// them for its route, so the page builds a history only for a chart it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct AppCharts {
+    cpu: ChartShown,
+    power: ChartShown,
+    disk: ChartShown,
+    gpu: ChartShown,
+    resident_memory: ChartShown,
+}
+
+impl AppCharts {
+    /// The charts by App the page `route` draws from the store's View.
+    fn of(route: &str) -> Self {
+        let chart = |id| ChartShown::of(store_view_draws_app_chart(route, id));
+
+        Self {
+            cpu: chart(Metric::Cpu.panel_id()),
+            power: chart(Metric::Power.panel_id()),
+            disk: chart(Metric::Disk.panel_id()),
+            gpu: chart(Metric::Gpu.panel_id()),
+            resident_memory: chart(crate::live_resident_history::PANEL_ID),
+        }
+    }
+
+    /// Whether the page draws the chart of `metric` by App from the store's View.
+    fn shows(self, metric: Metric) -> bool {
+        let chart = match metric {
+            Metric::Cpu => self.cpu,
+            Metric::Power => self.power,
+            Metric::Disk => self.disk,
+            Metric::Gpu => self.gpu,
+        };
+
+        chart == ChartShown::Shown
+    }
+
+    /// Whether the page draws the chart of resident memory by App from the store's View.
+    fn shows_resident(self) -> bool {
+        self.resident_memory == ChartShown::Shown
+    }
+
+    /// Whether the page draws any chart by App from the store's View.
+    fn any(self) -> bool {
+        self.shows_resident() || APP_METRICS.into_iter().any(|metric| self.shows(metric))
+    }
 }
 
 /// The charts the page drew from a View, as the range zoomed them, so a reading that arrives
@@ -213,17 +292,17 @@ pub(super) struct StorePanels {
     panels: Vec<Rc<Panel>>,
     /// The wall second of each point of `panels`, in the order of their positions.
     seconds: Vec<u64>,
-    /// The charts by App the View draws, of resident memory and of `APP_METRICS`, leaving out
-    /// each it holds too little for.
+    /// The charts by App `apps` and `histories` were built for, which the page shows only on a
+    /// page that draws the same charts. It names none before the first View and on a page that
+    /// draws no chart by App, as Network.
+    charts: AppCharts,
+    /// The charts by App the View draws, of resident memory and of `APP_METRICS`, those `charts`
+    /// names, leaving out each it holds too little for.
     apps: Vec<Rc<Panel>>,
-    /// The histories of CPU time, power and disk bytes that `apps` draw, which say why a chart
-    /// is left out, or none before the first View.
-    histories: Option<OverviewAppHistories>,
-    /// The history of GPU time that `apps` draw, which the GPU page alone keeps, or none on the
-    /// other pages and before the first View.
-    gpu: Option<AppAttributionHistory>,
-    /// The history of resident memory `apps` draw, or none before the first View.
-    resident: Option<ResidentHistory>,
+    /// The histories `apps` draw, one for each chart `charts` names, until the page builds the
+    /// charts of a newer View, which takes them. A build that fails after taking them leaves
+    /// none, while `charts` still names the charts they were built for.
+    histories: AppHistories,
     /// The top Apps of the View's newest second, or none before the first View.
     rankings: Option<Rankings>,
     /// Why the last View the page took could not be drawn, reported once.
@@ -246,6 +325,16 @@ impl StorePanels {
     /// How many times the page built charts from a View.
     pub(super) fn builds(&self) -> u64 {
         self.builds
+    }
+
+    /// Whether these are the charts drawn for the page `route`: for its kind of page, with the
+    /// charts by App it draws.
+    fn drawn_for(&self, route: &str) -> bool {
+        if self.machine != store_panels_machine(route) {
+            return false;
+        }
+
+        self.charts == AppCharts::of(route)
     }
 }
 
@@ -298,7 +387,7 @@ impl LiveDashboard {
         let drawn = &self.store_panels;
         if drawn.version != Some(version)
             || drawn.chosen_over != Some(chosen_over)
-            || drawn.machine != store_panels_machine(&self.request.route)
+            || !drawn.drawn_for(&self.request.route)
         {
             let Some(view) = self.store_view.clone() else {
                 unreachable!("the drawn View is the View the page holds");
@@ -340,23 +429,22 @@ impl LiveDashboard {
         if self.preview.is_some() {
             // A hover holds the charts where the pointer found them until it ends, so a reply
             // of the page's own that it takes gets back the charts drawn before it.
-            if drawn.machine.is_some() || drawn.version.is_none() {
+            if !drawn.drawn_for(&self.request.route) || drawn.version.is_none() {
                 return false;
             }
         } else if drawn.version != Some(version)
             || drawn.chosen_over != Some(chosen_over)
-            || drawn.machine.is_some()
+            || !drawn.drawn_for(&self.request.route)
         {
             // The App charts of the last View give the new ones the points both Views hold.
-            let older = OlderAppCharts {
-                histories: self.store_panels.histories.take(),
-                resident: self.store_panels.resident.take(),
-            };
+            let older = std::mem::take(&mut self.store_panels.histories);
             let Some(view) = self.store_view.clone() else {
                 unreachable!("taking the App charts leaves the drawn View as it was");
             };
+            let charts = AppCharts::of(&self.request.route);
             let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
-            let mut panels = draw_store_view_panels_apps(&view, older, &cohorts, chosen_over);
+            let mut panels =
+                draw_store_view_panels_apps(&view, charts, older, &cohorts, chosen_over);
             for panel in &mut panels.apps {
                 super::zoom_panel(panel, window);
             }
@@ -469,6 +557,35 @@ impl LiveDashboard {
         panels
     }
 
+    /// Gives `snapshot`, the reading of the page being left, the history its chart by App drew
+    /// from the store's View where the reading left that chart to the View, and says the reading
+    /// brings it. The store builds only the charts the next page draws, so the page opened again
+    /// reads its own history whether or not the store still holds a View.
+    pub(super) fn store_view_keep(&self, snapshot: &mut Snapshot) {
+        if snapshot.app_chart_source == AppChartSource::Reading {
+            return;
+        }
+        let route = self.request.route.as_str();
+        // Overview's readings always bring their charts by App.
+        assert!(route != "overview");
+        if !self.store_panels.drawn_for(route) {
+            return;
+        }
+
+        let histories = &self.store_panels.histories;
+        if let Some(metric) = Metric::from_route(route) {
+            let history = histories.attribution(metric).map(Arc::clone);
+            snapshot.app_attribution_history =
+                history.map(|shared| Arc::new(Presentation::Shared(shared)));
+        }
+        if self.store_panels.charts.shows_resident() {
+            let history = histories.resident.clone();
+            snapshot.resident_history =
+                history.map(|shared| Arc::new(Presentation::Shared(shared)));
+        }
+        snapshot.app_chart_source = AppChartSource::Reading;
+    }
+
     /// Puts `panels`, built from the View the page holds, in place of the charts it drew before.
     fn store_view_built(&mut self, panels: StorePanels) {
         // Charts just built carry no count of their own, which this would drop.
@@ -506,20 +623,12 @@ impl LiveDashboard {
         let Some(route) = store_panels_machine(&self.request.route) else {
             unreachable!("only a page drawn from the View draws its machine charts from it");
         };
-        let mut drawn = if store_view_draws_apps(route) {
+        let charts = AppCharts::of(route);
+        let mut drawn = if charts.any() {
             // The App charts of the last View give the new ones the points both Views hold.
-            let older = OlderAppCharts {
-                histories: self.store_panels.histories.take(),
-                resident: self.store_panels.resident.take(),
-            };
+            let older = std::mem::take(&mut self.store_panels.histories);
             let cohorts = draw_store_view_cohorts(view, chosen_over, &mut self.leaders);
-            let mut drawn = draw_store_view_panels_apps(view, older, &cohorts, chosen_over);
-            if store_view_draws_app_chart(route, Metric::Gpu.panel_id()) {
-                let older_gpu = self.store_panels.gpu.take();
-                let gpu = draw_store_view_gpu(view, &cohorts, older_gpu);
-                drawn.apps.extend(gpu.panel());
-                drawn.gpu = Some(gpu);
-            }
+            let mut drawn = draw_store_view_panels_apps(view, charts, older, &cohorts, chosen_over);
             if route == "overview" {
                 crate::live_acceptance::prepare_overview_titles(&mut drawn.apps)?;
             }
@@ -598,7 +707,7 @@ impl LiveDashboard {
         if !self.draws_from_store_view() {
             return None;
         }
-        if self.store_panels.machine != store_panels_machine(&self.request.route) {
+        if !self.store_panels.drawn_for(&self.request.route) {
             return None;
         }
 
@@ -622,12 +731,12 @@ impl LiveDashboard {
     /// page drawn from the View, from the View it follows on another page, whose charts a hover
     /// holds still, or from what it kept of a View it let go of.
     fn store_panels_shown(&self) -> bool {
-        // A page keeps the charts drawn for a page whose machine charts differ from its own until
-        // it draws its own, which a hover holds back.
-        let machine = store_panels_machine(&self.request.route);
-        if self.store_panels.machine != machine {
+        // A page keeps the charts drawn for a page whose machine charts or charts by App differ
+        // from its own until it draws its own, which a hover holds back.
+        if !self.store_panels.drawn_for(&self.request.route) {
             return false;
         }
+        let machine = store_panels_machine(&self.request.route);
         if self.kept_remnant().is_some() {
             return true;
         }
@@ -767,11 +876,7 @@ impl LiveDashboard {
         assert!(self.store_panels.version.is_some());
         // A page kept while it drew from a View can open again after another kind of page drew
         // its own.
-        if self.store_panels.machine != store_panels_machine(&self.request.route) {
-            return false;
-        }
-
-        true
+        self.store_panels.drawn_for(&self.request.route)
     }
 
     /// Whether the page reads its charts by App from those it drew from the store: where it
@@ -782,6 +887,17 @@ impl LiveDashboard {
         }
 
         self.store_panels_apps_left()
+    }
+
+    /// Whether the page reads the histories by App it drew from the store's View, in place of
+    /// the worker's: where it reads its charts by App from those it drew, on a page that draws a
+    /// chart by App from the View.
+    fn store_panels_histories_read(&self) -> bool {
+        if !self.store_panels.charts.any() {
+            return false;
+        }
+
+        self.store_panels_apps_read()
     }
 
     /// Whether `panel` is a chart the page drew from the store's View.
@@ -818,27 +934,26 @@ impl LiveDashboard {
     }
 
     /// The history of `metric` the page reads: the one the page drew from the store's View,
-    /// where it draws one, and otherwise the one the worker read.
+    /// where it reads the charts by App it drew from one, and none there for a chart it does not
+    /// draw, and otherwise the one the worker read.
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
-        if self.store_panels_apps_read() {
-            if let Some(histories) = &self.store_panels.histories {
-                return match metric {
-                    Metric::Gpu => self.store_panels.gpu.as_ref(),
-                    Metric::Cpu | Metric::Power | Metric::Disk => histories.history(metric),
-                };
-            }
+        if self.store_panels_histories_read() {
+            return self
+                .store_panels
+                .histories
+                .attribution(metric)
+                .map(Arc::as_ref);
         }
 
         self.snapshot.as_ref()?.attribution_history(metric)
     }
 
     /// The history of resident memory by App the page reads: the one the page drew from the
-    /// store's View, where it draws one, and otherwise the one the worker read.
+    /// store's View, where it reads the charts by App it drew from one, and none there on a page
+    /// that does not draw its chart, and otherwise the one the worker read.
     pub(crate) fn resident_history(&self) -> Option<&ResidentHistory> {
-        if self.store_panels_apps_read() {
-            if let Some(resident) = &self.store_panels.resident {
-                return Some(resident);
-            }
+        if self.store_panels_histories_read() {
+            return self.store_panels.histories.resident.as_deref();
         }
 
         self.snapshot
@@ -1083,63 +1198,6 @@ fn draw_store_view_cohorts(view: &View, window: WallSeconds, leaders: &mut Leade
     cohorts
 }
 
-/// The charts by App of `view`, each drawing on lines of their own the Apps `cohorts` chose for
-/// it.
-fn draw_store_view_panels_histories(
-    view: &View,
-    cohorts: &Cohorts,
-    older: Option<OverviewAppHistories>,
-) -> OverviewAppHistories {
-    let Some(older) = older else {
-        let history = |metric| {
-            Arc::new(crate::live_source::Presentation::Legacy(
-                AppAttributionHistory::from_view(metric, view, cohorts),
-            ))
-        };
-        return OverviewAppHistories {
-            cpu: history(Metric::Cpu),
-            power: history(Metric::Power),
-            disk: history(Metric::Disk),
-        };
-    };
-
-    // The page holds the only reference to the charts it drew.
-    let history = |metric, older| {
-        use crate::live_source::Presentation;
-        let history = match Arc::into_inner(older) {
-            Some(Presentation::Legacy(older)) => Presentation::Legacy(
-                AppAttributionHistory::from_view_after(metric, view, cohorts, older),
-            ),
-            Some(Presentation::Shared(older)) => match Arc::into_inner(older) {
-                Some(older) => Presentation::Legacy(AppAttributionHistory::from_view_after(
-                    metric, view, cohorts, older,
-                )),
-                None => {
-                    Presentation::Legacy(AppAttributionHistory::from_view(metric, view, cohorts))
-                }
-            },
-            Some(Presentation::Store(older)) => {
-                Presentation::Store(older.map(|older| {
-                    AppAttributionHistory::from_view_after(metric, view, cohorts, older)
-                }))
-            }
-            Some(Presentation::Canonical(older)) => {
-                Presentation::Canonical(older.map(|older| {
-                    AppAttributionHistory::from_view_after(metric, view, cohorts, older)
-                }))
-            }
-            None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view, cohorts)),
-        };
-
-        Arc::new(history)
-    };
-    OverviewAppHistories {
-        cpu: history(Metric::Cpu, older.cpu),
-        power: history(Metric::Power, older.power),
-        disk: history(Metric::Disk, older.disk),
-    }
-}
-
 /// The top Apps of the newest second of `view`, ranked by the rule the worker ranks a second's
 /// Apps by.
 fn draw_store_view_rankings(view: &View) -> Rankings {
@@ -1324,51 +1382,75 @@ fn store_view_draws_app_chart(route: &str, id: &str) -> bool {
 
 /// Whether the page `route` draws any chart by App from the store's View.
 fn store_view_draws_apps(route: &str) -> bool {
-    let rates = APP_METRICS.iter().map(|metric| metric.panel_id());
-    let mut ids = rates.chain([crate::live_resident_history::PANEL_ID]);
-
-    ids.any(|id| store_view_draws_app_chart(route, id))
+    AppCharts::of(route).any()
 }
 
-/// The charts by App of `view`, which draw on lines of their own the Apps `cohorts` chose for
-/// each over the wall seconds `chosen_over` and take the points of the seconds they share with
-/// `older`, under the titles a page other than Overview gives them.
+/// The charts by App of `view` that `charts` names, which draw on lines of their own the Apps
+/// `cohorts` chose for each over the wall seconds `chosen_over` and take the points of the
+/// seconds they share with `older`, under the titles a page other than Overview gives them.
 fn draw_store_view_panels_apps(
     view: &View,
-    older: OlderAppCharts,
+    charts: AppCharts,
+    older: AppHistories,
     cohorts: &Cohorts,
     chosen_over: WallSeconds,
 ) -> StorePanels {
-    let histories = draw_store_view_panels_histories(view, cohorts, older.histories);
-    let resident = match older.resident {
-        Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
-        None => ResidentHistory::from_view(view, cohorts),
+    // A page that draws no chart by App, as Network, chooses no Apps and builds nothing here.
+    assert!(charts.any());
+    let attribution = |metric, older| {
+        let shown = charts.shows(metric);
+        shown.then(|| {
+            Arc::new(draw_store_view_panels_apps_attribution(
+                metric, view, cohorts, older,
+            ))
+        })
     };
-    let rates = APP_METRICS
+    let resident = charts.shows_resident().then(|| {
+        // A kept page that still shares the older history keeps it whole.
+        let history = match older.resident.and_then(Arc::into_inner) {
+            Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
+            None => ResidentHistory::from_view(view, cohorts),
+        };
+        Arc::new(history)
+    });
+    let histories = AppHistories {
+        cpu: attribution(Metric::Cpu, older.cpu),
+        power: attribution(Metric::Power, older.power),
+        disk: attribution(Metric::Disk, older.disk),
+        gpu: attribution(Metric::Gpu, older.gpu),
+        resident,
+    };
+    let attributions = APP_METRICS
+        .into_iter()
+        .filter_map(|metric| histories.attribution(metric)?.panel());
+    let apps = histories
+        .resident
         .iter()
-        .filter_map(|metric| histories.history(*metric)?.panel());
-    let apps = resident.panel().into_iter().chain(rates).collect();
+        .filter_map(|history| history.panel())
+        .chain(attributions)
+        .collect();
 
     StorePanels {
         version: Some(view.version),
         chosen_over: Some(chosen_over),
+        charts,
         apps,
-        histories: Some(histories),
-        resident: Some(resident),
+        histories,
         ..StorePanels::default()
     }
 }
 
-/// The history of GPU time by App of `view`, over the Apps `cohorts` chose, which takes the
-/// points of the seconds it shares with `older`.
-fn draw_store_view_gpu(
+/// The history of `metric` by App of `view`, over the Apps `cohorts` chose, which takes the
+/// points of the seconds it shares with `older` where no kept page still shares it.
+fn draw_store_view_panels_apps_attribution(
+    metric: Metric,
     view: &View,
     cohorts: &Cohorts,
-    older: Option<AppAttributionHistory>,
+    older: Option<Arc<AppAttributionHistory>>,
 ) -> AppAttributionHistory {
-    match older {
-        Some(older) => AppAttributionHistory::from_view_after(Metric::Gpu, view, cohorts, older),
-        None => AppAttributionHistory::from_view(Metric::Gpu, view, cohorts),
+    match older.and_then(Arc::into_inner) {
+        Some(older) => AppAttributionHistory::from_view_after(metric, view, cohorts, older),
+        None => AppAttributionHistory::from_view(metric, view, cohorts),
     }
 }
 

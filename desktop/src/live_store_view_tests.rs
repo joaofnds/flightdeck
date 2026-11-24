@@ -744,9 +744,11 @@ fn a_followed_network_page_builds_and_keeps_nothing_of_the_views_apps() {
     assert!(dashboard.take_view(Arc::new(view)));
 
     let drawn = &dashboard.store_panels;
-    assert!(drawn.histories.is_none());
-    assert!(drawn.resident.is_none());
-    assert!(drawn.gpu.is_none());
+    assert!(drawn.histories.cpu.is_none());
+    assert!(drawn.histories.power.is_none());
+    assert!(drawn.histories.disk.is_none());
+    assert!(drawn.histories.resident.is_none());
+    assert!(drawn.histories.gpu.is_none());
     assert!(drawn.rankings.is_none());
     assert!(drawn.apps.is_empty());
     assert!(!drawn.panels.is_empty());
@@ -1416,6 +1418,137 @@ mod when_the_page_has_a_chart_by_app {
         assert_eq!(by_app(&dashboard.panels), expected);
     }
 
+    #[test]
+    fn an_energy_page_opened_from_the_cpu_page_draws_its_chart_by_app_from_the_same_view() {
+        // Goal: the Energy page opened from the CPU page before the store hands over a newer
+        // View draws its own chart by App from the View the CPU page drew, and neither the CPU
+        // page's chart nor none, though the two pages draw no machine chart. Method: the CPU
+        // page takes a View, then the Energy page opens and the worker reads it.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_after_switch("cpu", "energy", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Power.panel_id()));
+    }
+
+    #[test]
+    fn a_cpu_page_opened_from_the_energy_page_draws_its_chart_by_app_from_the_same_view() {
+        // Goal: the CPU page opened from the Energy page before the store hands over a newer
+        // View draws its own chart by App from the View the Energy page drew. Method: as for
+        // the Energy page opened from the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_after_switch("energy", "cpu", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Cpu.panel_id()));
+    }
+
+    #[test]
+    fn a_storage_page_opened_from_the_memory_page_draws_its_chart_by_app_from_the_same_view() {
+        // Goal: the Storage page opened from the Memory page before the store hands over a
+        // newer View draws its chart of disk bytes by App from the View the Memory page drew,
+        // which drew no such chart. Method: as for the Energy page opened from the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_after_switch("memory", "storage", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Disk.panel_id()));
+    }
+
+    #[test]
+    fn an_energy_page_opened_after_the_cpu_page_let_go_draws_the_chart_its_reading_brings() {
+        // Goal: the Energy page opened from a CPU page that let go of its View draws the chart by
+        // App its reading brings, and never what the CPU page kept of the View, which holds no
+        // chart of power. Method: the CPU page takes a View and lets go of it, as a hold ending
+        // does, then the Energy page opens and the worker reads it with the history of power by
+        // App.
+        let view = Arc::new(charted_view());
+        let mut dashboard = dashboard_on("cpu", &trends());
+        assert!(dashboard.take_view(Arc::clone(&view)));
+        dashboard.store_view_let_go();
+        dashboard.switch_route("energy");
+        let mut snapshot = readings(&trends());
+        let history =
+            AppAttributionHistory::from_view(Metric::Power, &view, &charted_cohorts(&view));
+        snapshot.app_attribution_history =
+            Some(Arc::new(crate::live_source::Presentation::Legacy(history)));
+
+        dashboard.accept(snapshot);
+
+        let expected = expected_on_page(&view, Metric::Power.panel_id());
+        assert_eq!(by_app(&dashboard.panels), expected);
+    }
+
+    #[test]
+    fn an_energy_page_hovered_after_the_cpu_page_draws_the_chart_its_reading_brings() {
+        // Goal: the Energy page opened from the CPU page, which the worker answers under a
+        // hover, draws the chart by App its reading brings and reads that very history, never
+        // the charts the CPU page drew from the View, though neither page draws a machine chart.
+        // Method: the CPU page takes a View, the Energy page opens, a hover of the worker's
+        // readings begins, and the worker answers with the history of power by App.
+        let view = Arc::new(charted_view());
+        let mut dashboard = dashboard_on("cpu", &trends());
+        assert!(dashboard.take_view(Arc::clone(&view)));
+        dashboard.switch_route("energy");
+        dashboard.preview = Some(preview(&dashboard));
+        let mut snapshot = readings(&trends());
+        let history =
+            AppAttributionHistory::from_view(Metric::Power, &view, &charted_cohorts(&view));
+        snapshot.app_attribution_history =
+            Some(Arc::new(crate::live_source::Presentation::Legacy(history)));
+
+        dashboard.accept(snapshot);
+
+        let expected = expected_on_page(&view, Metric::Power.panel_id());
+        assert_eq!(by_app(&dashboard.panels), expected);
+        let read = dashboard.snapshot.as_ref().unwrap();
+        let read: &AppAttributionHistory = read.app_attribution_history.as_deref().unwrap();
+        let shown = dashboard.attribution_history(Metric::Power).unwrap();
+        assert!(std::ptr::eq(shown, read));
+    }
+
+    macro_rules! page_app_histories_cases {
+        ($($name:ident, $route:expr, [$($shown:expr),*];)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: a page keeps a history by App of the View it takes for each chart by App
+                // it shows, draws that chart and reads that history, and keeps none of the
+                // others, so it builds nothing over the loaded hour that no one sees. Method: the
+                // page with the worker's readings takes a View that holds an App in each second.
+                let mut dashboard = dashboard_on($route, &trends());
+
+                assert!(dashboard.take_view(Arc::new(charted_view())));
+
+                let mut shown: Vec<&str> = vec![$($shown),*];
+                shown.sort_unstable();
+                assert_eq!(kept_by_app(&dashboard), shown);
+                assert_eq!(drawn_by_app_ids(&dashboard), shown);
+                assert_eq!(read_by_app(&dashboard), shown);
+            }
+        )*};
+    }
+
+    page_app_histories_cases! {
+        the_overview_page_keeps_the_histories_by_app_it_draws, "overview", [
+            crate::live_resident_history::PANEL_ID,
+            Metric::Cpu.panel_id(),
+            Metric::Power.panel_id(),
+            Metric::Disk.panel_id()
+        ];
+        the_memory_page_keeps_only_the_history_by_app_it_draws, "memory", [
+            crate::live_resident_history::PANEL_ID
+        ];
+        the_storage_page_keeps_only_the_history_by_app_it_draws, "storage", [
+            Metric::Disk.panel_id()
+        ];
+        the_gpu_page_keeps_only_the_history_by_app_it_draws, "gpu", [Metric::Gpu.panel_id()];
+        the_cpu_page_keeps_only_the_history_by_app_it_draws, "cpu", [Metric::Cpu.panel_id()];
+        the_energy_page_keeps_only_the_history_by_app_it_draws, "energy", [
+            Metric::Power.panel_id()
+        ];
+        the_network_page_keeps_no_history_by_app, "network", [];
+    }
+
     macro_rules! page_without_a_gpu_chart_cases {
         ($($name:ident, $route:expr;)*) => {$(
             #[test]
@@ -1429,7 +1562,7 @@ mod when_the_page_has_a_chart_by_app {
 
                 assert!(dashboard.take_view(Arc::new(charted_view())));
 
-                assert!(dashboard.store_panels.gpu.is_none());
+                assert!(dashboard.store_panels.histories.gpu.is_none());
             }
         )*};
     }
@@ -1452,7 +1585,7 @@ mod when_the_page_has_a_chart_by_app {
 
         assert!(dashboard.take_view(Arc::new(charted_view())));
 
-        assert!(dashboard.store_panels.gpu.is_some());
+        assert!(dashboard.store_panels.histories.gpu.is_some());
     }
 
     #[test]
@@ -1765,6 +1898,110 @@ mod when_the_page_has_a_chart_by_app {
             let expected = expected_on_page(&view, Metric::Cpu.panel_id());
             assert_eq!(by_app(&dashboard.panels), expected);
         }
+
+        #[test]
+        fn a_cpu_page_opened_again_from_the_energy_page_draws_its_chart_from_the_same_view() {
+            // Goal: the CPU page opened again from the Energy page while the store holds the
+            // View both drew from draws its own chart by App from that View again and reads its
+            // history, as the Energy page drew its own. Method: the CPU page takes a View, the
+            // Energy page opens and the worker reads it, then the CPU page opens again before
+            // the store's next View.
+            let view = Arc::new(charted_view());
+            let mut dashboard = dashboard_on("cpu", &trends());
+            assert!(dashboard.take_view(Arc::clone(&view)));
+            dashboard.switch_route("energy");
+            dashboard.accept(readings(&trends()));
+            let energy = expected_on_page(&view, Metric::Power.panel_id());
+            assert_eq!(by_app(&dashboard.panels), energy);
+
+            dashboard.switch_route("cpu");
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+            assert_eq!(read_on_page(&dashboard, Metric::Cpu.panel_id()), expected);
+        }
+
+        #[test]
+        fn a_cpu_page_opened_again_after_energy_let_go_of_the_view_reads_its_history() {
+            // Goal: a CPU page kept while its reading left its chart by App to the View, opened
+            // again after the Energy page drew its own chart and let go of the View, draws its
+            // chart and reads the history that chart drew, though the store no longer keeps it.
+            // Method: the CPU page takes a View and a reading that left the chart to it, the
+            // Energy page opens and draws from the View, the View is let go as a hold ending
+            // does, then the CPU page opens again before the store's next View.
+            let view = Arc::new(charted_view());
+
+            let dashboard = opened_again_after_let_go("cpu", "energy", &view);
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+            assert_eq!(read_on_page(&dashboard, Metric::Cpu.panel_id()), expected);
+        }
+
+        #[test]
+        fn an_energy_page_opened_again_after_cpu_let_go_of_the_view_reads_its_history() {
+            // Goal: an Energy page opened again as the CPU page is, after the CPU page let go of
+            // the View, reads the history of power its chart drew, which its "Process power" card
+            // reads too. Method: as for the CPU page opened again after the Energy page.
+            let view = Arc::new(charted_view());
+
+            let dashboard = opened_again_after_let_go("energy", "cpu", &view);
+
+            let expected = expected_on_page(&view, Metric::Power.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+            assert_eq!(read_on_page(&dashboard, Metric::Power.panel_id()), expected);
+        }
+
+        #[test]
+        fn a_cpu_page_opened_again_after_memory_let_go_of_the_view_reads_its_history() {
+            // Goal: a CPU page opened again after the Memory page, whose machine charts differ,
+            // let go of the View reads the history its chart drew. Method: as for the CPU page
+            // opened again after the Energy page, with the Memory page between.
+            let view = Arc::new(charted_view());
+
+            let dashboard = opened_again_after_let_go("cpu", "memory", &view);
+
+            let expected = expected_on_page(&view, Metric::Cpu.panel_id());
+            assert_eq!(by_app(&dashboard.panels), expected);
+            assert_eq!(read_on_page(&dashboard, Metric::Cpu.panel_id()), expected);
+        }
+
+        /// The page `route` opened again after the page `between` let go of `view`: `route`
+        /// took `view` and a reading that left its chart by App to it, `between` opened and
+        /// drew from `view`, then `view` was let go as a hold ending lets go.
+        fn opened_again_after_let_go(
+            route: &str,
+            between: &str,
+            view: &Arc<View>,
+        ) -> LiveDashboard {
+            let mut dashboard = dashboard_on(route, &trends());
+            assert!(dashboard.take_view(Arc::clone(view)));
+            dashboard.accept(left_to_the_view(&trends()));
+            dashboard.switch_route(between);
+            dashboard.accept(readings(&trends()));
+            dashboard.store_view_let_go();
+
+            dashboard.switch_route(route);
+            dashboard
+        }
+
+        /// The chart by App of id `id` drawn from the history the page reads for it, as
+        /// `by_app` finds a chart, or none where the page reads no such history.
+        fn read_on_page(dashboard: &LiveDashboard, id: &str) -> Vec<(String, String, Vec<Line>)> {
+            let panel = match Metric::from_panel(id) {
+                Some(metric) => dashboard
+                    .attribution_history(metric)
+                    .and_then(AppAttributionHistory::panel),
+                None => dashboard
+                    .resident_history()
+                    .and_then(ResidentHistory::panel),
+            };
+
+            panel
+                .map(|panel| (panel.id.clone(), panel.title.clone(), panel.lines.clone()))
+                .into_iter()
+                .collect()
+        }
     }
 
     mod when_the_view_leaves_out_the_memory_chart {
@@ -1822,6 +2059,90 @@ mod when_the_page_has_a_chart_by_app {
 
         assert!(dashboard.take_view(Arc::clone(view)));
         by_app(&dashboard.panels)
+    }
+
+    /// The charts by App the page `to` draws once it opens from the page `from`, which took
+    /// `view`, and the worker reads it, before the store hands over a newer View.
+    fn drawn_after_switch(
+        from: &str,
+        to: &str,
+        view: &Arc<View>,
+    ) -> Vec<(String, String, Vec<Line>)> {
+        let mut dashboard = dashboard_on(from, &trends());
+        assert!(dashboard.take_view(Arc::clone(view)));
+
+        dashboard.switch_route(to);
+        dashboard.accept(readings(&trends()));
+        by_app(&dashboard.panels)
+    }
+
+    /// The ids of the charts by App the page keeps a history of the store's View for, sorted.
+    fn kept_by_app(dashboard: &LiveDashboard) -> Vec<&'static str> {
+        let drawn = &dashboard.store_panels;
+        let mut kept: Vec<&str> = by_app_ids()
+            .into_iter()
+            .filter(|id| kept_history_of(drawn, id).is_some())
+            .collect();
+        kept.sort_unstable();
+        kept
+    }
+
+    /// The ids of the charts by App the page draws, sorted.
+    fn drawn_by_app_ids(dashboard: &LiveDashboard) -> Vec<String> {
+        let mut drawn: Vec<String> = by_app(&dashboard.panels)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        drawn.sort_unstable();
+        drawn
+    }
+
+    /// The ids of the charts by App whose history the page reads is the one it keeps of the
+    /// store's View, sorted.
+    fn read_by_app(dashboard: &LiveDashboard) -> Vec<&'static str> {
+        let drawn = &dashboard.store_panels;
+        let mut read: Vec<&str> = by_app_ids()
+            .into_iter()
+            .filter(|id| {
+                let Some(kept) = kept_history_of(drawn, id) else {
+                    return false;
+                };
+                let read: Option<*const ()> = match Metric::from_panel(id) {
+                    Some(metric) => dashboard
+                        .attribution_history(metric)
+                        .map(|history| std::ptr::from_ref(history).cast()),
+                    None => dashboard
+                        .resident_history()
+                        .map(|history| std::ptr::from_ref(history).cast()),
+                };
+                read == Some(kept)
+            })
+            .collect();
+        read.sort_unstable();
+        read
+    }
+
+    /// The ids of every chart by App a page draws from the store's View.
+    fn by_app_ids() -> [&'static str; 5] {
+        [
+            crate::live_resident_history::PANEL_ID,
+            Metric::Cpu.panel_id(),
+            Metric::Power.panel_id(),
+            Metric::Disk.panel_id(),
+            Metric::Gpu.panel_id(),
+        ]
+    }
+
+    /// Where the history of the chart `id` that `drawn` keeps lies, or none where it keeps none.
+    fn kept_history_of(drawn: &super::super::StorePanels, id: &str) -> Option<*const ()> {
+        let histories = &drawn.histories;
+        let Some(metric) = Metric::from_panel(id) else {
+            let resident = histories.resident.as_deref();
+            return resident.map(|history| std::ptr::from_ref(history).cast());
+        };
+
+        let kept = histories.attribution(metric).map(Arc::as_ref);
+        kept.map(|history| std::ptr::from_ref(history).cast())
     }
 
     /// The one chart by App, of id `id`, that a page draws from `view`, a `charted_view`.
