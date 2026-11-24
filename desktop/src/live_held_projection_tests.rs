@@ -420,6 +420,28 @@ fn seconds_by_stretch(
     stretches
 }
 
+/// The View of `seconds`, which end at 10,000: its seconds from 9,000 on, the seconds before
+/// them as its older tail, and the stretches the store reduced them to, up to the one
+/// `HOUR_DETAIL_FIRST` lies in.
+fn view_of_hour(seconds: &[MachineSecond]) -> View {
+    assert_eq!(seconds.last().unwrap().wall_ns / 1_000_000_000, 10_000);
+    let stretches = seconds_by_stretch(seconds);
+    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
+    let (earlier, live) = seconds.split_at(
+        seconds
+            .iter()
+            .position(|second| second.wall_ns / 1_000_000_000 >= 9_000)
+            .unwrap(),
+    );
+    let mut view = view(1, earlier, live);
+    view.stretches = stretches
+        .range(..=join)
+        .map(|(stretch, held)| reduced_stretch(*stretch, held))
+        .collect();
+
+    view
+}
+
 /// What the store reduces `seconds`, all of stretch `stretch`, to, each reading placed in its own
 /// run.
 fn reduced_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStretch> {
@@ -484,19 +506,9 @@ hour_drawn_as_the_readings_draw_it_cases! {
 /// and reach of the same readings.
 fn assert_hour_drawn_as_the_readings_draw_it(page: &Page) {
     let seconds = (page.hour)();
+    let view = view_of_hour(&seconds);
     let stretches = seconds_by_stretch(&seconds);
     let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
-    let (earlier, live) = seconds.split_at(
-        seconds
-            .iter()
-            .position(|second| second.wall_ns / 1_000_000_000 >= 9_000)
-            .unwrap(),
-    );
-    let mut view = view(1, earlier, live);
-    view.stretches = stretches
-        .range(..=join)
-        .map(|(stretch, held)| reduced_stretch(*stretch, held))
-        .collect();
     let mut tail: Vec<serde_json::Value> = stretches
         .range(..join)
         .map(|(_, held)| {
@@ -628,19 +640,7 @@ fn the_older_tail_keeps_a_lone_reading_of_its_ten_seconds() {
             with_storage_rates(second, rates)
         })
         .collect();
-    let stretches = seconds_by_stretch(&seconds);
-    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
-    let (earlier, live) = seconds.split_at(
-        seconds
-            .iter()
-            .position(|second| second.wall_ns / 1_000_000_000 >= 9_000)
-            .unwrap(),
-    );
-    let mut view = view(1, earlier, live);
-    view.stretches = stretches
-        .range(..=join)
-        .map(|(stretch, held)| reduced_stretch(*stretch, held))
-        .collect();
+    let view = view_of_hour(&seconds);
 
     let drawn = view_panels("storage", &view, levels().as_ref()).unwrap();
 
