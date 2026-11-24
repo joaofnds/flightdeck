@@ -805,7 +805,8 @@ mod the_top_apps_of_each_second {
 #[test]
 fn a_store_worker_delivers_cpu_detail_and_history_with_matching_identity() {
     // Goal: CPU uses complete Store counters for both selected detail and its history.
-    // Method: request CPU after two native publications, then validate existing decoders' output.
+    // Method: request CPU after two native publications, then read the detail its decoder
+    // validated and the history the page built from the Store's values.
     let mut harness = Harness::new();
     harness.worker.request(request("cpu")).unwrap();
 
@@ -815,6 +816,25 @@ fn a_store_worker_delivers_cpu_detail_and_history_with_matching_identity() {
     assert_eq!(detail.cpus.len(), 1);
     assert_eq!(detail.cpus[0].busy_percent, Some(50.0));
     assert!(snapshot.cpu_history.is_some());
+    harness.assert_source_free();
+}
+
+#[test]
+fn a_store_cpu_history_is_charged_for_what_the_page_holds() {
+    // Goal: the Store's charge for a CPU history covers the page's history built from it, so the
+    // budget counts what the page keeps.
+    // Method: request CPU after two native publications, then count by capacity what the page's
+    // history holds and compare it with what its response reserved.
+    let mut harness = Harness::new();
+    harness.worker.request(request("cpu")).unwrap();
+
+    let snapshot = harness.ready();
+
+    let Some(super::presentation::Presentation::Store(response)) = snapshot.cpu_history.as_deref()
+    else {
+        panic!("the CPU history is not the Store's");
+    };
+    assert!(crate::live_cpu_history::tests::retained_bytes(response) <= response.bytes());
     harness.assert_source_free();
 }
 

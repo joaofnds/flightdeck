@@ -4,11 +4,13 @@ use serde_json::{Value, json};
 use crate::live_cpu::CPUActivity;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct CPUHistory {
     wire: Box<CPUHistoryWire>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 struct CPUHistoryWire {
     observation: CPUObservation,
     first_ns: u64,
@@ -25,7 +27,7 @@ struct CPUHistoryWire {
     selected_index: usize,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct CPUObservation {
     run: String,
     boot: String,
@@ -35,6 +37,7 @@ struct CPUObservation {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 struct CPUSample {
     observation: CPUObservation,
     previous_observation: Option<CPUObservation>,
@@ -43,6 +46,7 @@ struct CPUSample {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) struct CPUHistoryRow {
     cpu: u32,
     busy_percent: Vec<Option<f64>>,
@@ -58,6 +62,7 @@ pub enum CPUInspection {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct CPUInterval {
     first_ns: u64,
     end_ns: u64,
@@ -68,6 +73,8 @@ pub const PAGE_CPUS: u32 = 32;
 const CPUS_MAX: u32 = 1024;
 const OBSERVATIONS_MAX: usize = 4096;
 const NS: u64 = 1_000_000_000;
+/// The seconds of a CPU history's context, which the selection names too.
+const CONTEXT_SECONDS: u64 = 900;
 const _: () = {
     assert!(PAGE_CPUS < CPUS_MAX);
     assert!(OBSERVATIONS_MAX * 32 == 131_072);
@@ -77,8 +84,33 @@ const _: () = {
 impl CPUHistory {
     pub fn decode(value: Value, selection: &viewer::Selection) -> Result<Self, String> {
         validation::preflight(&value)?;
-        let mut wire: Box<CPUHistoryWire> =
+        let wire: Box<CPUHistoryWire> =
             serde_json::from_value(value).map_err(|error| error.to_string())?;
+
+        Self::from_wire(wire, selection)
+    }
+
+    /// The page's history of the Store's, which takes its identities and rows as they are. It
+    /// refuses what `decode` refuses of the same history written as JSON, and three faults more
+    /// that the JSON cannot carry: a `selected_index` out of range, or one naming another
+    /// observation than the selection's, since the JSON carries no index, and a reading that is
+    /// not finite, which the JSON writes as a gap.
+    pub fn from_store(
+        history: viewer::store::CpuHistory,
+        selection: &viewer::Selection,
+    ) -> Result<Self, String> {
+        validation::from_store_preflight(&history)?;
+        let wire = Box::new(CPUHistoryWire::from_store(history)?);
+
+        Self::from_wire(wire, selection)
+    }
+
+    /// The steps `decode` and `from_store` end in, kept in one place so a step added later
+    /// reaches both.
+    fn from_wire(
+        mut wire: Box<CPUHistoryWire>,
+        selection: &viewer::Selection,
+    ) -> Result<Self, String> {
         wire.validate(selection)?;
         wire.project_intervals();
 
@@ -309,6 +341,70 @@ impl CPUHistoryWire {
         }
         assert!(self.intervals.len() <= OBSERVATIONS_MAX);
     }
+
+    fn from_store(history: viewer::store::CpuHistory) -> Result<Self, String> {
+        let observations = history
+            .observations
+            .into_iter()
+            .map(CPUSample::from_store)
+            .collect::<Vec<_>>();
+        if observations.is_empty() {
+            return Err("CPU history context is empty".into());
+        }
+
+        let observation = observations
+            .get(history.selected_index)
+            .ok_or("Selected CPU observation is missing from history")?
+            .observation
+            .clone();
+        let cpus = history
+            .cpus
+            .into_iter()
+            .map(|row| CPUHistoryRow {
+                cpu: row.cpu,
+                busy_percent: row.busy_percent,
+            })
+            .collect();
+
+        Ok(Self {
+            observation,
+            first_ns: history.first_ns,
+            end_ns: history.end_ns,
+            offset: history.offset,
+            total: history.total,
+            restoration_error: None,
+            observations,
+            cpus,
+            // The Store's history covers the seconds of its context, as the JSON the saved minutes
+            // write of the same history says.
+            context_seconds: CONTEXT_SECONDS,
+            intervals: Vec::new(),
+            selected_index: 0,
+        })
+    }
+}
+
+impl CPUSample {
+    fn from_store(observation: viewer::store::CpuHistoryObservation) -> Self {
+        Self {
+            observation: CPUObservation::from_store(observation.identity),
+            previous_observation: observation.previous.map(CPUObservation::from_store),
+            interval_available: observation.interval_available,
+            cpu_count: observation.cpu_count,
+        }
+    }
+}
+
+impl CPUObservation {
+    fn from_store(identity: viewer::store::CpuHistoryIdentity) -> Self {
+        Self {
+            run: identity.run,
+            boot: identity.boot,
+            publication: identity.publication,
+            run_tick: identity.run_tick,
+            wall_ns: identity.wall_ns,
+        }
+    }
 }
 
 impl CPUHistoryRow {
@@ -357,7 +453,11 @@ pub(crate) mod view;
 
 #[cfg(test)]
 #[path = "live_cpu_history_tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "live_cpu_history_store_tests.rs"]
+mod store_tests;
 
 #[cfg(test)]
 #[path = "live_cpu_history_input_tests.rs"]

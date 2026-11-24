@@ -7,13 +7,29 @@ use persistence::{Error, Result};
 use serde_json::Value;
 
 use super::context_response::identity;
-use super::{CpuPrevious, QueryContext, QuerySecond, Response};
+use super::{ByteReservation, CpuPrevious, QueryContext, QuerySecond, Response};
 use crate::Cancellation;
-use crate::cpu_history_sample::Identity;
+use crate::cpu_history::{CpuHistory, CpuHistoryObservation, CpuHistoryRow, PAGE_CPUS};
+use crate::cpu_history_sample::{IDENTITY_TEXT_BYTES_MAX, Identity};
 use crate::live_app_response::Observation;
-use crate::session::ContextRange;
+use crate::session::{ContextRange, OBSERVATIONS_MAX};
 
 const DETAIL_WORK_BYTES_MAX: usize = 512 * 1024;
+/// What a CPU history response may be charged: the largest history the Store builds and what the
+/// page builds beside it, which the block below sizes.
+const HISTORY_CHARGE_BYTES_MAX: usize = 8 * 1024 * 1024;
+const _: () = {
+    // The count below holds each observation at this size, so a field added to it must be
+    // counted there before this passes.
+    assert!(size_of::<CpuHistoryObservation>() == 152);
+    // Each observation holds an identity and its predecessor, each a run and a boot text of at
+    // most the length `Identity::read` admits.
+    let observation_bytes = size_of::<CpuHistoryObservation>() + 4 * IDENTITY_TEXT_BYTES_MAX;
+    let row_bytes = size_of::<CpuHistoryRow>() + OBSERVATIONS_MAX * size_of::<Option<f64>>();
+    let held_bytes_max =
+        size_of::<CpuHistory>() + OBSERVATIONS_MAX * observation_bytes + PAGE_CPUS * row_bytes;
+    assert!(size_of::<Response<CpuHistory>>() + 2 * held_bytes_max <= HISTORY_CHARGE_BYTES_MAX);
+};
 
 impl QueryContext {
     pub fn cpu_detail(
@@ -64,11 +80,11 @@ impl QueryContext {
         offset: u32,
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> Result<Response<CpuHistory>> {
         let operation = Arc::clone(cancellation).operation(epoch)?;
         operation.check()?;
         let work = self.reserve_response(history_work_bytes(self)?)?;
-        let reservation = self.reserve_response(2 * crate::cpu_history::RESPONSE_BYTES_MAX)?;
+        let reservation = self.reserve_response(HISTORY_CHARGE_BYTES_MAX)?;
         let range = ContextRange::ending_at(self.context_last_second())?;
         let mut context = Vec::with_capacity(self.seconds().len());
         for second in self.seconds() {
@@ -91,7 +107,7 @@ impl QueryContext {
             &self.selected().observation,
             self.selected().apps().origin(),
         );
-        let value = crate::cpu_history::project(&crate::cpu_history::Request {
+        let history = crate::cpu_history::project_history(&crate::cpu_history::Request {
             selected: &selected,
             context_last_second: self.context_last_second(),
             context: &context,
@@ -102,8 +118,27 @@ impl QueryContext {
         operation.check()?;
         drop(work);
 
-        Response::json(reservation, value)
+        cpu_history_response(reservation, history)
     }
+}
+
+/// Charges `history` to `reservation`, which holds at least the charge bound. The page takes over
+/// the history's texts and rows of readings, and adds its own vector of observations, its
+/// intervals and one copy of the selected identity. Twice what the history holds covers the
+/// moment both vectors of observations exist, with what the page adds.
+fn cpu_history_response(
+    mut reservation: ByteReservation,
+    history: CpuHistory,
+) -> Result<Response<CpuHistory>> {
+    let bytes = size_of::<Response<CpuHistory>>() + 2 * history.held_bytes();
+    if bytes > HISTORY_CHARGE_BYTES_MAX {
+        return Err(Error::Bound("CPU history response bytes"));
+    }
+
+    assert!(bytes <= reservation.bytes());
+    reservation.shrink_to(bytes);
+
+    Ok(Response::reserved(reservation, history))
 }
 
 fn detail_previous(

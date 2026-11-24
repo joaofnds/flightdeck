@@ -1,4 +1,5 @@
-//! Existing desktop decoders consume bounded presentations of immutable Store facts.
+//! The desktop's decoders consume bounded presentations of immutable Store facts, except the
+//! CPU history, which the page builds from the Store's values as they are.
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -111,8 +112,8 @@ fn cpu(
                 command.epoch,
             )
             .map_err(|error| error.to_string())?
-            .try_map(|value| {
-                crate::live_cpu_history::CPUHistory::decode(value, &snapshot.selection)
+            .try_map(|history| {
+                crate::live_cpu_history::CPUHistory::from_store(history, &snapshot.selection)
             })?;
         snapshot.cpu_history = Some(Arc::new(Presentation::Store(history)));
     }

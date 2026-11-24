@@ -1,28 +1,61 @@
 use std::collections::BTreeMap;
 
-use super::{CPUHistoryWire, CPUObservation, CPUS_MAX, CPUSample, NS, OBSERVATIONS_MAX, PAGE_CPUS};
+use super::{
+    CONTEXT_SECONDS, CPUHistoryWire, CPUObservation, CPUS_MAX, CPUSample, NS, OBSERVATIONS_MAX,
+    PAGE_CPUS,
+};
 use serde_json::Value;
 
 pub(super) fn preflight(value: &Value) -> Result<(), String> {
     let observations = value["observations"]
         .as_array()
         .ok_or("Missing CPU history observations")?;
-    if observations.len() > OBSERVATIONS_MAX {
-        return Err("CPU history exceeds 4096 observations".into());
-    }
+    preflight_observations(observations.len())?;
 
     let cpus = value["cpus"].as_array().ok_or("Missing CPU history rows")?;
-    if cpus.len() > 32 {
-        return Err("CPU history exceeds 32 CPU rows".into());
-    }
+    preflight_rows(cpus.len())?;
 
     for row in cpus {
         let values = row["busy_percent"]
             .as_array()
             .ok_or("Missing CPU history values")?;
-        if values.len() != observations.len() {
-            return Err("CPU history row length differs from its context".into());
-        }
+        preflight_row(values.len(), observations.len())?;
+    }
+
+    Ok(())
+}
+
+/// The bounds `preflight` holds the JSON to, held of the Store's values.
+pub(super) fn from_store_preflight(history: &viewer::store::CpuHistory) -> Result<(), String> {
+    preflight_observations(history.observations.len())?;
+    preflight_rows(history.cpus.len())?;
+
+    for row in &history.cpus {
+        preflight_row(row.busy_percent.len(), history.observations.len())?;
+    }
+
+    Ok(())
+}
+
+fn preflight_observations(observation_count: usize) -> Result<(), String> {
+    if observation_count > OBSERVATIONS_MAX {
+        return Err("CPU history exceeds 4096 observations".into());
+    }
+
+    Ok(())
+}
+
+fn preflight_rows(row_count: usize) -> Result<(), String> {
+    if row_count > 32 {
+        return Err("CPU history exceeds 32 CPU rows".into());
+    }
+
+    Ok(())
+}
+
+fn preflight_row(value_count: usize, observation_count: usize) -> Result<(), String> {
+    if value_count != observation_count {
+        return Err("CPU history row length differs from its context".into());
     }
 
     Ok(())
@@ -51,11 +84,11 @@ impl CPUHistoryWire {
     }
 
     fn validate_context(&self, selection: &viewer::Selection) -> Result<(), String> {
-        if self.context_seconds != 900 {
+        if self.context_seconds != CONTEXT_SECONDS {
             return Err("CPU history context must contain 900 seconds".into());
         }
 
-        if selection["context_seconds"].as_u64() != Some(900) {
+        if selection["context_seconds"].as_u64() != Some(CONTEXT_SECONDS) {
             return Err("CPU history does not match the selected context".into());
         }
 
@@ -70,7 +103,7 @@ impl CPUHistoryWire {
             .checked_add(1)
             .and_then(|end| end.checked_mul(NS))
             .ok_or("CPU history context clock overflow")?;
-        if self.first_ns != last.saturating_sub(899) * NS {
+        if self.first_ns != last.saturating_sub(CONTEXT_SECONDS - 1) * NS {
             return Err("CPU history has a different context start".into());
         }
 

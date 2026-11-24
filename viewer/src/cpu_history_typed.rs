@@ -40,9 +40,27 @@ pub struct CpuHistoryRow {
 }
 
 impl CpuHistory {
-    /// `selected` is the selected observation as the caller's page names it, which carries more
-    /// than its identity.
-    pub(crate) fn json(&self, selected: &Value) -> Value {
+    /// What the history holds by capacity, its own bytes and those it allocated.
+    pub(crate) fn held_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.observations.capacity() * size_of::<CpuHistoryObservation>()
+            + self
+                .observations
+                .iter()
+                .map(CpuHistoryObservation::heap_bytes)
+                .sum::<usize>()
+            + self.cpus.capacity() * size_of::<CpuHistoryRow>()
+            + self
+                .cpus
+                .iter()
+                .map(|row| row.busy_percent.capacity() * size_of::<Option<f64>>())
+                .sum::<usize>()
+    }
+
+    /// The history as the saved minutes write it. `selected` is the selected observation as the
+    /// caller's page names it, which carries more than its identity.
+    #[must_use]
+    pub fn json(&self, selected: &Value) -> Value {
         let observations = self
             .observations
             .iter()
@@ -67,7 +85,21 @@ impl CpuHistory {
     }
 }
 
+impl CpuHistoryObservation {
+    fn heap_bytes(&self) -> usize {
+        self.identity.heap_bytes()
+            + self
+                .previous
+                .as_ref()
+                .map_or(0, CpuHistoryIdentity::heap_bytes)
+    }
+}
+
 impl CpuHistoryIdentity {
+    fn heap_bytes(&self) -> usize {
+        self.run.capacity() + self.boot.capacity()
+    }
+
     pub(crate) fn of(identity: &Identity) -> Self {
         Self {
             run: identity.run.clone(),

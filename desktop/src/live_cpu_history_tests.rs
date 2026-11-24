@@ -415,7 +415,8 @@ fn maximum_fixture() -> (Value, Value) {
     (payload, selection)
 }
 
-fn retained_bytes(history: &CPUHistory) -> usize {
+/// What `history` holds by capacity, its own bytes and those it allocated.
+pub(crate) fn retained_bytes(history: &CPUHistory) -> usize {
     size_of::<CPUHistory>()
         + size_of::<CPUHistoryWire>()
         + history.wire.observations.capacity() * size_of::<CPUSample>()
@@ -619,7 +620,7 @@ pub(super) fn fixture() -> (Value, Value) {
     (payload, selection)
 }
 
-fn observation(publication: u64, wall_ns: u64) -> Value {
+pub(super) fn observation(publication: u64, wall_ns: u64) -> Value {
     json!({"run":"00000000000000010000000000000002",
         "boot":"00000000000000030000000000000004",
         "publication":publication,"run_tick":publication,"wall_ns":wall_ns,"segment":0})

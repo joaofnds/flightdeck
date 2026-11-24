@@ -4,6 +4,8 @@ use serde_json::Value;
 use crate::session::Observation;
 
 pub(crate) const CPUS_MAX: usize = 1024;
+/// The longest run or boot text an identity may carry.
+pub(crate) const IDENTITY_TEXT_BYTES_MAX: usize = 64;
 pub(crate) type Counters = Vec<[Option<u64>; 4]>;
 
 #[derive(Clone)]
@@ -115,11 +117,11 @@ impl Identity {
         let boot = value["boot"]
             .as_str()
             .ok_or(Error::Bound("CPU boot identity"))?;
-        if run.len() > 64 {
+        if run.len() > IDENTITY_TEXT_BYTES_MAX {
             return Err(Error::Bound("CPU run identity bytes"));
         }
 
-        if boot.len() > 64 {
+        if boot.len() > IDENTITY_TEXT_BYTES_MAX {
             return Err(Error::Bound("CPU boot identity bytes"));
         }
 
