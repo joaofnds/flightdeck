@@ -1302,6 +1302,17 @@ fn gpu_memory() -> Specification {
     specification
 }
 
+/// The GPU page's machine charts, drawn from the worker's readings and the store's View.
+fn gpu_specifications() -> Vec<Specification> {
+    vec![
+        gpu_activity(),
+        gpu_frequency(),
+        gpu_power(),
+        gpu_memory(),
+        gpu_temperature(),
+    ]
+}
+
 fn gpu_activity() -> Specification {
     specification(
         "live-gpu-activity",
@@ -1358,13 +1369,7 @@ fn specifications(route: &str, points: &JoinedPoints<'_>) -> Result<Vec<Specific
             cpu_temperature(),
         ],
         "memory" => memory_specifications(),
-        "gpu" => vec![
-            gpu_activity(),
-            gpu_frequency(),
-            gpu_power(),
-            gpu_memory(),
-            gpu_temperature(),
-        ],
+        "gpu" => gpu_specifications(),
         "energy" => energy(points)?,
         "network" => network(),
         "storage" => storage_specifications(),

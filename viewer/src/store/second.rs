@@ -465,6 +465,29 @@ impl MachineSecond {
             .and_then(|complete| complete.storage_rate(rate))
     }
 
+    /// The GPU's power over the interval before the second, as its complete reading holds it,
+    /// `None` where the second has no complete reading, as an unread or refused second has none.
+    #[must_use]
+    pub fn gpu_watts(&self) -> Option<f64> {
+        self.complete().and_then(CompleteMachine::gpu_watts)
+    }
+
+    /// The GPU memory in use at the second, as its complete reading holds it, `None` where the
+    /// second has no complete reading.
+    #[must_use]
+    pub fn gpu_memory_in_use_bytes(&self) -> Option<u64> {
+        self.complete()
+            .and_then(CompleteMachine::gpu_memory_in_use_bytes)
+    }
+
+    /// The GPU memory allocated at the second, as its complete reading holds it, `None` where the
+    /// second has no complete reading.
+    #[must_use]
+    pub fn gpu_memory_allocated_bytes(&self) -> Option<u64> {
+        self.complete()
+            .and_then(CompleteMachine::gpu_memory_allocated_bytes)
+    }
+
     #[must_use]
     pub fn cpu_counters(&self) -> Option<&[CpuCounter]> {
         self.complete()

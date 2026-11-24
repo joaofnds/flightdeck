@@ -139,6 +139,21 @@ pub fn apps_with_disk_at(second: &MachineSecond, apps: &[(&str, u64, u64)]) -> A
     apps_at_rows(second, rows)
 }
 
+/// The Apps of `second` as `apps_at` gives them, each of `apps` also spending that many
+/// nanoseconds of GPU time in the second. `apps` is in key order.
+pub fn apps_with_gpu_at(second: &MachineSecond, apps: &[(&str, u64, u64)]) -> AppsSecond {
+    let rows: Vec<AppRow> = apps
+        .iter()
+        .map(|(name, cpu_ns, gpu_ns)| {
+            let mut app = apps_at_app(name, *cpu_ns, 0);
+            app.gpu_ns.known = *gpu_ns;
+            apps_at_row_of(&app)
+        })
+        .collect();
+
+    apps_at_rows(second, rows)
+}
+
 /// The Apps of `second` whose rows are `rows`, every process of the second found.
 fn apps_at_rows(second: &MachineSecond, rows: Vec<AppRow>) -> AppsSecond {
     AppsSecond {
@@ -174,9 +189,14 @@ pub fn apps_at_observation(second: &MachineSecond) -> Observation {
     }
 }
 
+/// The row of `apps_at_app`'s App of `name`, `cpu_ns` and `disk_bytes`.
+fn apps_at_row(name: &str, cpu_ns: u64, disk_bytes: u64) -> AppRow {
+    apps_at_row_of(&apps_at_app(name, cpu_ns, disk_bytes))
+}
+
 /// The App of one process, the executable `name`, that spent `cpu_ns` of CPU time, held as many
 /// bytes resident and read and wrote `disk_bytes` of disk I/O, half of them each way.
-fn apps_at_row(name: &str, cpu_ns: u64, disk_bytes: u64) -> AppRow {
+fn apps_at_app(name: &str, cpu_ns: u64, disk_bytes: u64) -> App {
     assert!(disk_bytes.is_multiple_of(2));
     let measure = |known| Measure {
         known,
@@ -184,7 +204,8 @@ fn apps_at_row(name: &str, cpu_ns: u64, disk_bytes: u64) -> AppRow {
         unavailable_members: 0,
         overflowed: false,
     };
-    let app = App {
+
+    App {
         key: Key {
             kind: KeyKind::Executable,
             bytes: name.as_bytes().to_vec(),
@@ -202,14 +223,18 @@ fn apps_at_row(name: &str, cpu_ns: u64, disk_bytes: u64) -> AppRow {
         disk_io_bytes: measure(disk_bytes),
         resident_bytes: measure(cpu_ns),
         footprint_bytes: measure(0),
-    };
+    }
+}
+
+/// The row of `app`, named as the store names it.
+fn apps_at_row_of(app: &App) -> AppRow {
     let ranked = Arc::new(RankedApp::named(
         KeyKind::Executable,
         app.key.bytes.clone(),
         app.display_name.clone(),
     ));
 
-    AppRow::new(&app, ranked)
+    AppRow::new(app, ranked)
 }
 
 /// The newest second of `hour()`.

@@ -16,8 +16,8 @@ use crate::live_store_app_fixtures::{
     HOUR_NEWEST, apps_at, hour, hour_led_from_its_older_part, hour_until,
 };
 use crate::live_store_fixtures::{
-    reading_at, summary_point, trend_point, view, with_memory_reading, with_network_reading,
-    with_storage_reading,
+    reading_at, summary_point, trend_point, view, with_gpu_reading, with_memory_reading,
+    with_network_reading, with_storage_reading,
 };
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
@@ -3162,6 +3162,17 @@ const STORAGE: Page = Page {
     quantities: no_quantities,
 };
 
+const GPU: Page = Page {
+    route: "gpu",
+    with_reading: with_gpu_reading,
+    charts_with_readings: &[
+        "live-gpu-activity",
+        crate::live_projection::GPU_TEMPERATURE_ID,
+    ],
+    tail_plot: "live-gpu-power-plot",
+    quantities: no_quantities,
+};
+
 /// The quantities Memory renders of `summary`, each by the key of the element rendering it.
 fn memory_quantities(summary: &serde_json::Value) -> Vec<(&'static str, String)> {
     let keys = [
@@ -3214,6 +3225,9 @@ older_tail_drawn_from_the_view_cases! {
     // reading, and the operation, service time, error and temperature charts draw none on
     // either side.
     a_followed_storage_page_at_the_hour_draws_its_older_tail_from_the_view, STORAGE;
+    // GPU: the hour holds no complete reading, so only the activity and sensor charts draw a
+    // reading, and the frequency, power and memory charts draw none on either side.
+    a_followed_gpu_page_at_the_hour_draws_its_older_tail_from_the_view, GPU;
 }
 
 /// Asserts that a followed `page` whose reader rests draws each machine chart over the last 60
@@ -3359,6 +3373,9 @@ newest_second_readouts_cases! {
     // Storage: the read operations tell the two seconds apart.
     the_storage_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it, STORAGE,
         "/storage/read_ops_per_second";
+    // GPU: the GPU power tells the two seconds apart.
+    the_gpu_readouts_of_the_views_newest_second_read_as_the_workers_reading_of_it, GPU,
+        "/gpu_watts";
 }
 
 /// Asserts that a followed `page` whose reader rests reads every readout of the View's newest
@@ -3403,6 +3420,8 @@ pause_shows_the_views_newest_second_cases! {
     pause_on_a_rested_network_page_shows_the_views_newest_second_without_reading, NETWORK;
     // Storage: the readouts are its cards and chart legends.
     pause_on_a_rested_storage_page_shows_the_views_newest_second_without_reading, STORAGE;
+    // GPU: the readouts are its cards and chart legends.
+    pause_on_a_rested_gpu_page_shows_the_views_newest_second_without_reading, GPU;
 }
 
 /// Asserts that Pause on a followed `page` whose reader rests shows the View's newest second as
@@ -3450,6 +3469,8 @@ held_second_the_view_lacks_cases! {
     holding_an_older_second_the_view_lacks_on_network_reads_the_workers_reading_of_it, NETWORK;
     // Storage: the hover and the click pick the operation chart.
     holding_an_older_second_the_view_lacks_on_storage_reads_the_workers_reading_of_it, STORAGE;
+    // GPU: the hover and the click pick the power chart.
+    holding_an_older_second_the_view_lacks_on_gpu_reads_the_workers_reading_of_it, GPU;
 }
 
 /// Asserts that a second `page` holds in the View's older tail, which the View keeps no record

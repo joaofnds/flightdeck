@@ -16,11 +16,12 @@ use crate::live_hover::{Origin, Preview, Target};
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Update, Worker};
-use crate::live_store_app_fixtures::{apps_at, apps_with_disk_at};
+use crate::live_store_app_fixtures::{apps_at, apps_with_disk_at, apps_with_gpu_at};
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    levels, levels_named, network_rates, reading_at, storage_rates, store_levels_named,
-    trend_point, view, with_memory_reading, with_network_reading, with_storage_reading,
+    gpu_watts, levels, levels_named, network_rates, reading_at, storage_rates, store_levels_named,
+    trend_point, view, with_gpu_reading, with_memory_reading, with_network_reading,
+    with_storage_reading,
 };
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -256,6 +257,11 @@ const STORAGE: Page = Page {
     seconds: storage_seconds,
 };
 
+const GPU: Page = Page {
+    route: "gpu",
+    seconds: gpu_seconds,
+};
+
 macro_rules! newest_second_without_a_complete_reading_cases {
     ($($name:ident, $page:expr, $assert_shows_the_record:expr;)*) => {$(
         #[test]
@@ -286,6 +292,10 @@ newest_second_without_a_complete_reading_cases! {
     // service times, since the record does not hold them.
     a_rested_storage_page_shows_the_storage_of_a_newest_second_without_a_complete_reading,
         STORAGE, assert_shows_the_storage_of_the_record;
+    // GPU: the page shows the record's activity and sensor, and no power or memory, since the
+    // record does not hold them.
+    a_rested_gpu_page_shows_the_gpu_of_a_newest_second_without_a_complete_reading, GPU,
+        assert_shows_the_gpu_of_the_record;
 }
 
 /// Asserts that `page`, its reader resting, shows what the View's record of a newest second
@@ -370,6 +380,7 @@ record_of_a_refused_second_cases! {
     a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read, "overview";
     a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read, "memory";
     a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read, "storage";
+    a_rested_gpu_page_shows_the_record_of_a_refused_second_the_worker_read, "gpu";
 }
 
 /// Rests `route` over a View whose newest second the store refused a complete reading of and
@@ -420,6 +431,28 @@ fn assert_shows_the_storage_of_the_record(shown: &Value, second: &MachineSecond)
     assert_eq!(storage["write_bps"].as_f64(), second.disk_written_bps);
     for rate in viewer::store::StorageRate::ALL {
         assert!(storage[rate.key()].is_null(), "{}", rate.key());
+    }
+}
+
+/// Asserts that `shown` holds the GPU activity and sensor as `second`'s record holds them, and
+/// no GPU power or memory, which the record does not hold.
+fn assert_shows_the_gpu_of_the_record(shown: &Value, second: &MachineSecond) {
+    assert!(second.gpu_active_percent.is_some());
+    assert!(second.gpu_celsius.is_some());
+    assert_eq!(
+        shown["gpu_active_percent"].as_f64(),
+        second.gpu_active_percent
+    );
+    assert_eq!(
+        shown["gpu_celsius"].as_f64(),
+        second.gpu_celsius.map(f64::from)
+    );
+    for key in [
+        "gpu_watts",
+        "gpu_memory_in_use_bytes",
+        "gpu_memory_allocated_bytes",
+    ] {
+        assert!(shown[key].is_null(), "{key}");
     }
 }
 
@@ -533,6 +566,10 @@ ranks_the_apps_of_the_views_newest_second_cases! {
     a_rested_storage_page_ranks_the_apps_of_the_views_newest_second, STORAGE,
         |second| apps_with_disk_at(second, &[("Brave Browser", 1_000_000, 6_000_000)]),
         crate::live_rankings::Metric::Disk, 6_000_000;
+    // GPU: one App that spent 0.4 seconds of GPU time leads its GPU ranking.
+    a_rested_gpu_page_ranks_the_apps_of_the_views_newest_second, GPU,
+        |second| apps_with_gpu_at(second, &[("Brave Browser", 1_000_000, 400_000_000)]),
+        crate::live_rankings::Metric::Gpu, 400_000_000;
 }
 
 /// Asserts that `page`, its reader resting, ranks by `metric` the Apps of a newer View whose
@@ -626,6 +663,9 @@ followed_page_rests_its_reader_cases! {
     // Storage: the read operations read the newest second's.
     a_followed_storage_page_rests_its_reader_and_draws_each_newer_view, STORAGE,
         "/storage/read_ops_per_second", |second| storage_rates(second)[0];
+    // GPU: the GPU power reads the newest second's.
+    a_followed_gpu_page_rests_its_reader_and_draws_each_newer_view, GPU,
+        "/gpu_watts", |second| Some(gpu_watts(second));
 }
 
 /// Asserts that `page`, following the newest second, rests its reader after its first reading
@@ -751,6 +791,35 @@ fn a_rested_storage_page_reads_its_cards_of_a_refused_second_as_its_record_holds
     assert_eq!(cards, texts(&summary::cards_of_summary("storage", &record)));
     let readings: Vec<&str> = cards.iter().map(|card| card.1.as_str()).collect();
     assert_ne!(readings[0], readings[1], "{cards:?}");
+    assert_eq!(readings[2], "Unavailable", "{cards:?}");
+    assert_eq!(readings[3], "Unavailable", "{cards:?}");
+}
+
+#[test]
+fn a_rested_gpu_page_reads_its_cards_of_a_refused_second_as_its_record_holds_them() {
+    // Goal: at a second the store refused a complete reading of, the GPU page's card of GPU
+    // activity shows the record's, and its cards of GPU memory in use and GPU power read
+    // unavailable, since no reading of that second holds them. Method: rest the GPU page over a
+    // refused second the worker read, then the page's cards against the cards of a summary
+    // holding only the record's GPU activity, in the order the page's card list holds them:
+    // activity, frequency, memory in use and power.
+    let (dashboard, refused) = rested_over_a_refused_second("gpu");
+
+    let cards = texts(&summary::cards_of_summary(
+        "gpu",
+        &dashboard.shown_summary(),
+    ));
+
+    let record = json!({"gpu_active_percent": refused.gpu_active_percent});
+    assert!(refused.gpu_active_percent.is_some());
+    assert_eq!(cards, texts(&summary::cards_of_summary("gpu", &record)));
+    let labels: Vec<&str> = cards.iter().map(|card| card.0.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["GPU", "Active frequency", "Memory in use", "GPU power"]
+    );
+    let readings: Vec<&str> = cards.iter().map(|card| card.1.as_str()).collect();
+    assert_ne!(readings[0], "Unavailable", "{cards:?}");
     assert_eq!(readings[2], "Unavailable", "{cards:?}");
     assert_eq!(readings[3], "Unavailable", "{cards:?}");
 }
@@ -1345,6 +1414,45 @@ mod when_the_page_has_a_chart_by_app {
 
         let expected = expected_on_page(&view, Metric::Gpu.panel_id());
         assert_eq!(by_app(&dashboard.panels), expected);
+    }
+
+    macro_rules! page_without_a_gpu_chart_cases {
+        ($($name:ident, $route:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: a page that shows no GPU chart by App keeps no history of the GPU time
+                // of the View it takes, so it builds none over the loaded hour only to drop it.
+                // Method: the page with the worker's readings takes a View that holds an App in
+                // each second.
+                let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+                let mut dashboard = dashboard_on($route, &trends);
+
+                assert!(dashboard.take_view(Arc::new(charted_view())));
+
+                assert!(dashboard.store_panels.gpu.is_none());
+            }
+        )*};
+    }
+
+    page_without_a_gpu_chart_cases! {
+        the_cpu_page_keeps_no_gpu_history_of_the_view, "cpu";
+        the_energy_page_keeps_no_gpu_history_of_the_view, "energy";
+        the_overview_page_keeps_no_gpu_history_of_the_view, "overview";
+        the_memory_page_keeps_no_gpu_history_of_the_view, "memory";
+        the_storage_page_keeps_no_gpu_history_of_the_view, "storage";
+    }
+
+    #[test]
+    fn the_gpu_page_keeps_the_gpu_history_its_chart_by_app_draws() {
+        // Goal: the GPU page keeps the history of GPU time its chart by App draws, so its next
+        // View takes the points both Views hold from it. Method: the page with the worker's
+        // readings takes a View that holds an App in each second.
+        let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+        let mut dashboard = dashboard_on("gpu", &trends);
+
+        assert!(dashboard.take_view(Arc::new(charted_view())));
+
+        assert!(dashboard.store_panels.gpu.is_some());
     }
 
     #[test]
@@ -2448,6 +2556,15 @@ fn storage_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
     wall_seconds
         .iter()
         .map(|&wall_second| with_storage_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
+/// The seconds at `wall_seconds`, each with a complete reading of the GPU activity and sensor it
+/// holds and of the GPU's power and memory, as the store holds a second it read.
+fn gpu_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_gpu_reading(reading_at(wall_second, 0)))
         .collect()
 }
 

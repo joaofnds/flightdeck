@@ -21,10 +21,10 @@ const _: () = {
     assert!(EARLIER_STRIDE_SECONDS == 10);
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
-    // `MachineStretch`, so the Mac's readings cost a store about 3.3 MiB.
-    assert!(size_of::<MachineStretch>() <= 9 * 1024);
+    // `MachineStretch`, so the Mac's readings cost a store about 3.6 MiB.
+    assert!(size_of::<MachineStretch>() <= 10 * 1024);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 3_400 * 1024);
+    assert!(allocated * size_of::<MachineStretch>() <= 3_700 * 1024);
 };
 
 pub type Gauge = GaugeSummary<MachinePlace>;
@@ -38,6 +38,9 @@ pub struct MachineStretch {
     pub cpu_percent: Rate,
     pub cpu_level_percent: [Rate; 2],
     pub gpu_active_percent: Rate,
+    /// The GPU's power, which only a second's complete reading holds (`MachineSecond::gpu_watts`),
+    /// so it reads none at a second without one.
+    pub gpu_watts: Rate,
     pub disk_read_bps: Rate,
     pub disk_written_bps: Rate,
     pub network_received_bps: Rate,
@@ -55,8 +58,13 @@ pub struct MachineStretch {
     pub swap_total_bytes: Gauge,
     /// The rates of `MemoryRate::ALL`, in its order.
     pub memory_rates: [Rate; MemoryRate::ALL.len()],
+    // Only a second's complete reading holds the GPU memory in use and allocated
+    // (`MachineSecond::gpu_memory_in_use_bytes`), so each reads none at a second without one.
+    pub gpu_memory_in_use_bytes: Gauge,
+    pub gpu_memory_allocated_bytes: Gauge,
     pub power_watts: Gauge,
     pub soc_celsius: Gauge,
+    pub gpu_celsius: Gauge,
     pub fan_mean_rpm: Gauge,
     pub pressure: Category,
     pub thermal_pressure: Category,
@@ -79,6 +87,18 @@ impl MachineStretch {
             .push(second.power_watts.map(f64::from), follows, place);
         self.soc_celsius
             .push(second.soc_celsius.map(f64::from), follows, place);
+        self.gpu_celsius
+            .push(second.gpu_celsius.map(f64::from), follows, place);
+        self.gpu_memory_in_use_bytes.push(
+            second.gpu_memory_in_use_bytes().map(number),
+            follows,
+            place,
+        );
+        self.gpu_memory_allocated_bytes.push(
+            second.gpu_memory_allocated_bytes().map(number),
+            follows,
+            place,
+        );
         self.fan_mean_rpm
             .push(second.fan_mean_rpm.map(f64::from), follows, place);
         self.thermal_pressure
@@ -119,6 +139,8 @@ impl MachineStretch {
         }
         self.gpu_active_percent
             .push(rate(second.gpu_active_percent), follows, place);
+        self.gpu_watts
+            .push(rate(second.gpu_watts()), follows, place);
         self.disk_read_bps
             .push(rate(second.disk_read_bps), follows, place);
         self.disk_written_bps

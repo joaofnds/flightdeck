@@ -736,6 +736,11 @@ mod tests {
         include!("live_storage_tests.rs");
     }
 
+    mod gpu_tests {
+        use super::*;
+        include!("live_gpu_tests.rs");
+    }
+
     mod battery_tests {
         use super::*;
         include!("live_battery_tests.rs");

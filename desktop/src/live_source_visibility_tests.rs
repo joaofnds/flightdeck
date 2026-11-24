@@ -589,6 +589,7 @@ page_shown_again_over_a_view_cases! {
     a_memory_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "memory";
     a_network_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "network";
     a_storage_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "storage";
+    a_gpu_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "gpu";
 }
 
 /// Asserts that the page `route`, drawn from a View with its reader resting, hidden and shown
@@ -635,6 +636,8 @@ hover_wakes_a_resting_page_cases! {
         false;
     // Storage: the page ranks Apps, so the hover reads its second.
     a_hover_wakes_a_resting_storage_page_s_reader_and_letting_go_rests_it_again, "storage", true;
+    // GPU: the page ranks Apps, so the hover reads its second.
+    a_hover_wakes_a_resting_gpu_page_s_reader_and_letting_go_rests_it_again, "gpu", true;
 }
 
 /// Asserts that a hover of a second the View lacks wakes the resting reader of the page `route`,

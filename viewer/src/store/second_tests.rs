@@ -597,6 +597,54 @@ fn a_second_reads_each_storage_rate_its_complete_reading_holds() {
 }
 
 #[test]
+fn a_second_reads_its_gpu_power_and_gpu_memory_from_its_complete_reading() {
+    // Goal: the GPU page reads a second's GPU power and the GPU memory in use and allocated from
+    // the second's complete reading, as its summary writes them. Method: the GPU spends 3 J over
+    // one second and its driver reports 5 GiB in use and 8 GiB allocated, and each reading the
+    // second reads is set beside the summary's.
+    let before = Machine::at(1).cpus(&[(0, 0)]).gpu_energy(0);
+    let current = Machine::at(2)
+        .cpus(&[(25, 75)])
+        .gpu_energy(3_000_000_000)
+        .gpu_memory(5 << 30, 8 << 30);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    let summary = second.complete().unwrap().summary(&second);
+    let memory = [
+        second.gpu_memory_in_use_bytes(),
+        second.gpu_memory_allocated_bytes(),
+    ];
+    let written_memory =
+        ["gpu_memory_in_use_bytes", "gpu_memory_allocated_bytes"].map(|key| summary[key].as_u64());
+    assert_eq!(second.gpu_watts(), summary["gpu_watts"].as_f64());
+    assert_eq!(second.gpu_watts(), Some(3.0));
+    assert_eq!(memory, written_memory);
+    assert_eq!(memory, [Some(5 << 30), Some(8 << 30)]);
+}
+
+#[test]
+fn a_second_without_a_complete_reading_reads_no_gpu_power_or_gpu_memory() {
+    // Goal: a second the store holds no complete reading of reads no GPU power and no GPU
+    // memory, since only a complete reading holds them, so the GPU page reads them as missing
+    // there. Method: the second of the GPU readings above with its complete reading unread.
+    let before = Machine::at(1).cpus(&[(0, 0)]).gpu_energy(0);
+    let current = Machine::at(2)
+        .cpus(&[(25, 75)])
+        .gpu_energy(3_000_000_000)
+        .gpu_memory(5 << 30, 8 << 30);
+
+    let second = current.second_after(&before);
+
+    assert_eq!(second.gpu_watts(), None);
+    assert_eq!(second.gpu_memory_in_use_bytes(), None);
+    assert_eq!(second.gpu_memory_allocated_bytes(), None);
+}
+
+#[test]
 fn a_second_holds_the_swap_macos_reported() {
     // Goal: the Overview's utilization of swap reads the swap in use and the swap macOS set
     // aside, as the worker's summary does. Method: 300 of 1,024 bytes of swap in use.
@@ -1391,6 +1439,29 @@ impl Machine {
             record.read_time_ns = Some(read_time);
             record.write_time_ns = Some(write_time);
         }
+        self
+    }
+
+    /// Gives the tick the energy the GPU spent since the run began, read from `IOReport`.
+    fn gpu_energy(mut self, energy_nj: u64) -> Self {
+        self.tick.ioreport_read = true;
+        self.tick.gpu_energy_nj = Some(energy_nj);
+        self
+    }
+
+    /// Gives the tick the unified memory the GPU driver reports in use and allocated, read with
+    /// the rest of the system group.
+    fn gpu_memory(mut self, in_use_bytes: u64, allocated_bytes: u64) -> Self {
+        self.tick.system = Some(collector::ring::SystemSnapshot {
+            reading: collector::system::SystemReading {
+                gpu_memory: Some(collector::gpu_memory::GpuMemoryReading {
+                    in_use_bytes: Some(in_use_bytes),
+                    allocated_bytes: Some(allocated_bytes),
+                }),
+                ..collector::system::SystemReading::default()
+            },
+            ..collector::ring::SystemSnapshot::default()
+        });
         self
     }
 

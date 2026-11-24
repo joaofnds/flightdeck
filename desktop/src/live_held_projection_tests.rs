@@ -8,11 +8,12 @@ use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View
 use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
 use super::{Observations, ViewPanelsPoints, overview_point_second, view_panels};
 use crate::data::Panel;
+use crate::live_projection::{GPU_FREQUENCY_ID, GPU_MEMORY_ID, GPU_TEMPERATURE_ID};
 use crate::live_store_fixtures::{
-    levels, memory_rates, network_rates, overview_panels, reading_at, selection, selection_of_json,
-    storage_rates, summary_point, summary_selection, trend_point, view, with_memory_rates,
-    with_memory_reading, with_network_rates, with_network_reading, with_storage_rates,
-    with_storage_reading,
+    gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates, overview_panels, reading_at,
+    selection, selection_of_json, storage_rates, summary_point, summary_selection, trend_point,
+    view, with_gpu_reading, with_gpu_readings, with_memory_rates, with_memory_reading,
+    with_network_rates, with_network_reading, with_storage_rates, with_storage_reading,
 };
 
 /// `place` as a trend point's reach names a reading.
@@ -224,6 +225,28 @@ const STORAGE: Page = Page {
     states_at_a_refused_second: &[],
 };
 
+const GPU: Page = Page {
+    route: "gpu",
+    with_reading: with_gpu_reading,
+    chart_count: 5,
+    unrecorded: &[(GPU_FREQUENCY_ID, "Frequency")],
+    hour: gpu_hour,
+    peak_lines: &[
+        ("live-gpu-activity", 0),
+        ("live-gpu-power", 0),
+        (GPU_MEMORY_ID, 0),
+        (GPU_MEMORY_ID, 1),
+        (GPU_TEMPERATURE_ID, 0),
+    ],
+    held_at_a_refused_second: &[("live-gpu-activity", 0), (GPU_TEMPERATURE_ID, 0)],
+    missing_at_a_refused_second: &[
+        ("live-gpu-power", 0),
+        (GPU_MEMORY_ID, 0),
+        (GPU_MEMORY_ID, 1),
+    ],
+    states_at_a_refused_second: &[],
+};
+
 macro_rules! view_drawn_as_the_readings_draw_it_cases {
     ($($name:ident, $page:expr;)*) => {$(
         #[test]
@@ -246,6 +269,8 @@ view_drawn_as_the_readings_draw_it_cases! {
     the_network_charts_of_the_view_draw_as_the_readings_draw_them, NETWORK;
     // Storage: every line draws a value but the one recorded nowhere, the storage temperature.
     the_storage_charts_of_the_view_draw_as_the_readings_draw_them, STORAGE;
+    // GPU: every line draws a value but the one recorded nowhere, the GPU's frequency.
+    the_gpu_charts_of_the_view_draw_as_the_readings_draw_them, GPU;
 }
 
 /// Asserts that `page` draws the same charts from a View as from the trend points of the same
@@ -292,7 +317,7 @@ fn assert_lines_drawn(panels: &[std::rc::Rc<Panel>], unrecorded: &[(&str, &str)]
 }
 
 /// The first second a page drawn from a View whose newest second is 10,000 draws in full detail,
-/// as Memory, Network and Storage do.
+/// as Memory, Network, Storage and GPU do.
 const HOUR_DETAIL_FIRST: u64 = 9_041;
 
 /// An hour of seconds that ends at 10,000, each with the complete reading the Memory page draws:
@@ -408,6 +433,45 @@ fn storage_hour() -> Vec<MachineSecond> {
         .collect()
 }
 
+/// An hour of seconds that ends at 10,000, each with the complete reading the GPU page draws: a
+/// gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
+/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+fn gpu_hour() -> Vec<MachineSecond> {
+    (6_400..=10_000)
+        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
+        .map(|wall_second| {
+            let segment = match wall_second {
+                ..7_500 => 0,
+                7_500..8_000 => 1,
+                8_000.. => 2,
+            };
+            let mut second = reading_at(wall_second, segment);
+            if wall_second >= 8_000 {
+                second.run = [5, 6];
+            }
+            let peak = matches!(wall_second, 7_013 | 9_040);
+            // Every reading moves over each stretch, so the reach of each names it.
+            let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
+            second.gpu_celsius = Some(f32::from(quarter_degrees) / 4.0 + 40.0);
+            let mut watts = Some(gpu_watts(&second));
+            let mut memory_bytes = gpu_memory_bytes(&second);
+            if peak {
+                second.gpu_active_percent = Some(100.0);
+                second.gpu_celsius = Some(110.0);
+                watts = watts.map(|watts| watts * 10.0);
+                memory_bytes = memory_bytes.map(|bytes| bytes.map(|bytes| bytes * 4));
+            }
+            // A gap and a restart each leave the first second after them with no rates.
+            if matches!(wall_second, 7_600 | 8_000) {
+                second.elapsed_ns = None;
+                second.gpu_active_percent = None;
+                watts = None;
+            }
+            with_gpu_readings(second, watts, memory_bytes)
+        })
+        .collect()
+}
+
 /// `seconds` by the stretch each lies in, oldest first.
 fn seconds_by_stretch(
     seconds: &[MachineSecond],
@@ -500,6 +564,9 @@ hour_drawn_as_the_readings_draw_it_cases! {
     // Storage: the peaks reach both lines of the throughput, operations, service time and errors
     // charts.
     the_storage_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, STORAGE;
+    // GPU: the peaks reach the activity, power and sensor lines and both lines of the memory
+    // chart.
+    the_gpu_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, GPU;
 }
 
 /// Asserts that `page` draws its hour, peaks included, from a View as from the trend points
@@ -578,6 +645,9 @@ refused_second_drawn_as_it_holds_cases! {
     // Storage: the bytes read and written the second holds itself are held, and the operations,
     // errors and service times only a complete reading holds are missing.
     at_a_refused_second_the_storage_charts_draw_what_the_second_holds, STORAGE;
+    // GPU: the activity and sensor the second holds itself are held, and the power and memory
+    // only a complete reading holds are missing.
+    at_a_refused_second_the_gpu_charts_draw_what_the_second_holds, GPU;
 }
 
 /// Asserts that at a refused second `page` draws what the second holds itself, as the worker

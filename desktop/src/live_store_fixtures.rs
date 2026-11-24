@@ -236,6 +236,52 @@ pub fn with_storage_rates(
     second
 }
 
+/// `second` with the GPU sensor `gpu_celsius` gives it, and a complete reading of the GPU
+/// activity and sensor it then holds and of the GPU's power and memory, as the store holds a
+/// second it read. Each reading differs from those of every other second.
+pub fn with_gpu_reading(mut second: MachineSecond) -> MachineSecond {
+    second.gpu_celsius = Some(gpu_celsius(&second));
+    let watts = Some(gpu_watts(&second));
+    let memory_bytes = gpu_memory_bytes(&second);
+
+    with_gpu_readings(second, watts, memory_bytes)
+}
+
+/// The GPU sensor `with_gpu_reading` gives `second`, a quarter degree apart from one second
+/// to the next over 160 seconds.
+fn gpu_celsius(second: &MachineSecond) -> f32 {
+    let quarter_degrees = u16::try_from(second.wall_ns / NANOSECONDS_PER_SECOND % 160).unwrap();
+
+    f32::from(quarter_degrees) / 4.0 + 30.0
+}
+
+/// The GPU power `with_gpu_reading` gives `second`.
+pub fn gpu_watts(second: &MachineSecond) -> f64 {
+    let wall_second = f64::from(u32::try_from(second.wall_ns / NANOSECONDS_PER_SECOND).unwrap());
+
+    wall_second / 10.0 + 0.25
+}
+
+/// The GPU memory in use and allocated `with_gpu_reading` gives `second`, in that order.
+pub fn gpu_memory_bytes(second: &MachineSecond) -> [Option<u64>; 2] {
+    let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+
+    [Some(wall_second * 2_097_152), Some(wall_second * 3_145_728)]
+}
+
+/// `second` with a complete reading of the GPU activity and sensor it holds, the GPU power
+/// `watts`, and the GPU memory `memory_bytes`, in use and then allocated.
+pub fn with_gpu_readings(
+    mut second: MachineSecond,
+    watts: Option<f64>,
+    memory_bytes: [Option<u64>; 2],
+) -> MachineSecond {
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_gpu(&second, watts, memory_bytes, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
 /// The trend point the viewer writes for `second` from its complete reading.
 pub fn summary_point(second: &MachineSecond) -> Value {
     let identity = |identity| identity_text(Identity(identity)).to_string();

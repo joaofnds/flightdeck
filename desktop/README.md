@@ -235,8 +235,8 @@ mailboxes, cancellation generations, pages of at most 512 rows or 2,048 Apps, an
 bounded cache.
 A 250 ms main-thread timer takes completed results, with prompt polling while the window
 awaits a restoration or another reply.
-The live Overview, Memory, Network and Storage pages, while they follow the newest second,
-draw from the Store instead. The app
+The live Overview, Memory, Network, Storage and GPU pages, while they follow the newest
+second, draw from the Store instead. The app
 starts the Store before its window opens and keeps it for its life. Its ingestion thread
 uses bounded buffers and publishes immutable Views. Ingestion parks while the window is
 hidden or a saved recording is shown, and goes on while a second is selected or held.
@@ -249,7 +249,7 @@ holds no whole sealed minute of that second's run, or where the ring overran whi
 the ring, which leaves the Store holding seconds past ones it never took. The page waits for
 the Store instead of starting a duplicate page query.
 While such a page draws from a View the worker rests, and a hover over a second the View
-holds reads it there. The CPU, Energy and GPU pages draw their chart by App from the
+holds reads it there. The CPU and Energy pages draw their chart by App from the
 Store's View too. A typed second, a saved recording and every other reading of the other
 pages read through the worker. A held second keeps the charts' window and the View it
 took, and reads only the page ending at that window and the held second's own reading.

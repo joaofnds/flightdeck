@@ -1,10 +1,11 @@
 //! The page drawn from the store's newest View, which the window takes each tick. While they
-//! follow the newest second, Overview, Memory, Network and Storage draw their machine charts and
-//! readouts from it. Overview also draws its CPU, memory, energy and disk charts by App, its top
-//! Apps and its hardware figure from it, Memory its chart of resident memory by App and its top
-//! Apps, and Storage its chart of disk bytes by App and its top Apps. The CPU, Energy and GPU
-//! pages draw only their chart by App from it while they follow the newest second, and a chosen
-//! second, a hover's reading and every other chart draw from the worker's readings.
+//! follow the newest second, Overview, Memory, Network, Storage and GPU draw their machine charts
+//! and readouts from it. Overview also draws its CPU, memory, energy and disk charts by App, its
+//! top Apps and its hardware figure from it, Memory its chart of resident memory by App and its
+//! top Apps, Storage its chart of disk bytes by App and its top Apps, and GPU its chart of GPU
+//! time by App and its top Apps. The CPU and Energy pages draw only their chart by App from it
+//! while they follow the newest second, and a chosen second, a hover's reading and every other
+//! chart draw from the worker's readings.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -218,8 +219,8 @@ pub(super) struct StorePanels {
     /// The histories of CPU time, power and disk bytes that `apps` draw, which say why a chart
     /// is left out, or none before the first View.
     histories: Option<OverviewAppHistories>,
-    /// The history of GPU time that `apps` draw on a page other than Overview, or none on
-    /// Overview and before the first View.
+    /// The history of GPU time that `apps` draw, which the GPU page alone keeps, or none on the
+    /// other pages and before the first View.
     gpu: Option<AppAttributionHistory>,
     /// The history of resident memory `apps` draw, or none before the first View.
     resident: Option<ResidentHistory>,
@@ -250,8 +251,8 @@ impl StorePanels {
 
 impl LiveDashboard {
     /// Takes `view`, the store's newest, and draws from it the charts the page draws from the
-    /// store, the machine charts of Overview, Memory, Network and Storage among them. Answers
-    /// whether the page changed.
+    /// store, the machine charts of Overview, Memory, Network, Storage and GPU among them.
+    /// Answers whether the page changed.
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
         self.store_view_place(view);
         // The hover holds the charts where they were until it ends.
@@ -351,22 +352,11 @@ impl LiveDashboard {
                 histories: self.store_panels.histories.take(),
                 resident: self.store_panels.resident.take(),
             };
-            let older_gpu = self.store_panels.gpu.take();
             let Some(view) = self.store_view.clone() else {
                 unreachable!("taking the App charts leaves the drawn View as it was");
             };
             let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
             let mut panels = draw_store_view_panels_apps(&view, older, &cohorts, chosen_over);
-            // Every page that draws no machine chart from the View draws the GPU chart, so such a
-            // page opened from another finds its chart among those drawn from the same View.
-            let gpu = match older_gpu {
-                Some(older) => {
-                    AppAttributionHistory::from_view_after(Metric::Gpu, &view, &cohorts, older)
-                }
-                None => AppAttributionHistory::from_view(Metric::Gpu, &view, &cohorts),
-            };
-            panels.apps.extend(gpu.panel());
-            panels.gpu = Some(gpu);
             for panel in &mut panels.apps {
                 super::zoom_panel(panel, window);
             }
@@ -524,6 +514,12 @@ impl LiveDashboard {
             };
             let cohorts = draw_store_view_cohorts(view, chosen_over, &mut self.leaders);
             let mut drawn = draw_store_view_panels_apps(view, older, &cohorts, chosen_over);
+            if store_view_draws_app_chart(route, Metric::Gpu.panel_id()) {
+                let older_gpu = self.store_panels.gpu.take();
+                let gpu = draw_store_view_gpu(view, &cohorts, older_gpu);
+                drawn.apps.extend(gpu.panel());
+                drawn.gpu = Some(gpu);
+            }
             if route == "overview" {
                 crate::live_acceptance::prepare_overview_titles(&mut drawn.apps)?;
             }
@@ -1168,9 +1164,9 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
 
     // The second's record keeps app memory with the purgeable part already taken out, and holds
     // neither anonymous, purgeable nor file-backed memory, so those and the cached memory they
-    // make stay unknown. It keeps the bytes the network moved but no packets or errors, and the
-    // bytes the disks read and wrote but no operations, errors or service times, so those stay
-    // unknown too.
+    // make stay unknown. It keeps the bytes the network moved but no packets or errors, the bytes
+    // the disks read and wrote but no operations, errors or service times, and the GPU's activity
+    // and sensor but not its power or memory, so those stay unknown too.
     json!({
         "memory_app_bytes": memory.and_then(|memory| memory.app_bytes),
         "memory_wired_bytes": memory.map(|memory| memory.wired_bytes),
@@ -1284,9 +1280,9 @@ fn draw_store_view_splice_apps(route: &str, panels: &mut Vec<Rc<Panel>>, apps: &
 
 /// Whether the page `route` draws its machine charts and readouts from the store's View, and its
 /// top Apps where it shows any, while it follows the live Mac's newest second, so its reader
-/// rests. Overview, Memory, Network and Storage do. Every gate that lets a page draw from the
-/// View, rest its reader on it and resume from it asks this, so a page joins them by being named
-/// here.
+/// rests. Overview, Memory, Network, Storage and GPU do. Every gate that lets a page draw from
+/// the View, rest its reader on it and resume from it asks this, so a page joins them by being
+/// named here.
 pub(crate) fn store_view_draws_machine(route: &str) -> bool {
     store_panels_machine(route).is_some()
 }
@@ -1300,6 +1296,7 @@ fn store_panels_machine(route: &str) -> Option<&'static str> {
         "memory" => Some("memory"),
         "network" => Some("network"),
         "storage" => Some("storage"),
+        "gpu" => Some("gpu"),
         _ => None,
     }
 }
@@ -1359,6 +1356,19 @@ fn draw_store_view_panels_apps(
         histories: Some(histories),
         resident: Some(resident),
         ..StorePanels::default()
+    }
+}
+
+/// The history of GPU time by App of `view`, over the Apps `cohorts` chose, which takes the
+/// points of the seconds it shares with `older`.
+fn draw_store_view_gpu(
+    view: &View,
+    cohorts: &Cohorts,
+    older: Option<AppAttributionHistory>,
+) -> AppAttributionHistory {
+    match older {
+        Some(older) => AppAttributionHistory::from_view_after(Metric::Gpu, view, cohorts, older),
+        None => AppAttributionHistory::from_view(Metric::Gpu, view, cohorts),
     }
 }
 

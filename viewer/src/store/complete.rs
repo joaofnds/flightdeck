@@ -235,6 +235,27 @@ impl CompleteMachine {
         self.point.storage.as_ref()?.rate(rate.point_index())
     }
 
+    /// The GPU's power over the interval before the reading, in watts, `None` where the readings
+    /// give none, as where either reading lacks `IOReport`.
+    #[must_use]
+    pub fn gpu_watts(&self) -> Option<f64> {
+        self.point.gpu_watts
+    }
+
+    /// The unified memory the GPU driver reported in use, `None` where the reading holds no
+    /// system group.
+    #[must_use]
+    pub fn gpu_memory_in_use_bytes(&self) -> Option<u64> {
+        self.point.system.gpu_memory_in_use_bytes
+    }
+
+    /// The unified memory the GPU driver reported allocated, `None` where the reading holds no
+    /// system group.
+    #[must_use]
+    pub fn gpu_memory_allocated_bytes(&self) -> Option<u64> {
+        self.point.system.gpu_memory_allocated_bytes
+    }
+
     /// The reservation charges one physical owner even when Views and sampled tails share it.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -438,6 +459,30 @@ impl CompleteMachine {
             storage: Some(crate::metrics::storage::StoragePoint::of_rates(storage)),
             ..Point::default()
         };
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// The complete reading of `second` whose GPU reads the activity and sensor the second's
+    /// record holds, the power `watts`, and the memory `memory_bytes`, in use and then
+    /// allocated, charged to `budget`, so a test outside the viewer can give a second the
+    /// complete reading the GPU page draws.
+    #[must_use]
+    pub fn of_gpu(
+        second: &MachineSecond,
+        watts: Option<f64>,
+        memory_bytes: [Option<u64>; 2],
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let [in_use_bytes, allocated_bytes] = memory_bytes;
+        let mut point = Point {
+            gpu_active_percent: second.gpu_active_percent,
+            gpu_watts: watts,
+            gpu_celsius: second.gpu_celsius.map(f64::from),
+            ..Point::default()
+        };
+        point.system.gpu_memory_in_use_bytes = in_use_bytes;
+        point.system.gpu_memory_allocated_bytes = allocated_bytes;
 
         Self::of_point(second, point, budget)
     }

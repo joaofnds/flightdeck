@@ -60,6 +60,7 @@ fn view_panels_specifications(
         "memory" => Ok(super::memory_specifications()),
         "network" => Ok(super::network()),
         "storage" => Ok(super::storage_specifications()),
+        "gpu" => Ok(super::gpu_specifications()),
         _ => Err(format!("The store draws no charts of {route}")),
     }
 }
@@ -404,6 +405,16 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
             .get(level)
             .and_then(|percent| stretch_reach_measured(percent)),
         (None, "gpu_active_percent", None) => stretch_reach_measured(&stretch.gpu_active_percent),
+        (None, "gpu_watts", None) => stretch_reach_measured(&stretch.gpu_watts),
+        (None, "gpu_memory_in_use_bytes", None) => {
+            stretch_reach_measured(&stretch.gpu_memory_in_use_bytes)
+        }
+        (None, "gpu_memory_allocated_bytes", None) => {
+            stretch_reach_measured(&stretch.gpu_memory_allocated_bytes)
+        }
+        (None, "gpu_celsius", None) => stretch_reach_measured(&stretch.gpu_celsius),
+        // No reading records the GPU's frequency, so its chart draws none.
+        (None, "gpu_frequency_ghz", None) => None,
         (None, "memory_app_bytes", None) => stretch_reach_measured(&stretch.memory_app_bytes),
         (None, "memory_wired_bytes", None) => stretch_reach_measured(&stretch.memory_wired_bytes),
         (None, "memory_compressed_bytes", None) => {
@@ -472,6 +483,13 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
             narrow(second.cpu_level_percent.get(level).copied().flatten())
         }
         (None, "gpu_active_percent", None) => narrow(second.gpu_active_percent),
+        (None, "gpu_watts", None) => narrow(second.gpu_watts()),
+        (None, "gpu_memory_in_use_bytes", None) => bytes(second.gpu_memory_in_use_bytes()),
+        (None, "gpu_memory_allocated_bytes", None) => bytes(second.gpu_memory_allocated_bytes()),
+        (None, "gpu_celsius", None) => second.gpu_celsius,
+        // The collector does not record the GPU's frequency, so its chart draws no reading
+        // wherever it is drawn.
+        (None, "gpu_frequency_ghz", None) => None,
         (None, "memory_app_bytes", None) => bytes(memory.and_then(|memory| memory.app_bytes)),
         (None, "memory_wired_bytes", None) => bytes(memory.map(|memory| memory.wired_bytes)),
         (None, "memory_compressed_bytes", None) => {
