@@ -231,25 +231,87 @@ fn a_rested_overview_reads_the_cooling_card_of_the_views_newest_second() {
     assert_eq!(dashboard.overview_cooling_readings(), expected);
 }
 
-#[test]
-fn a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_reading() {
-    // Goal: a Memory page whose reader rests shows the memory the View records for its newest
-    // second where the store holds no complete reading of that second, as where it refused one,
-    // since the resting reader never reads that second. Method: the worker reads memory seconds
-    // 9,999 and 10,000, the View of them rests the reader, then a View adds 10,001 with the
-    // memory of its record alone, and the memory the page's readings show.
-    let first = memory_seconds(&[9_999, 10_000]);
-    let mut dashboard = rested_on("memory", &first, worker_reading(&first));
+/// A page drawn from the store's View while it follows the newest second, as the families below
+/// read it.
+struct Page {
+    /// The page's route, which names it to `view_panels` and to the worker.
+    route: &'static str,
+    /// The page's seconds at the wall seconds it is given, each with the complete reading the
+    /// page draws.
+    seconds: fn(&[u64]) -> Vec<MachineSecond>,
+}
+
+const MEMORY: Page = Page {
+    route: "memory",
+    seconds: memory_seconds,
+};
+
+const NETWORK: Page = Page {
+    route: "network",
+    seconds: network_seconds,
+};
+
+const STORAGE: Page = Page {
+    route: "storage",
+    seconds: storage_seconds,
+};
+
+macro_rules! newest_second_without_a_complete_reading_cases {
+    ($($name:ident, $page:expr, $assert_shows_the_record:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a page whose reader rests shows what the View records for its newest second
+            // where the store holds no complete reading of that second, as where it refused one,
+            // since the resting reader never reads that second. Method: the worker reads the
+            // page's seconds 9,999 and 10,000, the View of them rests the reader, then a View
+            // adds 10,001 with its record alone, and what the page's readings show of the
+            // readings the row names.
+            assert_shows_the_record_of_a_newest_second_without_a_complete_reading(
+                &$page,
+                $assert_shows_the_record,
+            );
+        }
+    )*};
+}
+
+newest_second_without_a_complete_reading_cases! {
+    // Memory: the page shows the record's memory in use, memory installed and swap.
+    a_rested_memory_page_shows_the_memory_of_a_newest_second_without_a_complete_reading, MEMORY,
+        assert_shows_the_memory_of_the_record;
+    // Network: the page shows the record's bytes received and sent, and no packets or errors,
+    // since the record does not hold them.
+    a_rested_network_page_shows_the_traffic_of_a_newest_second_without_a_complete_reading,
+        NETWORK, assert_shows_the_traffic_of_the_record;
+    // Storage: the page shows the record's bytes read and written, and no operations, errors or
+    // service times, since the record does not hold them.
+    a_rested_storage_page_shows_the_storage_of_a_newest_second_without_a_complete_reading,
+        STORAGE, assert_shows_the_storage_of_the_record;
+}
+
+/// Asserts that `page`, its reader resting, shows what the View's record of a newest second
+/// without a complete reading holds, as `assert_shows_the_record` asserts of the summary shown.
+fn assert_shows_the_record_of_a_newest_second_without_a_complete_reading(
+    page: &Page,
+    assert_shows_the_record: fn(&Value, &MachineSecond),
+) {
+    let first = (page.seconds)(&[9_999, 10_000]);
+    let mut dashboard = rested_on(page.route, &first, worker_reading(&first));
     let newest = reading_at(10_001, 0);
-    let memory = newest.memory.unwrap();
-    let seconds = [first[0].clone(), first[1].clone(), newest];
+    let seconds = [first[0].clone(), first[1].clone(), newest.clone()];
 
     assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
 
     let shown = dashboard.shown_summary();
     assert_eq!(dashboard.shown_second(), Some(10_001));
+    assert_shows_the_record(&shown, &newest);
+}
+
+/// Asserts that `shown` holds the memory in use, the memory installed and the swap as
+/// `second`'s record holds them.
+fn assert_shows_the_memory_of_the_record(shown: &Value, second: &MachineSecond) {
+    let memory = second.memory.unwrap();
     assert_eq!(
-        summary::memory_in_use_bytes(&shown),
+        summary::memory_in_use_bytes(shown),
         summary::memory_in_use_bytes_of(
             memory.app_bytes.unwrap(),
             memory.wired_bytes,
@@ -286,20 +348,28 @@ fn every_page_drawn_from_the_view_draws_its_machine_charts_from_it() {
     }
 }
 
-#[test]
-fn a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read() {
-    // Goal: Overview shows what the store's record of a second holds where the store refused
-    // that second's complete reading, even where the worker read the same second, whose point
-    // then holds none of the readings. Method: the worker reads 10,000 and a refused 10,001 and
-    // writes the point it writes for a refused second, the View of them rests the reader, then
-    // the readings of the shown second against the record's.
-    assert_shows_the_record_of_a_refused_second("overview");
+macro_rules! record_of_a_refused_second_cases {
+    ($($name:ident, $route:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: the page shows what the store's record of a second holds where the store
+            // refused that second's complete reading, even where the worker read the same
+            // second, whose point then holds none of the readings. Method: the worker reads
+            // 10,000 and a refused 10,001 and writes the point it writes for a refused second,
+            // the View of them rests the reader, then the readings of the shown second against
+            // the record's.
+            assert_shows_the_record_of_a_refused_second($route);
+        }
+    )*};
 }
 
-#[test]
-fn a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read() {
-    // Goal and method: those of the Overview test above, on the Memory page.
-    assert_shows_the_record_of_a_refused_second("memory");
+record_of_a_refused_second_cases! {
+    // Every row asserts the same readings of the same summary, so the rows differ only in the
+    // page that rests over the refused second. Network has no row, since its own test asserts
+    // the traffic and that its first two cards are not Unavailable.
+    a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read, "overview";
+    a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read, "memory";
+    a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read, "storage";
 }
 
 /// Rests `route` over a View whose newest second the store refused a complete reading of and
@@ -336,7 +406,7 @@ fn assert_shows_the_record_of_a_refused_second(route: &str) {
             memory.compressed_bytes
         )
     );
-    assert_shows_the_traffic_of_the_record(&shown, refused.network.unwrap());
+    assert_shows_the_traffic_of_the_record(&shown, &refused);
     assert_shows_the_storage_of_the_record(&shown, &refused);
 }
 
@@ -353,9 +423,10 @@ fn assert_shows_the_storage_of_the_record(shown: &Value, second: &MachineSecond)
     }
 }
 
-/// Asserts that `shown` holds the bytes received and sent of `traffic`, a second's record of its
-/// traffic, and no packet or error rate, which the record does not hold.
-fn assert_shows_the_traffic_of_the_record(shown: &Value, traffic: viewer::store::Traffic) {
+/// Asserts that `shown` holds the bytes received and sent as `second`'s record holds them, and
+/// no packet or error rate, which the record does not hold.
+fn assert_shows_the_traffic_of_the_record(shown: &Value, second: &MachineSecond) {
+    let traffic = second.network.unwrap();
     assert_eq!(shown["network_rx_bps"].as_f64(), Some(traffic.received_bps));
     assert_eq!(shown["network_tx_bps"].as_f64(), Some(traffic.sent_bps));
     for rate in viewer::store::NetworkRate::ALL {
@@ -439,36 +510,57 @@ fn rested_on(
     dashboard
 }
 
-#[test]
-fn a_rested_memory_page_ranks_the_apps_of_the_views_newest_second() {
-    // Goal: once Memory's reader rests, its top Apps show the newest second the store holds, as
-    // its charts do. Method: the worker's reading of memory seconds 9,999 and 10,000, which ranks
-    // no Apps, the View of them that rests the reader, then a View whose newest second, at
-    // 10,005, holds one App that held 3 GiB resident.
-    let first = memory_seconds(&[9_999, 10_000]);
-    let mut dashboard = rested_on("memory", &first, worker_reading(&first));
-    let seconds = memory_seconds(&[9_999, 10_000, 10_005]);
+macro_rules! ranks_the_apps_of_the_views_newest_second_cases {
+    ($($name:ident, $page:expr, $apps:expr, $metric:expr, $amount:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: once the page's reader rests, its top Apps show the newest second the store
+            // holds, as its charts do. Method: the worker's reading of the page's seconds 9,999
+            // and 10,000, which ranks no Apps, the View of them that rests the reader, then a
+            // View whose newest second, at 10,005, holds the row's one App, and the second the
+            // top Apps name and the App and amount of the row's ranking the page shows.
+            assert_ranks_the_apps_of_the_views_newest_second(&$page, $apps, $metric, $amount);
+        }
+    )*};
+}
+
+ranks_the_apps_of_the_views_newest_second_cases! {
+    // Memory: one App that held 3 GiB resident leads its resident ranking.
+    a_rested_memory_page_ranks_the_apps_of_the_views_newest_second, MEMORY,
+        |second| apps_at(second, &[("Brave Browser", 3 * 1_073_741_824)]),
+        crate::live_rankings::Metric::Resident, 3 * 1_073_741_824;
+    // Storage: one App that read and wrote 6 MB of disk I/O leads its disk ranking.
+    a_rested_storage_page_ranks_the_apps_of_the_views_newest_second, STORAGE,
+        |second| apps_with_disk_at(second, &[("Brave Browser", 1_000_000, 6_000_000)]),
+        crate::live_rankings::Metric::Disk, 6_000_000;
+}
+
+/// Asserts that `page`, its reader resting, ranks by `metric` the Apps of a newer View whose
+/// newest second holds the one App `apps` gives it, which leads with `amount`.
+fn assert_ranks_the_apps_of_the_views_newest_second(
+    page: &Page,
+    apps: fn(&MachineSecond) -> AppsSecond,
+    metric: crate::live_rankings::Metric,
+    amount: u64,
+) {
+    let first = (page.seconds)(&[9_999, 10_000]);
+    let mut dashboard = rested_on(page.route, &first, worker_reading(&first));
+    let seconds = (page.seconds)(&[9_999, 10_000, 10_005]);
     let mut newer = view(2, &[], &seconds);
-    newer.apps.replace(
-        2,
-        Arc::new(apps_at(
-            &seconds[2],
-            &[("Brave Browser", 3 * 1_073_741_824)],
-        )),
-    );
+    newer.apps.replace(2, Arc::new(apps(&seconds[2])));
 
     assert!(dashboard.take_view(Arc::new(newer)));
 
     let (rankings, target) = dashboard.ranking_reading().unwrap();
-    let resident = rankings
+    let ranking = rankings
         .metrics
         .iter()
-        .find(|ranking| ranking.metric == crate::live_rankings::Metric::Resident)
+        .find(|ranking| ranking.metric == metric)
         .unwrap();
     assert!(dashboard.reader_rested());
     assert_eq!(target.second, 10_005);
-    assert_eq!(resident.entries[0].app.name, "Brave Browser");
-    assert_eq!(resident.entries[0].amount, 3 * 1_073_741_824);
+    assert_eq!(ranking.entries[0].app.name, "Brave Browser");
+    assert_eq!(ranking.entries[0].amount, amount);
 }
 
 #[test]
@@ -512,15 +604,40 @@ fn a_followed_memory_page_rests_its_reader_and_draws_each_newer_view() {
     assert_eq!(dashboard.generation, generation);
 }
 
-#[test]
-fn a_followed_network_page_rests_its_reader_and_draws_each_newer_view() {
-    // Goal: a Network page following the newest second rests its reader after its first reading
-    // and draws each second after it from the store's View, as Memory does. Method: the worker's
-    // first reading of Network ends at 10,000 and the page takes a View of the same seconds,
-    // then three Views each one second newer arrive with no reading, and after each the page's
-    // machine charts are that View's and its readings show the View's newest second.
-    let first = network_seconds(&[9_999, 10_000]);
-    let mut dashboard = opening_on("network");
+macro_rules! followed_page_rests_its_reader_cases {
+    ($($name:ident, $page:expr, $rate:expr, $rate_of:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a page following the newest second rests its reader after its first reading
+            // and draws each second after it from the store's View, as Memory does. Method: the
+            // worker's first reading of the page ends at 10,000 and the page takes a View of the
+            // same seconds, then three Views each one second newer arrive with no reading, and
+            // after each the page's machine charts are that View's, its readings show the View's
+            // newest second, and the row's rate reads that second's.
+            assert_followed_page_rests_its_reader(&$page, $rate, $rate_of);
+        }
+    )*};
+}
+
+followed_page_rests_its_reader_cases! {
+    // Network: the received packets read the newest second's.
+    a_followed_network_page_rests_its_reader_and_draws_each_newer_view, NETWORK,
+        "/network_rx_packets_per_second", |second| network_rates(second)[0];
+    // Storage: the read operations read the newest second's.
+    a_followed_storage_page_rests_its_reader_and_draws_each_newer_view, STORAGE,
+        "/storage/read_ops_per_second", |second| storage_rates(second)[0];
+}
+
+/// Asserts that `page`, following the newest second, rests its reader after its first reading
+/// and draws each newer View, where the shown summary's reading at the JSON pointer `rate` is
+/// what `rate_of` reads of the View's newest second.
+fn assert_followed_page_rests_its_reader(
+    page: &Page,
+    rate: &str,
+    rate_of: fn(&MachineSecond) -> Option<f64>,
+) {
+    let first = (page.seconds)(&[9_999, 10_000]);
+    let mut dashboard = opening_on(page.route);
     let mut reading = worker_reading(&first);
     reading.generation = dashboard.generation;
     assert!(dashboard.receive(Update::Ready(reading)));
@@ -531,11 +648,11 @@ fn a_followed_network_page_rests_its_reader_and_draws_each_newer_view() {
 
     assert!(dashboard.reader_rested());
     for (version, newest) in [(2, 10_001), (3, 10_002), (4, 10_003)] {
-        let seconds = network_seconds(&(9_999..=newest).collect::<Vec<_>>());
+        let seconds = (page.seconds)(&(9_999..=newest).collect::<Vec<_>>());
         let view = Arc::new(view(version, &[], &seconds));
         assert!(dashboard.take_view(Arc::clone(&view)));
         let panels =
-            crate::live_projection::held_projection::view_panels("network", &view, None).unwrap();
+            crate::live_projection::held_projection::view_panels(page.route, &view, None).unwrap();
         assert!(!panels.is_empty());
         for panel in &panels {
             assert_eq!(
@@ -547,8 +664,11 @@ fn a_followed_network_page_rests_its_reader_and_draws_each_newer_view() {
         }
         assert_eq!(dashboard.shown_second(), Some(newest));
         assert_eq!(
-            dashboard.shown_summary()["network_rx_packets_per_second"].as_f64(),
-            network_rates(&seconds[seconds.len() - 1])[0]
+            dashboard
+                .shown_summary()
+                .pointer(rate)
+                .and_then(Value::as_f64),
+            rate_of(&seconds[seconds.len() - 1])
         );
     }
     assert_eq!(dashboard.generation, generation);
@@ -594,27 +714,6 @@ fn a_followed_network_page_builds_and_keeps_nothing_of_the_views_apps() {
 }
 
 #[test]
-fn a_rested_network_page_shows_the_traffic_of_a_newest_second_without_a_complete_reading() {
-    // Goal: a Network page whose reader rests shows the traffic the View records for its newest
-    // second where the store holds no complete reading of that second, since the resting reader
-    // never reads that second, and shows the packets that record does not hold as missing.
-    // Method: the worker reads network seconds 9,999 and 10,000, the View of them rests the
-    // reader, then a View adds 10,001 with the traffic of its record alone, and the traffic and
-    // packets the page's readings show.
-    let first = network_seconds(&[9_999, 10_000]);
-    let mut dashboard = rested_on("network", &first, worker_reading(&first));
-    let newest = reading_at(10_001, 0);
-    let traffic = newest.network.unwrap();
-    let seconds = [first[0].clone(), first[1].clone(), newest];
-
-    assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
-
-    let shown = dashboard.shown_summary();
-    assert_eq!(dashboard.shown_second(), Some(10_001));
-    assert_shows_the_traffic_of_the_record(&shown, traffic);
-}
-
-#[test]
 fn a_rested_network_page_shows_the_traffic_of_a_refused_second_the_worker_read() {
     // Goal: the Network page shows the traffic the store's record of a second holds where the
     // store refused that second's complete reading, even where the worker read the same second,
@@ -625,79 +724,11 @@ fn a_rested_network_page_shows_the_traffic_of_a_refused_second_the_worker_read()
 
     let shown = dashboard.shown_summary();
 
-    let traffic = refused.network.unwrap();
     let cards = texts(&summary::cards_of_summary("network", &shown));
     assert_eq!(dashboard.shown_second(), Some(10_001));
-    assert_shows_the_traffic_of_the_record(&shown, traffic);
+    assert_shows_the_traffic_of_the_record(&shown, &refused);
     assert_ne!(cards[0].1, "Unavailable", "{cards:?}");
     assert_ne!(cards[1].1, "Unavailable", "{cards:?}");
-}
-
-#[test]
-fn a_followed_storage_page_rests_its_reader_and_draws_each_newer_view() {
-    // Goal: a Storage page following the newest second rests its reader after its first reading
-    // and draws each second after it from the store's View, as Network does. Method: the worker's
-    // first reading of Storage ends at 10,000 and the page takes a View of the same seconds,
-    // then three Views each one second newer arrive with no reading, and after each the page's
-    // machine charts are that View's and its readings show the View's newest second.
-    let first = storage_seconds(&[9_999, 10_000]);
-    let mut dashboard = opening_on("storage");
-    let mut reading = worker_reading(&first);
-    reading.generation = dashboard.generation;
-    assert!(dashboard.receive(Update::Ready(reading)));
-    let generation = dashboard.generation;
-
-    dashboard.take_view(Arc::new(view(1, &[], &first)));
-    dashboard.tick_rest();
-
-    assert!(dashboard.reader_rested());
-    for (version, newest) in [(2, 10_001), (3, 10_002), (4, 10_003)] {
-        let seconds = storage_seconds(&(9_999..=newest).collect::<Vec<_>>());
-        let view = Arc::new(view(version, &[], &seconds));
-        assert!(dashboard.take_view(Arc::clone(&view)));
-        let panels =
-            crate::live_projection::held_projection::view_panels("storage", &view, None).unwrap();
-        assert!(!panels.is_empty());
-        for panel in &panels {
-            assert_eq!(
-                drawn(&dashboard, &panel.id).lines,
-                panel.lines,
-                "{}",
-                panel.id
-            );
-        }
-        assert_eq!(dashboard.shown_second(), Some(newest));
-        assert_eq!(
-            dashboard.shown_summary()["storage"]["read_ops_per_second"].as_f64(),
-            storage_rates(&seconds[seconds.len() - 1])[0]
-        );
-    }
-    assert_eq!(dashboard.generation, generation);
-}
-
-#[test]
-fn a_rested_storage_page_shows_the_storage_of_a_newest_second_without_a_complete_reading() {
-    // Goal: a Storage page whose reader rests shows the bytes the View records for its newest
-    // second where the store holds no complete reading of that second, since the resting reader
-    // never reads that second, and shows the rates that record does not hold as missing. Method:
-    // the worker reads storage seconds 9,999 and 10,000, the View of them rests the reader, then
-    // a View adds 10,001 with the storage of its record alone, and what the readings show.
-    let first = storage_seconds(&[9_999, 10_000]);
-    let mut dashboard = rested_on("storage", &first, worker_reading(&first));
-    let newest = reading_at(10_001, 0);
-    let seconds = [first[0].clone(), first[1].clone(), newest.clone()];
-
-    assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
-
-    let shown = dashboard.shown_summary();
-    assert_eq!(dashboard.shown_second(), Some(10_001));
-    assert_shows_the_storage_of_the_record(&shown, &newest);
-}
-
-#[test]
-fn a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read() {
-    // Goal and method: those of the Overview test of a refused second, on the Storage page.
-    assert_shows_the_record_of_a_refused_second("storage");
 }
 
 #[test]
@@ -722,39 +753,6 @@ fn a_rested_storage_page_reads_its_cards_of_a_refused_second_as_its_record_holds
     assert_ne!(readings[0], readings[1], "{cards:?}");
     assert_eq!(readings[2], "Unavailable", "{cards:?}");
     assert_eq!(readings[3], "Unavailable", "{cards:?}");
-}
-
-#[test]
-fn a_rested_storage_page_ranks_the_apps_of_the_views_newest_second() {
-    // Goal: once Storage's reader rests, its top Apps show the newest second the store holds, as
-    // Memory's do. Method: the worker's reading of storage seconds 9,999 and 10,000, which ranks
-    // no Apps, the View of them that rests the reader, then a View whose newest second, at
-    // 10,005, holds one App that read and wrote 6 MB of disk I/O, and the second the top Apps
-    // name and the App and amount of the disk ranking the page shows.
-    let first = storage_seconds(&[9_999, 10_000]);
-    let mut dashboard = rested_on("storage", &first, worker_reading(&first));
-    let seconds = storage_seconds(&[9_999, 10_000, 10_005]);
-    let mut newer = view(2, &[], &seconds);
-    newer.apps.replace(
-        2,
-        Arc::new(apps_with_disk_at(
-            &seconds[2],
-            &[("Brave Browser", 1_000_000, 6_000_000)],
-        )),
-    );
-
-    assert!(dashboard.take_view(Arc::new(newer)));
-
-    let (rankings, target) = dashboard.ranking_reading().unwrap();
-    let disk = rankings
-        .metrics
-        .iter()
-        .find(|ranking| ranking.metric == crate::live_rankings::Metric::Disk)
-        .unwrap();
-    assert!(dashboard.reader_rested());
-    assert_eq!(target.second, 10_005);
-    assert_eq!(disk.entries[0].app.name, "Brave Browser");
-    assert_eq!(disk.entries[0].amount, 6_000_000);
 }
 
 #[test]
