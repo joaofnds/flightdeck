@@ -571,15 +571,30 @@ fn a_hover_on_a_resting_overview_reads_its_second_once_the_page_arrives(cx: &mut
     assert_eq!(Some(window.reader_generation()), window.hover_read());
 }
 
-#[gpui::test]
-fn a_memory_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a followed Memory page shown again draws the store's newest View and asks its reader
-    // for no page, as Overview does, since the View holds each second the page shows.
-    // Method: hide a Memory page drawn from a View, give it a newer View as it shows again, step
-    // its dashboard, then the second the page shows and the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "memory");
+macro_rules! page_shown_again_over_a_view_cases {
+    ($($name:ident, $route:expr;)*) => {$(
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Goal: a followed page shown again draws the store's newest View and asks its reader
+            // for no page, as Overview does, since the View holds each second the page shows.
+            // Method: hide the page drawn from a View, give it a newer View as it shows again,
+            // step its dashboard, then the second the page shows and the reader's mailbox.
+            assert_page_shown_again_resumes_from_the_view(cx, $route);
+        }
+    )*};
+}
+
+page_shown_again_over_a_view_cases! {
+    // Every row asserts the same of its page, so the rows differ only in the route.
+    a_memory_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "memory";
+    a_network_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "network";
+    a_storage_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting, "storage";
+}
+
+/// Asserts that the page `route`, drawn from a View with its reader resting, hidden and shown
+/// again over a newer View, shows that View's newest second without asking its reader for a page.
+fn assert_page_shown_again_resumes_from_the_view(cx: &TestAppContext, route: &str) {
+    let mut window = VisibilityHarness::open_resting_on(cx, route);
     assert!(window.reader_rested());
     window.change(WindowVisibility::Hidden);
     assert_eq!(window.reader.receive(), (Received::Continued, false));
@@ -595,135 +610,52 @@ fn a_memory_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting
     assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
 
-#[gpui::test]
-fn a_hover_wakes_a_resting_memory_page_s_reader_and_letting_go_rests_it_again(
-    cx: &mut TestAppContext,
+macro_rules! hover_wakes_a_resting_page_cases {
+    ($($name:ident, $route:expr, $hover_reads_its_second:expr;)*) => {$(
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Goal: a hover of a second the View does not hold wakes the reader of a page that
+            // rested it, as on Overview, and letting go of the hover rests the reader again once
+            // the page it asks for then arrives. Method: rest the reader of the page drawn from a
+            // View, hover a second the View does not hold, step the dashboard, answer the page's
+            // request, step it again and step the reader's mailbox, and whether the hover read a
+            // second of its own as the row says, then end the hover, step the dashboard, answer
+            // the page it asked for, step it again and step the reader's mailbox.
+            assert_hover_wakes_a_resting_page(cx, $route, $hover_reads_its_second);
+        }
+    )*};
+}
+
+hover_wakes_a_resting_page_cases! {
+    // Memory: the page ranks Apps, so the hover reads its second.
+    a_hover_wakes_a_resting_memory_page_s_reader_and_letting_go_rests_it_again, "memory", true;
+    // Network: the hover reads no second of its own, since the page it asked for holds all
+    // Network shows of that second.
+    a_hover_wakes_a_resting_network_page_s_reader_and_letting_go_rests_it_again, "network",
+        false;
+    // Storage: the page ranks Apps, so the hover reads its second.
+    a_hover_wakes_a_resting_storage_page_s_reader_and_letting_go_rests_it_again, "storage", true;
+}
+
+/// Asserts that a hover of a second the View lacks wakes the resting reader of the page `route`,
+/// reading a second of its own where `hover_reads_its_second`, and that letting go rests the
+/// reader again once the page it asks for arrives.
+fn assert_hover_wakes_a_resting_page(
+    cx: &TestAppContext,
+    route: &str,
+    hover_reads_its_second: bool,
 ) {
-    // Goal: a hover of a second the View does not hold wakes the reader of a Memory page that
-    // rested it, as on Overview, and letting go of the hover rests the reader again once the
-    // page it asks for then arrives. Method: rest the reader of a Memory page drawn from a View,
-    // hover a second the View does not hold, step the dashboard, answer the page's request,
-    // step it again and step the reader's mailbox, then end the hover, step the dashboard,
-    // answer the page it asked for, step it again and step the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "memory");
+    let mut window = VisibilityHarness::open_resting_on(cx, route);
     window.hover_with_pointer();
     window.tick();
     window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
     window.tick();
     assert!(!window.reader_rested());
     assert_eq!(window.reader.receive(), (Received::Taken, true));
-    assert_eq!(Some(window.reader_generation()), window.hover_read());
-
-    window.leave();
-    window.tick();
-    assert!(!window.hovering());
-    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
-
-    window.tick();
-
-    assert!(window.reader_rested());
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-}
-
-#[gpui::test]
-fn a_network_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a followed Network page shown again draws the store's newest View and asks its
-    // reader for no page, as Memory does, since the View holds each second the page shows.
-    // Method: hide a Network page drawn from a View, give it a newer View as it shows again,
-    // step its dashboard, then the second the page shows and the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "network");
-    assert!(window.reader_rested());
-    window.change(WindowVisibility::Hidden);
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-    let generation = window.generation();
-    window.report(WindowVisibility::Visible);
-    window.take_view(&[reading_at(10_001, 0), reading_at(10_002, 0)]);
-
-    window.tick();
-
-    assert_eq!(window.shown_second(), Some(10_002));
-    assert!(window.reader_rested());
-    assert_eq!(window.generation(), generation);
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-}
-
-#[gpui::test]
-fn a_hover_wakes_a_resting_network_page_s_reader_and_letting_go_rests_it_again(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a hover of a second the View does not hold wakes the reader of a Network page that
-    // rested it, as on Memory, and letting go of the hover rests the reader again once the page
-    // it asks for then arrives. Unlike Memory's, the hover reads no second of its own, since the
-    // page it asked for holds all Network shows of that second, as it does today. Method: rest
-    // the reader of a Network page drawn from a View, hover a second the View does not hold,
-    // step the dashboard, answer the page's request, step it again and step the reader's
-    // mailbox, then end the hover, step the dashboard, answer the page it asked for, step it
-    // again and step the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "network");
-    window.hover_with_pointer();
-    window.tick();
-    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
-    window.tick();
-    assert!(!window.reader_rested());
-    assert_eq!(window.reader.receive(), (Received::Taken, true));
-    assert_eq!(window.hover_read(), None);
-
-    window.leave();
-    window.tick();
-    assert!(!window.hovering());
-    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
-
-    window.tick();
-
-    assert!(window.reader_rested());
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-}
-
-#[gpui::test]
-fn a_storage_page_shown_again_over_a_view_resumes_from_it_with_its_reader_resting(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a followed Storage page shown again draws the store's newest View and asks its
-    // reader for no page, as Network does, since the View holds each second the page shows.
-    // Method: hide a Storage page drawn from a View, give it a newer View as it shows again,
-    // step its dashboard, then the second the page shows and the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "storage");
-    assert!(window.reader_rested());
-    window.change(WindowVisibility::Hidden);
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-    let generation = window.generation();
-    window.report(WindowVisibility::Visible);
-    window.take_view(&[reading_at(10_001, 0), reading_at(10_002, 0)]);
-
-    window.tick();
-
-    assert_eq!(window.shown_second(), Some(10_002));
-    assert!(window.reader_rested());
-    assert_eq!(window.generation(), generation);
-    assert_eq!(window.reader.receive(), (Received::Continued, false));
-}
-
-#[gpui::test]
-fn a_hover_wakes_a_resting_storage_page_s_reader_and_letting_go_rests_it_again(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a hover of a second the View does not hold wakes the reader of a Storage page that
-    // rested it, as on Memory, and letting go of the hover rests the reader again once the page
-    // it asks for then arrives. The page ranks Apps, so the hover reads its second, as Memory's
-    // does. Method: rest the reader of a Storage page drawn from a View, hover a second the View
-    // does not hold, step the dashboard, answer the page's request, step it again and step the
-    // reader's mailbox, then end the hover, step the dashboard, answer the page it asked for,
-    // step it again and step the reader's mailbox.
-    let mut window = VisibilityHarness::open_resting_on(cx, "storage");
-    window.hover_with_pointer();
-    window.tick();
-    window.answer_readings(&[reading_at(10_000, 0), reading_at(10_001, 0)]);
-    window.tick();
-    assert!(!window.reader_rested());
-    assert_eq!(window.reader.receive(), (Received::Taken, true));
-    assert_eq!(Some(window.reader_generation()), window.hover_read());
+    assert_eq!(
+        window.hover_read(),
+        hover_reads_its_second.then_some(window.reader_generation())
+    );
 
     window.leave();
     window.tick();
