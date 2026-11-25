@@ -374,7 +374,10 @@ impl LiveDashboard {
             return self.draw_store_view_apps();
         }
         let Some(version) = self.drawn_store_view().map(|view| view.version) else {
-            return self.draw_store_view_remnant();
+            if self.draw_store_view_remnant() {
+                return true;
+            }
+            return self.draw_store_view_apps_left();
         };
         let Some(window) = self.view_window() else {
             unreachable!("the range lies against the newest second of the drawn View");

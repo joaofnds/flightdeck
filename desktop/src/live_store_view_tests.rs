@@ -1720,6 +1720,38 @@ mod when_the_page_has_a_chart_by_app {
             assert_eq!(by_app(&dashboard.panels), expected);
         }
 
+        macro_rules! reading_left_to_a_hidden_window_cases {
+            ($($name:ident, $route:expr, $id:expr;)*) => {$(
+                #[test]
+                fn $name() {
+                    // Goal: a reading the worker built while the View drew the page's chart by
+                    // App, which the page takes after the window hid and let go of the View,
+                    // shows the chart drawn from the View rather than none. Method: the page
+                    // drawn from a View hides, then takes a reading that left the chart to it.
+                    let mut dashboard = drawn_from_view($route);
+                    dashboard.tick_hidden();
+
+                    dashboard.accept(left_to_the_view(&trends()));
+
+                    let expected = expected_on_page(&charted_view(), $id);
+                    assert_eq!(by_app(&dashboard.panels), expected);
+                }
+            )*};
+        }
+
+        reading_left_to_a_hidden_window_cases! {
+            the_cpu_page_draws_the_chart_a_reading_left_to_a_hidden_window, "cpu",
+                Metric::Cpu.panel_id();
+            the_energy_page_draws_the_chart_a_reading_left_to_a_hidden_window, "energy",
+                Metric::Power.panel_id();
+            the_memory_page_draws_the_chart_a_reading_left_to_a_hidden_window, "memory",
+                crate::live_resident_history::PANEL_ID;
+            the_gpu_page_draws_the_chart_a_reading_left_to_a_hidden_window, "gpu",
+                Metric::Gpu.panel_id();
+            the_storage_page_draws_the_chart_a_reading_left_to_a_hidden_window, "storage",
+                Metric::Disk.panel_id();
+        }
+
         #[test]
         fn choosing_a_second_tells_the_worker_before_it_reads_the_second() {
             // Goal: a chosen second is read once, so the worker learns the reading draws the
