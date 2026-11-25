@@ -154,7 +154,11 @@ impl Preview {
                 }
             }
         }
-        let matched = target.matches(&snapshot.selection["selected"]);
+        // The accepted reading shows a target it selects, unless its bars name a newer second,
+        // where the preview shows its own reading, which then holds the target only with them.
+        let matched = reading_stands_for(snapshot, &target)
+            || (target.matches(&snapshot.selection["selected"])
+                && resident_detail_complete(&request.route, &reading));
         let complete =
             resident_complete(&request.route, matched, snapshot.points_keeping, &reading);
 
@@ -191,7 +195,7 @@ impl LiveDashboard {
     pub(crate) fn reading_snapshot(&self) -> Option<&Snapshot> {
         if let Some(preview) = self.shown_preview() {
             let accepted = self.snapshot.as_deref()?;
-            if preview.target.matches(&accepted.selection["selected"]) {
+            if reading_stands_for(accepted, &preview.target) {
                 return Some(accepted);
             }
 
@@ -231,6 +235,18 @@ impl LiveDashboard {
 
         &self.executables
     }
+}
+
+/// Whether `reading` holds every reading of `target`, the second it selects. A followed CPU
+/// page draws its logical CPUs from the store's View, which can hold a second newer than the one
+/// the reader read, so the reading stands for the target only where its bars are the target's
+/// too.
+fn reading_stands_for(reading: &Snapshot, target: &Target) -> bool {
+    target.matches(&reading.selection["selected"])
+        && reading
+            .cpu_detail
+            .as_deref()
+            .is_none_or(|activity| target.matches(&activity.observation))
 }
 
 fn resident_cpu_detail(
@@ -301,6 +317,12 @@ fn resident_complete(
             return false;
         }
     }
+    resident_detail_complete(route, reading)
+}
+
+/// Whether `reading` holds the detail the page `route` shows of its second beside its readings
+/// and top Apps, which only the reader reads: the CPU page's cores and the Apps page's App.
+fn resident_detail_complete(route: &str, reading: &Snapshot) -> bool {
     match route {
         "cpu" => reading.cpu_detail.is_some(),
         "apps" => reading.detail.is_some(),

@@ -52,6 +52,40 @@ pub(crate) struct CPUHistoryRow {
     busy_percent: Vec<Option<f64>>,
 }
 
+/// What a CPU history the reader read is held to: the selection it read it with, which names the
+/// second the history is read for and the seconds around it.
+struct CPUHistoryContext<'a> {
+    /// The identity of the second the history is read for.
+    selected: &'a Value,
+    /// The seconds the context reaches over, which the history must reach over too.
+    context_seconds: Option<u64>,
+    /// The wall second of the selected reading.
+    second: Option<u64>,
+    /// The context's last wall second.
+    last_second: Option<u64>,
+    /// The identity of each second the context holds, oldest first, from a lead-in before the
+    /// history's first second on, or none where the selection holds no points.
+    points: Option<Vec<&'a Value>>,
+}
+
+impl<'a> CPUHistoryContext<'a> {
+    fn of_selection(selection: &'a viewer::Selection) -> Self {
+        Self {
+            selected: &selection["selected"],
+            context_seconds: selection["context_seconds"].as_u64(),
+            second: selection["second"].as_u64(),
+            last_second: crate::live_projection::context_last_second(selection),
+            points: selection.trends().map(|trends| {
+                trends
+                    .as_slice()
+                    .iter()
+                    .map(viewer::TrendPoint::point)
+                    .collect()
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CPUInspection {
     Gap,
@@ -86,8 +120,11 @@ impl CPUHistory {
         validation::preflight(&value)?;
         let wire: Box<CPUHistoryWire> =
             serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let history = Self::from_wire(wire)?;
+        let context = CPUHistoryContext::of_selection(selection);
+        history.wire.validate_context(&context)?;
 
-        Self::from_wire(wire, selection)
+        Ok(history)
     }
 
     /// The page's history of the Store's, which takes its identities and rows as they are. It
@@ -99,22 +136,35 @@ impl CPUHistory {
         history: viewer::store::CpuHistory,
         selection: &viewer::Selection,
     ) -> Result<Self, String> {
+        let history = Self::from_view(history)?;
+        let context = CPUHistoryContext::of_selection(selection);
+        history.wire.validate_context(&context)?;
+
+        Ok(history)
+    }
+
+    /// The page's history of the one the store's View built, held to itself alone, since the
+    /// View derived the history and its seconds by one rule. `from_store` holds the same
+    /// history to the selection a reader read it with too.
+    pub(crate) fn from_view(history: viewer::store::CpuHistory) -> Result<Self, String> {
         validation::from_store_preflight(&history)?;
         let wire = Box::new(CPUHistoryWire::from_store(history)?);
 
-        Self::from_wire(wire, selection)
+        Self::from_wire(wire)
     }
 
-    /// The steps `decode` and `from_store` end in, kept in one place so a step added later
-    /// reaches both.
-    fn from_wire(
-        mut wire: Box<CPUHistoryWire>,
-        selection: &viewer::Selection,
-    ) -> Result<Self, String> {
-        wire.validate(selection)?;
+    /// The steps `decode` and `from_view` end in, which hold a history to itself, kept in one
+    /// place so a step added later reaches each.
+    fn from_wire(mut wire: Box<CPUHistoryWire>) -> Result<Self, String> {
+        wire.validate()?;
         wire.project_intervals();
 
         Ok(Self { wire })
+    }
+
+    /// The identity of the observation the history is read for, as the reader writes it.
+    pub(crate) fn selected_identity(&self) -> Value {
+        activity_observation(&self.wire.observation)
     }
 
     pub(crate) fn offset(&self) -> u32 {
@@ -438,6 +488,11 @@ fn intervals_remove_occluded(intervals: &mut Vec<CPUInterval>, first_ns: u64) {
             break;
         }
     }
+}
+
+/// `identity` as the reader writes the identity of a CPU reading.
+pub(crate) fn identity_value(identity: viewer::store::CpuHistoryIdentity) -> Value {
+    activity_observation(&CPUObservation::from_store(identity))
 }
 
 fn activity_observation(observation: &CPUObservation) -> Value {

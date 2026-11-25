@@ -1,11 +1,12 @@
 //! The page drawn from the store's newest View, which the window takes each tick. While they
-//! follow the newest second, Overview, Memory, Network, Storage and GPU draw their machine charts
-//! and readouts from it. Overview also draws its CPU, memory, energy and disk charts by App, its
-//! top Apps and its hardware figure from it, Memory its chart of resident memory by App and its
-//! top Apps, Storage its chart of disk bytes by App and its top Apps, and GPU its chart of GPU
-//! time by App and its top Apps. The CPU and Energy pages draw only their chart by App from it
-//! while they follow the newest second, and a chosen second, a hover's reading and every other
-//! chart draw from the worker's readings.
+//! follow the newest second, Overview, Memory, Network, Storage, GPU and CPU draw their machine
+//! charts and readouts from it. Overview also draws its CPU, memory, energy and disk charts by
+//! App, its top Apps and its hardware figure from it, Memory its chart of resident memory by App
+//! and its top Apps, Storage its chart of disk bytes by App and its top Apps, GPU its chart of GPU
+//! time by App and its top Apps, and CPU its chart of CPU time by App, its top Apps and the bars
+//! and heatmap of its logical CPUs. The Energy page draws only its chart by App from it while it
+//! follows the newest second, and a chosen second, a hover's reading and every other chart draw
+//! from the worker's readings.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -35,6 +36,12 @@ use crate::live_views::utilization::{Shares, UtilizationReadings, utilizations};
 mod tests;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
+/// What the page reports it could not draw where a View's logical CPUs could not be built.
+const STORE_VIEW_LOGICAL_CPUS: &str = "the logical CPUs from the store's View";
+
+/// What the page reports it could not draw where it could not draw a View at all.
+const STORE_VIEW_WHOLE: &str = "the store's View";
 /// The charts by App of a rate the pages draw from the store's View.
 const APP_METRICS: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
 
@@ -310,8 +317,33 @@ pub(super) struct StorePanels {
     /// What the page kept of the View they were drawn from when it let go of it, or none while
     /// it holds a View.
     remnant: Option<Remnant>,
+    /// What the CPU page built of the logical CPUs of a View, or none before the CPU page
+    /// followed one.
+    logical_cpus: Option<StoreLogicalCPUs>,
     /// How many times the page built charts from a View, which a timed run reports.
     builds: u64,
+}
+
+/// What the CPU page built of the logical CPUs of one View: the bars of its newest second and the
+/// heatmap of its first page of logical CPUs, or why the View held too little to build them.
+struct StoreLogicalCPUs {
+    version: u64,
+    drawn: Result<DrawnLogicalCPUs, String>,
+    /// A newer View whose logical CPUs could not be built while the page showed the bars of this
+    /// one, which the page holds aside until its reader's reply brings bars of its own, or none.
+    waiting: Option<WaitingView>,
+}
+
+/// A View the CPU page holds aside, and why its logical CPUs could not be built.
+struct WaitingView {
+    view: Arc<View>,
+    error: String,
+}
+
+/// The bars and heatmap of the CPU page's logical CPUs, as the page's reading holds them.
+struct DrawnLogicalCPUs {
+    bars: Arc<crate::live_cpu::CPUActivity>,
+    heatmap: Arc<Presentation<crate::live_cpu_history::CPUHistory>>,
 }
 
 /// The newest second of a View the page let go of, which the page shows, with the charts it
@@ -340,9 +372,32 @@ impl StorePanels {
 
 impl LiveDashboard {
     /// Takes `view`, the store's newest, and draws from it the charts the page draws from the
-    /// store, the machine charts of Overview, Memory, Network, Storage and GPU among them.
+    /// store, the machine charts of Overview, Memory, Network, Storage, GPU and CPU among them.
     /// Answers whether the page changed.
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
+        // While the CPU page shows the bars of a View, it builds the logical CPUs of a newer one
+        // before it puts any of that View in place, so a View that cannot build them waits aside
+        // and the page goes on showing one second whole until its reader's reply.
+        if self.store_view_logical_cpus_shown() {
+            match draw_store_view_logical_cpus_of(&view) {
+                Ok(drawn) => {
+                    self.store_panels.logical_cpus = Some(StoreLogicalCPUs {
+                        version: view.version,
+                        drawn: Ok(drawn),
+                        waiting: None,
+                    });
+                }
+                Err(error) => {
+                    let reported = self.store_view_logical_cpus_reported(&error);
+                    self.store_view_refused(STORE_VIEW_LOGICAL_CPUS, &error, reported);
+                    let Some(logical_cpus) = &mut self.store_panels.logical_cpus else {
+                        unreachable!("the bars the page shows are those it built of a View");
+                    };
+                    logical_cpus.waiting = Some(WaitingView { view, error });
+                    return false;
+                }
+            }
+        }
         self.store_view_place(view);
         // The hover holds the charts where they were until it ends.
         if self.store_view_hover_shown() {
@@ -362,6 +417,20 @@ impl LiveDashboard {
     /// the page's next draw draws from it.
     pub(super) fn store_view_place(&mut self, view: Arc<View>) {
         take_view_report(self.store_view.as_deref(), &view);
+        // The View held aside, or one newer, takes the place, and the page keeps why the logical
+        // CPUs of the one held aside could not be built.
+        let waiting = self
+            .store_panels
+            .logical_cpus
+            .as_mut()
+            .and_then(|logical_cpus| logical_cpus.waiting.take());
+        if let Some(waiting) = waiting {
+            self.store_panels.logical_cpus = Some(StoreLogicalCPUs {
+                version: waiting.view.version,
+                drawn: Err(waiting.error),
+                waiting: None,
+            });
+        }
         self.store_view = Some(view);
         self.store_panels.remnant = None;
     }
@@ -370,6 +439,19 @@ impl LiveDashboard {
     /// `store_view_draws_machine` names, where the page draws them from it, drawing them once for
     /// each View. Answers whether it put them in place.
     pub(super) fn draw_store_view(&mut self) -> bool {
+        // The View the CPU page held aside goes in place once the bars the page shows are its
+        // reader's own, but not under a held second, which keeps the View it was held over.
+        if self.hold.is_none() && !self.store_view_logical_cpus_shown() {
+            let waiting = self
+                .store_panels
+                .logical_cpus
+                .as_ref()
+                .and_then(|logical_cpus| logical_cpus.waiting.as_ref())
+                .map(|waiting| Arc::clone(&waiting.view));
+            if let Some(view) = waiting {
+                self.store_view_place(view);
+            }
+        }
         if !store_view_draws_machine(&self.request.route) {
             return self.draw_store_view_apps();
         }
@@ -406,7 +488,118 @@ impl LiveDashboard {
         draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
         let route = self.request.route.clone();
         draw_store_view_splice_apps(&route, &mut self.panels, &self.store_panels.apps);
+        if route == "cpu" {
+            let Some(view) = self.store_view.clone() else {
+                unreachable!("the drawn View is the View the page holds");
+            };
+            self.draw_store_view_logical_cpus(&view);
+        }
         true
+    }
+
+    /// Puts the bars of the View's newest second and their heatmap in place of the reading's
+    /// while the CPU page follows the newest second, building them once for each View. Where the
+    /// View holds too little to build them the page shows the reading's, and a rested reader
+    /// reads the page again to bring them.
+    fn draw_store_view_logical_cpus(&mut self, view: &View) {
+        // A held second shows the logical CPUs the page read of it.
+        if self.hold.is_some() {
+            return;
+        }
+        // The window asks for the heatmap of the first logical CPUs alone: a page switch, a
+        // selection and an inspection ask for them, and an accepted reading sets the page its
+        // reader read, the one asked for, so the View builds that page.
+        assert_eq!(self.request.cpu_offset, 0);
+
+        let built = self
+            .store_panels
+            .logical_cpus
+            .as_ref()
+            .is_some_and(|logical_cpus| logical_cpus.version == view.version);
+        if !built {
+            let drawn = draw_store_view_logical_cpus_of(view);
+            if let Err(error) = &drawn {
+                let reported = self.store_view_logical_cpus_reported(error);
+                self.store_view_refused(STORE_VIEW_LOGICAL_CPUS, error, reported);
+            }
+            self.store_panels.logical_cpus = Some(StoreLogicalCPUs {
+                version: view.version,
+                drawn,
+                waiting: None,
+            });
+        }
+
+        let Some(StoreLogicalCPUs {
+            drawn: Ok(drawn), ..
+        }) = &self.store_panels.logical_cpus
+        else {
+            return;
+        };
+        let Some(snapshot) = &mut self.snapshot else {
+            unreachable!("the CPU page draws from the View once the worker read it");
+        };
+        snapshot.cpu_detail = Some(Presentation::Shared(Arc::clone(&drawn.bars)));
+        snapshot.cpu_history = Some(Arc::clone(&drawn.heatmap));
+    }
+
+    /// Whether the bars the CPU page shows are those it built of a View, which no reply of its
+    /// reader has replaced since.
+    fn store_view_logical_cpus_shown(&self) -> bool {
+        let Some(StoreLogicalCPUs {
+            drawn: Ok(drawn), ..
+        }) = &self.store_panels.logical_cpus
+        else {
+            return false;
+        };
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+
+        matches!(
+            &snapshot.cpu_detail,
+            Some(Presentation::Shared(bars)) if Arc::ptr_eq(bars, &drawn.bars)
+        )
+    }
+
+    /// Whether the page reported `error` already, as why the logical CPUs of the View it built
+    /// them of last, or of the View it holds aside, could not be built.
+    fn store_view_logical_cpus_reported(&self, error: &str) -> bool {
+        let Some(logical_cpus) = &self.store_panels.logical_cpus else {
+            return false;
+        };
+        if logical_cpus
+            .drawn
+            .as_ref()
+            .err()
+            .is_some_and(|drawn| drawn == error)
+        {
+            return true;
+        }
+
+        logical_cpus
+            .waiting
+            .as_ref()
+            .is_some_and(|waiting| waiting.error == error)
+    }
+
+    /// Whether the store's View draws all the page shows while it follows the newest second, as
+    /// on every page `store_view_draws_machine` names, but on the CPU page only once the page
+    /// built the logical CPUs of the View it shows.
+    pub(crate) fn store_view_draws_whole_page(&self) -> bool {
+        if self.request.route != "cpu" {
+            return true;
+        }
+
+        self.store_panels
+            .logical_cpus
+            .as_ref()
+            .is_some_and(|logical_cpus| {
+                logical_cpus.drawn.is_ok()
+                    && logical_cpus.waiting.is_none()
+                    && self
+                        .followed_store_view()
+                        .is_some_and(|view| view.version == logical_cpus.version)
+            })
     }
 
     /// Puts the page's chart by App drawn from the store's View in place of the worker's, on a
@@ -527,13 +720,21 @@ impl LiveDashboard {
         });
     }
 
-    /// Lets go of the store's View, of what the page kept of one it let go of, and of the Apps
-    /// the page kept to choose its charts by App from it, so the page draws nothing from the store
-    /// and keeps none of its Apps alive until it takes another View.
+    /// Lets go of the store's View, of what the page kept of one it let go of, of the bars and
+    /// heatmap the CPU page built of it, and of the Apps the page kept to choose its charts by App
+    /// from it, so the page draws nothing from the store and keeps none of its Apps alive until
+    /// it takes another View.
     pub(super) fn store_view_drop(&mut self) {
         self.store_view = None;
         self.store_panels.remnant = None;
+        self.store_panels.logical_cpus = None;
         self.leaders.forget();
+    }
+
+    /// Lets go of the bars and heatmap the CPU page built of a View as the page is left, since
+    /// they belong to that page alone and the page opened again builds them of the newest View.
+    pub(super) fn switch_route_store_view(&mut self) {
+        self.store_panels.logical_cpus = None;
     }
 
     /// Lets go of the store's View as the window hides, but of none a hold keeps, since the
@@ -557,6 +758,7 @@ impl LiveDashboard {
 
         let mut panels = std::mem::take(&mut self.store_panels);
         panels.remnant = None;
+        panels.logical_cpus = None;
         panels
     }
 
@@ -594,7 +796,14 @@ impl LiveDashboard {
         // Charts just built carry no count of their own, which this would drop.
         assert_eq!(panels.builds, 0);
         let builds = self.store_panels.builds + 1;
-        self.store_panels = StorePanels { builds, ..panels };
+        // The logical CPUs of a View do not change with the range, so charts drawn again for
+        // another range keep them.
+        let logical_cpus = self.store_panels.logical_cpus.take();
+        self.store_panels = StorePanels {
+            logical_cpus,
+            builds,
+            ..panels
+        };
     }
 
     /// Lets go of the View the page could not draw, and of the Apps the page kept to choose its
@@ -602,11 +811,20 @@ impl LiveDashboard {
     /// the worker's, and reports `error` once each time it changes. A reading that left its points
     /// to the View holds none to show, so its rested reader reads the page again.
     fn draw_store_view_failed(&mut self, error: String) {
-        if self.store_panels.failure.as_ref() != Some(&error) {
-            eprintln!("Flightdeck could not draw the store's View: {error}");
-        }
-        self.store_panels.failure = Some(error);
+        let reported = self.store_panels.failure.as_ref() == Some(&error);
         self.store_view_drop();
+
+        self.store_view_refused(STORE_VIEW_WHOLE, &error, reported);
+        self.store_panels.failure = Some(error);
+    }
+
+    /// Reports `error`, why the page could not draw `what` from the store's View, unless it
+    /// `reported` it already, and asks a rested reader for the page again where its reading left
+    /// its points to the View, since the reading then holds none of what the View could not draw.
+    fn store_view_refused(&mut self, what: &str, error: &str, reported: bool) {
+        if !reported {
+            eprintln!("Flightdeck could not draw {what}: {error}");
+        }
 
         if self.points_left_to_view() && !self.reply_pending {
             self.request_reading();
@@ -1226,8 +1444,14 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
     // The second's record keeps app memory with the purgeable part already taken out, and holds
     // neither anonymous, purgeable nor file-backed memory, so those and the cached memory they
     // make stay unknown. It keeps the bytes the network moved but no packets or errors, the bytes
-    // the disks read and wrote but no operations, errors or service times, and the GPU's activity
-    // and sensor but not its power or memory, so those stay unknown too.
+    // the disks read and wrote but no operations, errors or service times, the GPU's activity
+    // and sensor but not its power or memory, and the CPU's activity, sensor and performance
+    // levels but not its clocks, load averages, open files or uptime, so those stay unknown too.
+    let levels = second.performance_levels.as_ref().map(|levels| {
+        levels
+            .each_ref()
+            .map(|level| json!({"name": level.name.as_str(), "logical_cpus": level.logical_cpus}))
+    });
     json!({
         "memory_app_bytes": memory.and_then(|memory| memory.app_bytes),
         "memory_wired_bytes": memory.map(|memory| memory.wired_bytes),
@@ -1237,6 +1461,8 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
         "swap_total_bytes": memory.map(|memory| memory.swap_total_bytes),
         "cpu_celsius": second.cpu_celsius,
         "cpu_percent": second.cpu_percent,
+        "cpu_level_percent": second.cpu_level_percent,
+        "performance_levels": levels,
         "gpu_celsius": second.gpu_celsius,
         "gpu_active_percent": second.gpu_active_percent,
         "pressure": pressure,
@@ -1303,6 +1529,22 @@ fn store_view_utilization_of(second: &MachineSecond) -> UtilizationReadings {
     }
 }
 
+/// The bars of the logical CPUs of `view`'s newest second and the heatmap of its first logical
+/// CPUs, as the reader reads them.
+fn draw_store_view_logical_cpus_of(view: &View) -> Result<DrawnLogicalCPUs, String> {
+    let logical_cpus = view.logical_cpus().map_err(|error| error.to_string())?;
+    let heatmap = crate::live_cpu_history::CPUHistory::from_view(logical_cpus.history)?;
+    let bars = crate::live_cpu::CPUActivity::from_store(
+        logical_cpus.detail,
+        &heatmap.selected_identity(),
+    )?;
+
+    Ok(DrawnLogicalCPUs {
+        bars: Arc::new(bars),
+        heatmap: Arc::new(Presentation::Shared(Arc::new(heatmap))),
+    })
+}
+
 /// The CPU's performance levels as the newest second of `view` names them.
 fn draw_store_view_panels_levels(view: &View) -> Option<[PerformanceLevel; 2]> {
     performance_levels_of(view.seconds.last()?)
@@ -1341,9 +1583,10 @@ fn draw_store_view_splice_apps(route: &str, panels: &mut Vec<Rc<Panel>>, apps: &
 
 /// Whether the page `route` draws its machine charts and readouts from the store's View, and its
 /// top Apps where it shows any, while it follows the live Mac's newest second, so its reader
-/// rests. Overview, Memory, Network, Storage and GPU do. Every gate that lets a page draw from
+/// rests. Overview, Memory, Network, Storage, GPU and CPU do. Every gate that lets a page draw from
 /// the View, rest its reader on it and resume from it asks this, so a page joins them by being
-/// named here.
+/// named here. Resting the reader and resuming also ask `store_view_draws_whole_page`, since
+/// the CPU page reads its logical CPUs where the View could not build them.
 pub(crate) fn store_view_draws_machine(route: &str) -> bool {
     store_panels_machine(route).is_some()
 }
@@ -1358,6 +1601,7 @@ fn store_panels_machine(route: &str) -> Option<&'static str> {
         "network" => Some("network"),
         "storage" => Some("storage"),
         "gpu" => Some("gpu"),
+        "cpu" => Some("cpu"),
         _ => None,
     }
 }

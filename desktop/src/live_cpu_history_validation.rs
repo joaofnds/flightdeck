@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    CONTEXT_SECONDS, CPUHistoryWire, CPUObservation, CPUS_MAX, CPUSample, NS, OBSERVATIONS_MAX,
-    PAGE_CPUS,
+    CONTEXT_SECONDS, CPUHistoryContext, CPUHistoryWire, CPUObservation, CPUS_MAX, CPUSample, NS,
+    OBSERVATIONS_MAX, PAGE_CPUS,
 };
 use serde_json::Value;
 
@@ -62,12 +62,14 @@ fn preflight_row(value_count: usize, observation_count: usize) -> Result<(), Str
 }
 
 impl CPUHistoryWire {
-    pub(super) fn validate(&mut self, selection: &viewer::Selection) -> Result<(), String> {
+    /// Holds the history to itself: its window, its page, its observations and their order,
+    /// the selected one among them, its intervals and its rows. Both the reader's history and
+    /// the View's go through it.
+    pub(super) fn validate(&mut self) -> Result<(), String> {
         self.observation.validate()?;
-        self.observation.matches(&selection["selected"])?;
-        self.validate_context(selection)?;
+        self.validate_window()?;
         self.validate_page()?;
-        self.validate_observations(selection)?;
+        self.validate_observations()?;
         self.validate_intervals()?;
         self.validate_rows()?;
         if let Some(message) = &self.restoration_error {
@@ -83,21 +85,22 @@ impl CPUHistoryWire {
         Ok(())
     }
 
-    fn validate_context(&self, selection: &viewer::Selection) -> Result<(), String> {
-        if self.context_seconds != CONTEXT_SECONDS {
-            return Err("CPU history context must contain 900 seconds".into());
-        }
-
-        if selection["context_seconds"].as_u64() != Some(CONTEXT_SECONDS) {
+    /// Holds a history the reader read to `context`, the selection it read it with, which
+    /// arrived apart from it: the selected second, the window's ends and the seconds the
+    /// selection charts.
+    pub(super) fn validate_context(&self, context: &CPUHistoryContext<'_>) -> Result<(), String> {
+        self.observation.matches(context.selected)?;
+        if context.context_seconds != Some(CONTEXT_SECONDS) {
             return Err("CPU history does not match the selected context".into());
         }
 
         let second = self.observation.wall_ns / NS;
-        if selection["second"].as_u64() != Some(second) {
+        if context.second != Some(second) {
             return Err("CPU history does not match the selected second".into());
         }
 
-        let last = crate::live_projection::context_last_second(selection)
+        let last = context
+            .last_second
             .ok_or("CPU history selection has no context end")?;
         let end_ns = last
             .checked_add(1)
@@ -109,6 +112,49 @@ impl CPUHistoryWire {
 
         if self.end_ns != end_ns {
             return Err("CPU history has a different context end".into());
+        }
+
+        self.validate_context_points(context)
+    }
+
+    /// Holds the observations to the seconds `context` charts, one for one in order.
+    fn validate_context_points(&self, context: &CPUHistoryContext<'_>) -> Result<(), String> {
+        let trends = context
+            .points
+            .as_deref()
+            .ok_or("Missing selected CPU context")?;
+        // The charted readings reach a lead-in before the context, which the history does not
+        // hold.
+        let held = trends.partition_point(|trend| {
+            trend["wall_ns"]
+                .as_u64()
+                .is_some_and(|wall_ns| wall_ns < self.first_ns)
+        });
+        let trends = &trends[held..];
+        if trends.len() != self.observations.len() {
+            return Err("CPU history context differs from the selected context".into());
+        }
+
+        for (sample, trend) in self.observations.iter().zip(trends) {
+            sample.observation.matches(trend)?;
+        }
+
+        Ok(())
+    }
+
+    /// Holds the window to the 900 seconds of a context, which `CPUHistory::fraction` divides
+    /// by.
+    fn validate_window(&self) -> Result<(), String> {
+        if self.context_seconds != CONTEXT_SECONDS {
+            return Err("CPU history context must contain 900 seconds".into());
+        }
+
+        if self.first_ns >= self.end_ns {
+            return Err("CPU history context ends before it starts".into());
+        }
+
+        if self.end_ns - self.first_ns > CONTEXT_SECONDS * NS {
+            return Err("CPU history context exceeds 900 seconds".into());
         }
 
         Ok(())
@@ -146,34 +192,17 @@ impl CPUHistoryWire {
         Ok(())
     }
 
-    fn validate_observations(&mut self, selection: &viewer::Selection) -> Result<(), String> {
-        let trends = selection
-            .trends()
-            .ok_or("Missing selected CPU context")?
-            .as_slice();
-        // The charted readings reach a lead-in before the context, which the history does not
-        // hold.
-        let held = trends.partition_point(|trend| {
-            trend.point()["wall_ns"]
-                .as_u64()
-                .is_some_and(|wall_ns| wall_ns < self.first_ns)
-        });
-        let trends = &trends[held..];
+    fn validate_observations(&mut self) -> Result<(), String> {
         if self.observations.is_empty() {
             return Err("CPU history context is empty".into());
-        }
-
-        if trends.len() != self.observations.len() {
-            return Err("CPU history context differs from the selected context".into());
         }
 
         let mut previous = None;
         let mut positions = BTreeMap::new();
         let mut selected = None;
-        for (index, (sample, trend)) in self.observations.iter().zip(trends).enumerate() {
+        for (index, sample) in self.observations.iter().enumerate() {
             let point = &sample.observation;
             point.validate()?;
-            point.matches(trend.point())?;
             if !(self.first_ns..self.end_ns).contains(&point.wall_ns) {
                 return Err("CPU history observation lies outside the context".into());
             }

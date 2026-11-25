@@ -1302,6 +1302,18 @@ fn gpu_memory() -> Specification {
     specification
 }
 
+/// The CPU page's machine charts, drawn from the worker's readings and the store's View, whose
+/// CPU activity names each level by its cores.
+fn cpu_specifications(levels: Option<&[PerformanceLevel; 2]>) -> Vec<Specification> {
+    vec![
+        cpu(levels, cpu_level_cores),
+        frequency(levels),
+        load_average(),
+        open_files(),
+        cpu_temperature(),
+    ]
+}
+
 /// The GPU page's machine charts, drawn from the worker's readings and the store's View.
 fn gpu_specifications() -> Vec<Specification> {
     vec![
@@ -1361,13 +1373,7 @@ fn specifications(route: &str, points: &JoinedPoints<'_>) -> Result<Vec<Specific
         .and_then(crate::live_inventory::performance_levels);
     Ok(match route {
         "overview" => overview(levels.as_ref()),
-        "cpu" => vec![
-            cpu(levels.as_ref(), cpu_level_cores),
-            frequency(levels.as_ref()),
-            load_average(),
-            open_files(),
-            cpu_temperature(),
-        ],
+        "cpu" => cpu_specifications(levels.as_ref()),
         "memory" => memory_specifications(),
         "gpu" => gpu_specifications(),
         "energy" => energy(points)?,

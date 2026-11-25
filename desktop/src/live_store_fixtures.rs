@@ -81,14 +81,19 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
 }
 
 /// The View of a store that holds `earlier` before the live span `seconds`, whose Apps it is
-/// still loading.
+/// still loading, though it names each second, as the store names every second it takes in.
 pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) -> View {
     View {
         version,
         seconds: seconds.iter().cloned().map(Arc::new).collect(),
         apps: seconds
             .iter()
-            .map(|_| Arc::new(AppsSecond::default()))
+            .map(|second| {
+                Arc::new(AppsSecond {
+                    observation: Some(view_observation(second)),
+                    ..AppsSecond::default()
+                })
+            })
             .collect(),
         earlier: earlier.iter().cloned().map(Arc::new).collect(),
         stretches: Vec::new(),
@@ -98,6 +103,22 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
         left_out: None,
         ring_complete: false,
         full_detail_evicted_through_ns: None,
+    }
+}
+
+/// The identity the store names `second` by among the Apps of its View.
+fn view_observation(second: &MachineSecond) -> viewer::live_app_response::Observation {
+    viewer::live_app_response::Observation {
+        recording: [5, 6],
+        stamp: viewer::apps::Stamp {
+            boot: second.boot,
+            run: second.run,
+            publication: second.publication,
+            continuous_ns: second.continuous_ns,
+            awake_ns: second.awake_ns,
+        },
+        run_tick: second.run_tick,
+        wall_ns: Some(second.wall_ns),
     }
 }
 
@@ -282,6 +303,81 @@ pub fn with_gpu_readings(
     second
 }
 
+/// The most files `cpu_readings` lets the system open, as macOS's limit reads on a Mac.
+const OPEN_FILES_LIMIT: u64 = 245_760;
+
+/// The readings of a second's complete reading the CPU page's machine charts draw past those its
+/// record holds.
+#[derive(Clone, Copy, Debug)]
+pub struct CpuReadings {
+    /// Each performance level's clock while active, level 0, the fastest, first.
+    pub level_ghz: [Option<f64>; 2],
+    pub load_average: Option<[f64; 3]>,
+    pub open_files: Option<u64>,
+    pub open_files_percent: Option<f64>,
+}
+
+/// `second` with the CPU sensor `cpu_celsius` gives it, and a complete reading of the CPU
+/// activity and sensor it then holds and of the readings `cpu_readings` gives it, as the store
+/// holds a second it read. Each reading differs from those of every other second.
+pub fn with_cpu_reading(mut second: MachineSecond) -> MachineSecond {
+    second.cpu_celsius = Some(cpu_celsius(&second));
+    let readings = cpu_readings(&second);
+
+    with_cpu_readings(second, readings)
+}
+
+/// The CPU sensor `with_cpu_reading` gives `second`, a quarter degree apart from one second
+/// to the next over 160 seconds.
+fn cpu_celsius(second: &MachineSecond) -> f32 {
+    let quarter_degrees = u16::try_from(second.wall_ns / NANOSECONDS_PER_SECOND % 160).unwrap();
+
+    f32::from(quarter_degrees) / 4.0 + 50.0
+}
+
+/// The clocks, load averages and open files `with_cpu_reading` gives `second`, the share of the
+/// limit as the collector's reading derives it from the open files.
+pub fn cpu_readings(second: &MachineSecond) -> CpuReadings {
+    let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+    let hundredths =
+        |modulus: u64| f64::from(u32::try_from(wall_second % modulus).unwrap()) / 100.0;
+    let open_files = wall_second % 7_000 + 20_000;
+
+    CpuReadings {
+        level_ghz: [Some(hundredths(130) + 3.0), Some(hundredths(120) + 2.0)],
+        load_average: Some([
+            hundredths(110) * 10.0 + 1.0,
+            hundredths(100) * 10.0 + 1.5,
+            hundredths(90) * 10.0 + 2.0,
+        ]),
+        open_files: Some(open_files),
+        open_files_percent: Some(open_files_percent(open_files)),
+    }
+}
+
+/// The share of `OPEN_FILES_LIMIT` that `open_files` take.
+pub fn open_files_percent(open_files: u64) -> f64 {
+    let open = f64::from(u32::try_from(open_files).unwrap());
+    let limit = f64::from(u32::try_from(OPEN_FILES_LIMIT).unwrap());
+
+    open / limit * 100.0
+}
+
+/// `second` with a complete reading of the CPU activity and sensor it holds and of `readings`.
+pub fn with_cpu_readings(mut second: MachineSecond, readings: CpuReadings) -> MachineSecond {
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_cpu(
+        &second,
+        readings.level_ghz,
+        readings.load_average,
+        readings.open_files,
+        readings.open_files_percent,
+        &budget,
+    );
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
 /// The trend point the viewer writes for `second` from its complete reading.
 pub fn summary_point(second: &MachineSecond) -> Value {
     let identity = |identity| identity_text(Identity(identity)).to_string();
@@ -327,6 +423,7 @@ pub fn trend_point(second: &MachineSecond) -> Value {
         "battery": second.battery.as_ref().map(|battery| json!({
             "charge_percent": battery.charge_percent, "power_watts": battery.power_watts})),
         "thermal_pressure": second.thermal_pressure,
+        "logical_cpu_count": second.cpu_counters().map(<[_]>::len),
         "performance_levels": levels_json("Super", "Performance")})
 }
 

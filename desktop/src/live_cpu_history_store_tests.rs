@@ -132,6 +132,24 @@ macro_rules! refuses_store_history {
             assert_eq!(refusal, $refusal);
         }
     };
+    ($name:ident, $history:ident, $json_refusal:literal, $store_refusal:literal, $change:block) => {
+        #[test]
+        fn $name() {
+            // Goal: a selected observation that differs from the selection is refused from both
+            // forms, the JSON, which writes the selection's observation beside its list and so
+            // differs from itself, and the Store's values, which differ from the selection.
+            // Method: change the selected observation of an otherwise valid Store history, then
+            // build the page's history from its JSON and from its values.
+            let (mut $history, selection) = store_fixture();
+            $change
+            let saved =
+                CPUHistory::decode($history.json(&selection["selected"]), &selection).unwrap_err();
+
+            let refusal = CPUHistory::from_store($history, &selection).unwrap_err();
+
+            assert_eq!((saved.as_str(), refusal.as_str()), ($json_refusal, $store_refusal));
+        }
+    };
 }
 
 macro_rules! refuses_store_history_the_json_cannot_carry {
@@ -236,7 +254,7 @@ refuses_store_history!(
     history,
     "CPU history has a different context start",
     {
-        history.first_ns = 101 * NS;
+        history.first_ns = 103 * NS;
     }
 );
 refuses_store_history!(
@@ -244,7 +262,23 @@ refuses_store_history!(
     history,
     "CPU history has a different context end",
     {
-        history.end_ns = 1003 * NS;
+        history.end_ns = 1002 * NS - 1;
+    }
+);
+refuses_store_history!(
+    refuses_a_context_of_more_than_900_seconds,
+    history,
+    "CPU history context exceeds 900 seconds",
+    {
+        history.first_ns = 101 * NS;
+    }
+);
+refuses_store_history!(
+    refuses_a_context_that_ends_before_it_starts,
+    history,
+    "CPU history context ends before it starts",
+    {
+        history.end_ns = history.first_ns;
     }
 );
 refuses_store_history!(
@@ -474,14 +508,26 @@ refuses_store_history!(
         selection.trends_edit(|trends| trends[0]["wall_ns"] = json!(1001 * NS + 1));
     }
 );
-refuses_store_history!(
-    refuses_an_observation_that_differs_from_its_trend,
-    history,
-    "CPU history run tick does not match its context",
-    {
-        history.observations[0].identity.run_tick = 7;
-    }
-);
+#[test]
+fn refuses_an_observation_that_differs_from_its_trend() {
+    // Goal: a history whose observation differs from the selection's point of the same second is
+    // refused from both forms, though the history agrees with itself.
+    // Method: give the selection's first point another run tick, then build the page's history
+    // from its JSON and from its values.
+    let (history, mut selection) = store_fixture();
+    selection.trends_edit(|trends| trends[0]["run_tick"] = json!(7));
+    let saved = CPUHistory::decode(history.json(&selection["selected"]), &selection).unwrap_err();
+
+    let refusal = CPUHistory::from_store(history, &selection).unwrap_err();
+
+    assert_eq!(
+        (saved.as_str(), refusal.as_str()),
+        (
+            "CPU history run tick does not match its context",
+            "CPU history run tick does not match its context"
+        )
+    );
+}
 refuses_store_history!(
     refuses_an_unselected_identity_that_is_not_hexadecimal,
     history,
@@ -493,19 +539,39 @@ refuses_store_history!(
 refuses_store_history!(
     refuses_a_selected_run_tick_that_differs_from_the_selection,
     history,
+    "Selected CPU history observation has changed metadata",
     "CPU history run tick does not match its context",
     {
+        // The selected second loses its interval, so the history still agrees with itself.
         history.observations[1].identity.run_tick = 9;
+        history.observations[1].previous = None;
+        history.observations[1].interval_available = false;
+        history.cpus[0].busy_percent[1] = None;
     }
 );
 refuses_store_history!(
     refuses_a_selected_wall_clock_that_differs_from_the_selection,
     history,
+    "Selected CPU history observation has changed metadata",
     "CPU history wall clock does not match its context",
     {
         history.observations[1].identity.wall_ns = 1001 * NS + 5;
     }
 );
+
+#[test]
+fn refuses_from_a_view_a_history_of_more_than_900_seconds() {
+    // Goal: a history the store's View built goes through the validation that holds the
+    // reader's history to itself, though no selection holds it to a context.
+    // Method: start an otherwise valid Store history's window a second early, then build the
+    // page's history from it as the View hands it over.
+    let (mut history, _) = store_fixture();
+    history.first_ns = 101 * NS;
+
+    let refusal = CPUHistory::from_view(history).unwrap_err();
+
+    assert_eq!(refusal, "CPU history context exceeds 900 seconds");
+}
 
 /// The Store's values of the history `fixture` writes as JSON, with that fixture's selection.
 fn store_fixture() -> (viewer::store::CpuHistory, viewer::Selection) {

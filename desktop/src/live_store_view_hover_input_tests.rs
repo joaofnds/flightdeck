@@ -14,7 +14,7 @@ use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::{apps_at, hour};
 use crate::live_store_fixtures::{reading_at, trend_point, view};
 use crate::live_store_page_fixtures::{
-    figure_readings, figure_second, readings, summary_selection, texts,
+    cpu_seconds_past_a_page, figure_readings, figure_second, readings, summary_selection, texts,
 };
 use crate::live_views::summary;
 use crate::time_range::Range;
@@ -141,6 +141,25 @@ fn hovering_a_second_the_view_holds_reads_nothing(cx: &mut TestAppContext) {
     harness.driver.tick_hover();
 
     assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_a_second_the_view_holds_on_the_cpu_page_reads_its_logical_cpus(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover on the CPU page over a second the store's View holds with its top Apps still
+    // reads that second, where the page holds none of its logical CPUs' bars, since only the
+    // reader reads them. Method: the CPU page of a Mac with more logical CPUs than one page of
+    // the heatmap holds, whose page of them gives no bars, the pointer on 9,999, then the
+    // hover's tick, which sends a hover's read where one is needed.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_held_view_past_a_page_of_logical_cpus();
+    harness.driver.hover_held_second(9_999);
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 1);
     harness.teardown();
 }
 
@@ -646,6 +665,23 @@ impl InputDriver {
     /// 9,999 and 10,000, following the newest second.
     fn show_held_view(&mut self, seconds: &[MachineSecond]) {
         self.show_held_view_after(&[], seconds);
+    }
+
+    /// Shows the page drawn from the `held_view` of 9,999 to 10,001 of a Mac with more logical
+    /// CPUs than one page of the heatmap holds, over the worker's readings of the first two,
+    /// following the newest second.
+    fn show_held_view_past_a_page_of_logical_cpus(&mut self) {
+        let seconds = cpu_seconds_past_a_page(9_999..=10_001);
+        let snapshot = readings(&seconds[..2]);
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            assert!(dashboard.take_view(held_view(1, &[], &seconds)));
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+        self.context.run_until_parked();
     }
 
     /// Shows Overview as `show_held_view` does, with `older` the older tail of both the View and

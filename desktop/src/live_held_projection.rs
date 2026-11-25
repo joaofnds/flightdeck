@@ -57,6 +57,7 @@ fn view_panels_specifications(
 ) -> Result<Vec<Specification>, String> {
     match route {
         "overview" => Ok(super::overview(levels)),
+        "cpu" => Ok(super::cpu_specifications(levels)),
         "memory" => Ok(super::memory_specifications()),
         "network" => Ok(super::network()),
         "storage" => Ok(super::storage_specifications()),
@@ -404,6 +405,17 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
             .cpu_level_percent
             .get(level)
             .and_then(|percent| stretch_reach_measured(percent)),
+        (None, "cpu_level_ghz", Some(level)) => stretch
+            .cpu_level_ghz
+            .get(level)
+            .and_then(|ghz| stretch_reach_measured(ghz)),
+        (None, "load_average", Some(window)) => stretch
+            .load_average
+            .get(window)
+            .and_then(|average| stretch_reach_measured(average)),
+        (None, "open_files", None) => stretch_reach_measured(&stretch.open_files),
+        (None, "open_files_percent", None) => stretch_reach_measured(&stretch.open_files_percent),
+        (None, "cpu_celsius", None) => stretch_reach_measured(&stretch.cpu_celsius),
         (None, "gpu_active_percent", None) => stretch_reach_measured(&stretch.gpu_active_percent),
         (None, "gpu_watts", None) => stretch_reach_measured(&stretch.gpu_watts),
         (None, "gpu_memory_in_use_bytes", None) => {
@@ -413,8 +425,10 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
             stretch_reach_measured(&stretch.gpu_memory_allocated_bytes)
         }
         (None, "gpu_celsius", None) => stretch_reach_measured(&stretch.gpu_celsius),
-        // No reading records the GPU's frequency, so its chart draws none.
-        (None, "gpu_frequency_ghz", None) => None,
+        // No reading records the GPU's frequency, so its chart draws none. The count of cores
+        // is fixed for the machine, so it never moves over a stretch, and the older tail keeps
+        // no reach for a number that did not move.
+        (None, "gpu_frequency_ghz" | "logical_cpu_count", None) => None,
         (None, "memory_app_bytes", None) => stretch_reach_measured(&stretch.memory_app_bytes),
         (None, "memory_wired_bytes", None) => stretch_reach_measured(&stretch.memory_wired_bytes),
         (None, "memory_compressed_bytes", None) => {
@@ -482,6 +496,19 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (None, "cpu_level_percent", Some(level)) => {
             narrow(second.cpu_level_percent.get(level).copied().flatten())
         }
+        (None, "cpu_level_ghz", Some(level)) => narrow(
+            second
+                .cpu_level_ghz()
+                .and_then(|ghz| ghz.get(level).copied().flatten()),
+        ),
+        (None, "load_average", Some(window)) => narrow(
+            second
+                .load_average()
+                .and_then(|load| load.get(window).copied()),
+        ),
+        (None, "logical_cpu_count", None) => second_value_logical_cpu_count(second),
+        (None, "open_files", None) => second.open_files().and_then(|files| files.to_f32()),
+        (None, "open_files_percent", None) => narrow(second.open_files_percent()),
         (None, "gpu_active_percent", None) => narrow(second.gpu_active_percent),
         (None, "gpu_watts", None) => narrow(second.gpu_watts()),
         (None, "gpu_memory_in_use_bytes", None) => bytes(second.gpu_memory_in_use_bytes()),
@@ -519,12 +546,21 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         }
         (None, "power_watts", None) => second.power_watts,
         (None, "soc_celsius", None) => second.soc_celsius,
+        (None, "cpu_celsius", None) => second.cpu_celsius,
         (None, FAN_MEAN_KEY, None) => second.fan_mean_rpm,
         (None, "thermal_pressure", None) => second.thermal_pressure.map(f32::from),
         _ => return Err(format!("The store holds no reading {}", reading.key)),
     };
 
     Ok(value)
+}
+
+/// The count of logical CPUs `second` reads, the per-CPU readings it holds, as the reader
+/// counts them, whether the second's complete reading was taken or refused.
+fn second_value_logical_cpu_count(second: &MachineSecond) -> Option<f32> {
+    second
+        .cpu_counters()
+        .and_then(|counters| counters.len().to_f32())
 }
 
 pub(crate) use viewer::store::pressure_level;

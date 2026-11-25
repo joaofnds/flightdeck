@@ -238,7 +238,11 @@ impl LiveDashboard {
             return self.held_reading().is_some_and(|reading| reading.complete);
         }
         if self.request.second.is_none() {
-            if crate::live_dashboard::store_view_draws_machine(&self.request.route) {
+            // A CPU page whose View holds no cores of its newest second draws them from its
+            // reader, so its frame is fresh once the reader's reply is drawn.
+            if crate::live_dashboard::store_view_draws_machine(&self.request.route)
+                && self.store_view_draws_whole_page()
+            {
                 let Some(version) = self.resume_store_version() else {
                     return false;
                 };
@@ -270,13 +274,15 @@ impl LiveDashboard {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use gpui::{AppContext, Entity, TestAppContext};
 
     use super::{Checkpoint, Frame, FreshCause, ResumeMetrics};
     use crate::live_dashboard::LiveDashboard;
     use crate::live_source::{Update, Worker};
-    use crate::live_store_fixtures::reading_at;
-    use crate::live_store_page_fixtures::readings;
+    use crate::live_store_fixtures::{reading_at, view};
+    use crate::live_store_page_fixtures::{cpu_seconds, readings};
 
     #[test]
     fn refused_native_counters_do_not_complete_a_successful_measurement() {
@@ -406,6 +412,38 @@ mod tests {
         assert!(!dashboard.resume_frame_ready());
     }
 
+    #[test]
+    fn a_cpu_page_is_fresh_once_it_drew_the_logical_cpus_of_a_newer_view() {
+        // Goal: a resume of a CPU page that follows the newest second has its fresh frame once the
+        // page drew the bars and heatmap of a View newer than the one it began on. Method: the page
+        // follows a View of 9,999 and 10,000, a resume begins as the window shows, then the page
+        // takes a View of 10,001 and the readiness of the next frame.
+        let seconds = cpu_seconds(9_999..=10_001);
+        let mut dashboard = followed_cpu_page(&seconds[..2]);
+        assert!(dashboard.resume_metrics.enable());
+        dashboard.resume_begin_reading();
+
+        dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+        assert!(dashboard.resume_frame_ready());
+    }
+
+    #[test]
+    fn a_cpu_page_waits_while_the_view_holds_no_logical_cpus_of_its_newest_second() {
+        // Goal: a newer View whose newest second the page cannot draw the bars of leaves a CPU
+        // resume's frame not fresh, since that frame shows no bars of it. Method: as in the fresh
+        // resume, but 10,001 holds no complete reading.
+        let mut seconds = cpu_seconds(9_999..=10_000);
+        seconds.push(reading_at(10_001, 0));
+        let mut dashboard = followed_cpu_page(&seconds[..2]);
+        assert!(dashboard.resume_metrics.enable());
+        dashboard.resume_begin_reading();
+
+        dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+        assert!(!dashboard.resume_frame_ready());
+    }
+
     #[gpui::test]
     fn a_held_second_waits_for_its_own_reading(cx: &mut TestAppContext) {
         // Goal: profile-hold's frame is not fresh while the reader still reads the held second,
@@ -463,6 +501,15 @@ mod tests {
         let mut dashboard = LiveDashboard::new(Worker::start(root).unwrap(), route.into(), None);
         dashboard.accept(readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]));
         assert!(dashboard.error.is_none());
+        dashboard
+    }
+
+    /// A CPU page that took the worker's reading of `seconds` and then the View of the same
+    /// seconds, its reader not yet resting.
+    fn followed_cpu_page(seconds: &[viewer::store::MachineSecond]) -> LiveDashboard {
+        let mut dashboard = page("cpu");
+        dashboard.accept(readings(seconds));
+        dashboard.take_view(Arc::new(view(1, &[], seconds)));
         dashboard
     }
 }

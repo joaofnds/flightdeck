@@ -110,6 +110,29 @@ const _: () = {
     assert!(SEGMENTS == 20);
 };
 
+/// `busy`, a logical CPU's busy share, as the `f32` the bars draw, refused where it is not a
+/// share from 0 to 100 before it is narrowed, so rounding never admits one above fully busy.
+fn busy_percent_narrowed(busy: f64) -> Result<f32, String> {
+    busy_percent_validate(busy)?;
+
+    let Some(narrowed) = num_traits::ToPrimitive::to_f32(&busy) else {
+        unreachable!("a share from 0 to 100 fits an f32");
+    };
+    Ok(narrowed)
+}
+
+/// Refuses `busy` where it is not a logical CPU's busy share, a finite percentage from 0 to 100.
+fn busy_percent_validate(busy: f64) -> Result<(), String> {
+    if !busy.is_finite() {
+        return Err("Non-finite logical CPU percentage".into());
+    }
+    if !(0.0..=100.0).contains(&busy) {
+        return Err("Logical CPU percentage is outside 0 to 100".into());
+    }
+
+    Ok(())
+}
+
 /// The rows the bars of `cpus` take, each of at most `COLUMNS_MAX`.
 fn cpu_rows(cpus: &[LogicalCPU]) -> std::slice::Chunks<'_, LogicalCPU> {
     cpus.chunks(COLUMNS_MAX)
@@ -128,18 +151,41 @@ impl CPUActivity {
                 let value = cpu["busy_percent"]
                     .as_f64()
                     .ok_or("Invalid CPU percentage")?;
-                if !value.is_finite() {
-                    return Err("Non-finite logical CPU percentage".into());
-                }
-                if !(0.0..=100.0).contains(&value) {
-                    return Err("Logical CPU percentage is outside 0 to 100".into());
-                }
+                busy_percent_narrowed(value)?;
             }
         }
         identity_validate(&value["observation"], selected)?;
         let mut activity: Self =
             serde_json::from_value(value).map_err(|error| error.to_string())?;
         activity.validate(selected)?;
+        Ok(activity)
+    }
+
+    /// The bars of `detail`, the cores the store's View built of its newest second, which it
+    /// refuses where `decode` refuses the same cores written as JSON for `selected`.
+    pub fn from_store(detail: viewer::store::CpuDetail, selected: &Value) -> Result<Self, String> {
+        let observation = crate::live_cpu_history::identity_value(detail.identity);
+        identity_validate(&observation, selected)?;
+        if detail.busy_percent.len() > CPUS_MAX {
+            return Err("Logical CPU count exceeds 1024".into());
+        }
+        let mut cpus = Vec::with_capacity(detail.busy_percent.len());
+        for (busy_percent, cpu) in detail.busy_percent.into_iter().zip(0..) {
+            let busy_percent = match busy_percent {
+                Some(busy) => Some(busy_percent_narrowed(busy)?),
+                None => None,
+            };
+            cpus.push(LogicalCPU { cpu, busy_percent });
+        }
+        let mut activity = Self {
+            observation,
+            previous_observation: detail.previous.map(crate::live_cpu_history::identity_value),
+            interval_available: detail.unavailable_reason.is_none(),
+            unavailable_reason: detail.unavailable_reason.map(str::to_owned),
+            cpus,
+        };
+        activity.validate(selected)?;
+
         Ok(activity)
     }
 
@@ -159,12 +205,7 @@ impl CPUActivity {
                 return Err("Logical CPU indices do not form a contiguous domain".into());
             }
             if let Some(value) = reading.busy_percent {
-                if !value.is_finite() {
-                    return Err("Non-finite logical CPU percentage".into());
-                }
-                if !(0.0..=100.0).contains(&value) {
-                    return Err("Logical CPU percentage is outside 0 to 100".into());
-                }
+                busy_percent_validate(f64::from(value))?;
             }
         }
         self.validate_interval()
@@ -650,6 +691,90 @@ mod tests {
         let selected = payload["observation"].clone();
 
         assert!(CPUActivity::decode(payload, &selected).is_err());
+    }
+
+    macro_rules! from_store_cases {
+        ($($name:ident, $busy_percent:expr, $unavailable_reason:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: the bars of the cores the store's View built are the bars decode makes
+                // of the same cores written as JSON. Method: one logical CPU's share and its
+                // interval's reason, built from the View's typed cores and decoded from their
+                // JSON, then both results.
+                let detail = cores($busy_percent, $unavailable_reason);
+                let written = written_as_json(&detail);
+                let selected = written["observation"].clone();
+
+                let built = CPUActivity::from_store(detail, &selected).unwrap();
+
+                let decoded = CPUActivity::decode(written, &selected).unwrap();
+                let shown = |activity: CPUActivity| serde_json::to_value(activity).unwrap();
+                assert_eq!(shown(built), shown(decoded));
+            }
+        )*};
+    }
+
+    from_store_cases! {
+        from_store_builds_a_measured_core_as_decode_does, Some(25.0), None;
+        from_store_builds_an_unavailable_interval_as_decode_does, None, Some("CPU counters fell");
+    }
+
+    macro_rules! from_store_refusals {
+        ($($name:ident, $busy_percent:expr, $refusal:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: the View's cores are refused where a share is not one from 0 to 100,
+                // before it is narrowed to the bars' f32, so rounding admits none. Method: one
+                // logical CPU's share built from the View's typed cores, then the refusal.
+                let detail = cores(Some($busy_percent), None);
+                let selected = written_as_json(&detail)["observation"].clone();
+
+                let built = CPUActivity::from_store(detail, &selected);
+
+                assert_eq!(built.err(), Some(String::from($refusal)));
+            }
+        )*};
+    }
+
+    const OUTSIDE_A_SHARE: &str = "Logical CPU percentage is outside 0 to 100";
+    const NOT_A_NUMBER: &str = "Non-finite logical CPU percentage";
+
+    from_store_refusals! {
+        from_store_refuses_a_share_just_above_fully_busy, 100.000_000_1, OUTSIDE_A_SHARE;
+        from_store_refuses_a_share_below_idle, -0.5, OUTSIDE_A_SHARE;
+        from_store_refuses_a_share_that_is_not_a_number, f64::NAN, NOT_A_NUMBER;
+    }
+
+    /// The cores of the second `activity` names, with one logical CPU busy for `busy_percent`
+    /// over the interval since the second before, which `unavailable_reason` says is missing.
+    fn cores(
+        busy_percent: Option<f64>,
+        unavailable_reason: Option<&'static str>,
+    ) -> viewer::store::CpuDetail {
+        let identity = |publication: u64| viewer::store::CpuHistoryIdentity {
+            run: "00000000000000010000000000000002".into(),
+            boot: "00000000000000030000000000000004".into(),
+            publication,
+            run_tick: publication,
+            wall_ns: publication * 1_000_000_000,
+        };
+
+        viewer::store::CpuDetail {
+            identity: identity(2),
+            previous: Some(identity(1)),
+            unavailable_reason,
+            busy_percent: vec![busy_percent],
+        }
+    }
+
+    /// `detail` as the reader writes the same cores.
+    fn written_as_json(detail: &viewer::store::CpuDetail) -> Value {
+        let mut written = activity();
+        written["interval_available"] = json!(detail.unavailable_reason.is_none());
+        written["unavailable_reason"] = json!(detail.unavailable_reason);
+        written["cpus"][0]["busy_percent"] = json!(detail.busy_percent[0]);
+
+        written
     }
 
     #[test]

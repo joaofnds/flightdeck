@@ -8,11 +8,15 @@ use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View
 use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
 use super::{Observations, ViewPanelsPoints, overview_point_second, view_panels};
 use crate::data::Panel;
-use crate::live_projection::{GPU_FREQUENCY_ID, GPU_MEMORY_ID, GPU_TEMPERATURE_ID};
+use crate::live_projection::{
+    CPU_TEMPERATURE_ID, FREQUENCY_ID, GPU_FREQUENCY_ID, GPU_MEMORY_ID, GPU_TEMPERATURE_ID,
+    LOAD_AVERAGE_ID, OPEN_FILES_ID,
+};
 use crate::live_store_fixtures::{
-    gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates, overview_panels, reading_at,
-    selection, selection_of_json, storage_rates, summary_point, summary_selection, trend_point,
-    view, with_gpu_reading, with_gpu_readings, with_memory_rates, with_memory_reading,
+    cpu_readings, gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates,
+    open_files_percent, overview_panels, reading_at, selection, selection_of_json, storage_rates,
+    summary_point, summary_selection, trend_point, view, with_cpu_reading, with_cpu_readings,
+    with_gpu_reading, with_gpu_readings, with_memory_rates, with_memory_reading,
     with_network_rates, with_network_reading, with_storage_rates, with_storage_reading,
 };
 
@@ -80,6 +84,61 @@ fn a_stretch_older_than_every_point_of_a_chart_costs_it_none_of_its_later_stretc
     let drawn = overview_panels(&view, levels().as_ref()).unwrap();
 
     assert_eq!(drawn, expected);
+}
+
+#[test]
+fn the_cpu_sensor_chart_of_a_view_draws_the_sensor_each_second_holds() {
+    // Goal: the CPU page's sensor chart, drawn from the seconds the store holds, draws the
+    // sensor a second's record holds and a gap where it holds none, so the chart needs no
+    // complete reading. Method: two seconds of the live span, one with the sensor and one
+    // without, each read by the chart's one line.
+    let mut read = reading_at(9_999, 4);
+    read.cpu_celsius = Some(61.5);
+    let mut unread = reading_at(10_000, 4);
+    unread.cpu_celsius = None;
+    let seconds = [&read, &unread];
+    let points = ViewPanelsPoints {
+        seconds: &seconds,
+        stretches: &[None, None],
+    };
+    let sensor = super::super::cpu_temperature();
+
+    let drawn: Result<Vec<_>, _> = (0..seconds.len())
+        .map(|index| points.value(&sensor.lines[0], index))
+        .collect();
+
+    assert_eq!(drawn, Ok(vec![Some(61.5), None]));
+}
+
+#[test]
+fn the_cores_line_counts_the_logical_cpus_of_a_second_whose_record_names_no_levels() {
+    // Goal: the Cores line of a View counts the logical CPUs a second's reading holds, as the
+    // reader counts them, rather than the levels the record names. Method: seconds whose complete
+    // readings hold eighteen logical CPUs and whose records name no levels, drawn from the View
+    // and from their trend points, each Cores line read at its newest second.
+    let seconds: Vec<_> = [9_999, 10_000]
+        .into_iter()
+        .map(|wall_second| {
+            let mut second = with_cpu_reading(reading_at(wall_second, 4));
+            second.performance_levels = None;
+            second
+        })
+        .collect();
+    let newest_cores = |panels: &[std::rc::Rc<Panel>]| {
+        panel_named(panels, LOAD_AVERAGE_ID).lines[3]
+            .values
+            .last()
+            .copied()
+            .flatten()
+    };
+
+    let drawn = view_panels("cpu", &view(1, &[], &seconds), None).unwrap();
+    let read = panels("cpu", &selection_of_json(&selection(&[], &seconds)), None).unwrap();
+
+    assert_eq!(
+        (newest_cores(&drawn), newest_cores(&read)),
+        (Some(18.0), Some(18.0))
+    );
 }
 
 /// The panel the Overview names `id`.
@@ -247,6 +306,42 @@ const GPU: Page = Page {
     states_at_a_refused_second: &[],
 };
 
+const CPU: Page = Page {
+    route: "cpu",
+    with_reading: with_cpu_reading,
+    chart_count: 5,
+    unrecorded: &[],
+    hour: cpu_hour,
+    peak_lines: &[
+        ("live-cpu", 0),
+        (FREQUENCY_ID, 0),
+        (FREQUENCY_ID, 1),
+        (LOAD_AVERAGE_ID, 0),
+        (LOAD_AVERAGE_ID, 1),
+        (LOAD_AVERAGE_ID, 2),
+        (OPEN_FILES_ID, 0),
+        (OPEN_FILES_ID, 1),
+        (CPU_TEMPERATURE_ID, 0),
+    ],
+    held_at_a_refused_second: &[
+        ("live-cpu", 0),
+        ("live-cpu", 1),
+        ("live-cpu", 2),
+        (LOAD_AVERAGE_ID, 3),
+        (CPU_TEMPERATURE_ID, 0),
+    ],
+    missing_at_a_refused_second: &[
+        (FREQUENCY_ID, 0),
+        (FREQUENCY_ID, 1),
+        (LOAD_AVERAGE_ID, 0),
+        (LOAD_AVERAGE_ID, 1),
+        (LOAD_AVERAGE_ID, 2),
+        (OPEN_FILES_ID, 0),
+        (OPEN_FILES_ID, 1),
+    ],
+    states_at_a_refused_second: &[],
+};
+
 macro_rules! view_drawn_as_the_readings_draw_it_cases {
     ($($name:ident, $page:expr;)*) => {$(
         #[test]
@@ -271,6 +366,8 @@ view_drawn_as_the_readings_draw_it_cases! {
     the_storage_charts_of_the_view_draw_as_the_readings_draw_them, STORAGE;
     // GPU: every line draws a value but the one recorded nowhere, the GPU's frequency.
     the_gpu_charts_of_the_view_draw_as_the_readings_draw_them, GPU;
+    // CPU: every line draws a value, the Cores line too, which the readings' levels give.
+    the_cpu_charts_of_the_view_draw_as_the_readings_draw_them, CPU;
 }
 
 /// Asserts that `page` draws the same charts from a View as from the trend points of the same
@@ -450,6 +547,34 @@ fn gpu_hour() -> Vec<MachineSecond> {
     })
 }
 
+/// The `hour` of the complete readings the CPU page draws.
+fn cpu_hour() -> Vec<MachineSecond> {
+    hour(|mut second, wall_second, moment| {
+        // Every reading moves over each stretch, so the reach of each names it.
+        let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
+        second.cpu_celsius = Some(f32::from(quarter_degrees) / 4.0 + 60.0);
+        let mut readings = cpu_readings(&second);
+        if moment == HourSecond::Peak {
+            second.cpu_percent = Some(100.0);
+            second.cpu_celsius = Some(110.0);
+            readings.level_ghz = readings.level_ghz.map(|ghz| ghz.map(|ghz| ghz * 2.0));
+            readings.load_average = readings
+                .load_average
+                .map(|load| load.map(|average| average * 10.0));
+            let open_files = readings.open_files.map(|files| files * 3);
+            readings.open_files = open_files;
+            readings.open_files_percent = open_files.map(open_files_percent);
+        }
+        if moment == HourSecond::AfterBreak {
+            second.cpu_percent = None;
+            readings.level_ghz = [None, None];
+            readings.load_average = None;
+        }
+
+        with_cpu_readings(second, readings)
+    })
+}
+
 /// `seconds` by the stretch each lies in, oldest first.
 fn seconds_by_stretch(
     seconds: &[MachineSecond],
@@ -545,6 +670,9 @@ hour_drawn_as_the_readings_draw_it_cases! {
     // GPU: the peaks reach the activity, power and sensor lines and both lines of the memory
     // chart.
     the_gpu_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, GPU;
+    // CPU: the peaks reach the activity line, both frequency lines, the three load averages,
+    // both open files lines and the sensor line.
+    the_cpu_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, CPU;
 }
 
 /// Asserts that `page` draws its hour, peaks included, from a View as from the trend points
@@ -626,6 +754,9 @@ refused_second_drawn_as_it_holds_cases! {
     // GPU: the activity and sensor the second holds itself are held, and the power and memory
     // only a complete reading holds are missing.
     at_a_refused_second_the_gpu_charts_draw_what_the_second_holds, GPU;
+    // CPU: the activity, the sensor and the Cores line the second's logical CPUs give are held,
+    // and the clocks, load averages and open files only a complete reading holds are missing.
+    at_a_refused_second_the_cpu_charts_draw_what_the_second_holds, CPU;
 }
 
 /// Asserts that at a refused second `page` draws what the second holds itself, as the worker
@@ -634,6 +765,9 @@ fn assert_refused_second_drawn_as_it_holds(page: &Page) {
     let read = |wall_second| (page.with_reading)(reading_at(wall_second, 3));
     let mut refused = reading_at(9_999, 3);
     refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
+    // The store keeps the per-CPU readings of a second whose complete reading it refused.
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    refused.cpu_refused = Some(viewer::store::CpuReading::of_levels(&refused, &budget));
     let seconds = [read(9_998), refused, read(10_000)];
     let view = view(1, &[], &seconds);
 

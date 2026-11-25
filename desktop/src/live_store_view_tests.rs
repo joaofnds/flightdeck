@@ -24,7 +24,8 @@ use crate::live_store_fixtures::{
     with_storage_reading,
 };
 use crate::live_store_page_fixtures::{
-    figure_readings, figure_second, readings, summary_selection, texts,
+    cpu_run, cpu_seconds, cpu_seconds_past_a_page, figure_readings, figure_second, readings,
+    summary_selection, texts,
 };
 use crate::live_views::summary;
 use crate::live_views::utilization::UtilizationReadings;
@@ -51,14 +52,17 @@ fn a_view_newer_than_the_readings_draws_the_overviews_machine_charts() {
 #[test]
 fn pause_holds_the_views_newest_second() {
     // Goal: Pause holds the second the page shows, which the View holds and the worker has not
-    // read yet. Method: readings that end at 10,000, a View that ends at 10,005, then the
-    // second Pause would hold.
+    // read yet, by the identity the store names it by. Method: readings that end at 10,000, a
+    // View that ends at 10,005, then the second Pause would hold.
     let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
     dashboard.take_view(newer_view());
 
     let held = dashboard.pause_target();
 
-    assert_eq!(held, (Some(10_005), None));
+    let named = |identity| collector::recording::identity_text(collector::ring::Identity(identity));
+    let identity = json!({"run": named([1, 2]).to_string(), "boot": named([3, 4]).to_string(),
+        "publication": 10_005});
+    assert_eq!(held, (Some(10_005), Some(identity)));
 }
 
 #[test]
@@ -358,17 +362,408 @@ fn every_page_drawn_from_the_view_draws_its_machine_charts_from_it() {
     }
 }
 
+#[test]
+fn a_followed_cpu_page_rests_its_reader() {
+    // Goal: a CPU page that follows the newest second rests its reader, as every page drawn from
+    // the store's View does, since the View builds the bars and heatmap of its logical CPUs too.
+    // Method: the CPU page follows a View of the seconds it read, each with its logical CPUs, then
+    // takes the rest a followed page takes.
+    let seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = followed_on("cpu", &seconds, readings(&seconds));
+
+    dashboard.tick_rest();
+
+    assert!(dashboard.followed_store_view().is_some());
+    assert!(dashboard.reader_rested());
+}
+
+#[test]
+fn a_followed_cpu_page_draws_the_logical_cpus_of_the_views_newest_second() {
+    // Goal: the bars and the heatmap of a CPU page that follows the newest second show the newest
+    // second of the store's View, which its reader never read. Method: the page reads 9,999 and
+    // 10,000 and follows the View of them, then takes a View whose newest second is 10,001, and
+    // the second its bars and its heatmap's selected reading name.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    assert_eq!(
+        shown_logical_cpus(&dashboard),
+        (Some(seconds[2].wall_ns), Some(10_001))
+    );
+}
+
+#[test]
+fn a_followed_cpu_page_draws_the_logical_cpus_of_a_view_across_runs() {
+    // Goal: the View builds the bars and heatmap of a CPU page that follows the newest second
+    // from as many seconds as it holds, more than the heatmap's 900, across a second run whose
+    // clock was set back before the first run's last seconds. Method: run 1 reads 8,780 to 9,700
+    // and run 2 9,600 to 9,690, the page follows a View of run 1's first two seconds, then takes
+    // a View of all of them, and the second its bars and its heatmap's selected reading name.
+    let mut seconds = cpu_run([1, 2], 1, 8_780..=9_700);
+    seconds.append(&mut cpu_run([7, 8], 1, 9_600..=9_690));
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    let newest = seconds.last().unwrap().wall_ns;
+    assert_eq!(shown_logical_cpus(&dashboard), (Some(newest), Some(9_690)));
+}
+
+#[test]
+fn a_followed_cpu_page_draws_the_logical_cpus_of_one_view_once() {
+    // Goal: the page builds the bars and heatmap of a View once and draws the same ones again
+    // while the View stays the newest, though its charts are drawn again for another window.
+    // Method: the page takes a View of 10,001, a range of the last minute is picked, which
+    // draws the charts again, then whether the heatmap it shows is the one it showed.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    let builds = dashboard.store_panels.builds;
+    let drawn = Arc::clone(
+        dashboard
+            .snapshot
+            .as_deref()
+            .unwrap()
+            .cpu_history
+            .as_ref()
+            .unwrap(),
+    );
+
+    dashboard.range = crate::time_range::Range::Last(60);
+    dashboard.store_view_range_picked();
+
+    assert_eq!(dashboard.store_panels.builds, builds + 1);
+    let shown = dashboard
+        .snapshot
+        .as_deref()
+        .unwrap()
+        .cpu_history
+        .as_ref()
+        .unwrap();
+    assert!(Arc::ptr_eq(&drawn, shown));
+}
+
+#[test]
+fn a_cpu_page_lets_go_of_its_logical_cpus_with_the_view() {
+    // Goal: the bars and heatmap the CPU page built of a View go when the page lets go of the
+    // View, so no 900 seconds of history outlive it. Method: the page follows a View of 10,001,
+    // the window hides, then whether the page still holds what it built.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    assert!(dashboard.store_panels.logical_cpus.is_some());
+
+    dashboard.store_view_hide();
+
+    assert!(dashboard.store_panels.logical_cpus.is_none());
+}
+
+#[test]
+fn a_page_left_for_another_lets_go_of_the_logical_cpus_of_the_cpu_page() {
+    // Goal: the bars and heatmap the CPU page built of a View go when the page is left, so no
+    // other page holds them. Method: the page follows a View of 10,001, the Memory page opens,
+    // then whether the page still holds what the CPU page built.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    assert!(dashboard.store_panels.logical_cpus.is_some());
+
+    dashboard.switch_route("memory");
+
+    assert!(dashboard.store_panels.logical_cpus.is_none());
+}
+
+#[test]
+fn a_followed_cpu_page_keeps_its_reader_reading_where_the_view_holds_no_logical_cpus() {
+    // Goal: where the View cannot build the bars of its newest second, the CPU page keeps its
+    // reader reading them rather than resting it. Method: the page follows a View whose newest
+    // second holds no complete reading, then takes the rest a followed page takes.
+    let mut seconds = cpu_seconds(9_999..=9_999);
+    seconds.push(reading_at(10_000, 0));
+    let mut dashboard = followed_on("cpu", &seconds, readings(&seconds));
+
+    dashboard.tick_rest();
+
+    assert!(dashboard.followed_store_view().is_some());
+    assert!(!dashboard.reader_rested());
+}
+
+#[test]
+fn a_rested_cpu_page_asks_its_reader_for_the_logical_cpus_a_newer_view_lacks() {
+    // Goal: a CPU page whose reader rests asks it for the page once a newer View holds no logical
+    // CPUs of its newest second, since nothing else brings its bars. Method: the page rests over a
+    // View of 9,999 and 10,000 with their logical CPUs, takes a View whose newest second, 10,001,
+    // holds no complete reading, then whether it waits on a reply.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = rested_on("cpu", &seconds, worker_reading(&seconds));
+    seconds.push(reading_at(10_001, 0));
+
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    assert!(dashboard.reply_pending);
+}
+
+#[test]
+fn a_rested_cpu_page_asks_its_reader_for_the_logical_cpus_once_while_it_waits() {
+    // Goal: a CPU page that asked its reader for the logical CPUs a View lacked asks once while it
+    // waits on the reply, and not again for each newer View that lacks them meanwhile. Method:
+    // the page rests over a View with logical CPUs, takes a View of 10,001 without them, then one
+    // of 10,002 without them, then the read it waits on against the one it asked for first.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = rested_on("cpu", &seconds, worker_reading(&seconds));
+    seconds.push(reading_at(10_001, 0));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    let asked = dashboard.generation;
+    seconds.push(reading_at(10_002, 0));
+
+    dashboard.take_view(Arc::new(view(3, &[], &seconds)));
+
+    assert_eq!(dashboard.generation, asked);
+}
+
+#[test]
+fn a_rested_cpu_page_shows_one_second_where_a_newer_view_lacks_its_logical_cpus() {
+    // Goal: where a newer View cannot build the bars and heatmap of its newest second while the
+    // CPU page shows a View's, the page keeps showing the second it showed, its charts and its
+    // bars alike, rather than the newer second's charts over the older second's bars. Method:
+    // the page rests over a View of 9,999 and 10,000 with their logical CPUs, takes a View whose
+    // newest second, 10,001, holds no complete reading, then the second its charts show and the
+    // second its bars name.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = rested_on("cpu", &seconds, worker_reading(&seconds));
+    seconds.push(reading_at(10_001, 0));
+
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    assert_eq!(
+        (dashboard.shown_second(), shown_logical_cpus(&dashboard).0),
+        (Some(10_000), Some(seconds[1].wall_ns))
+    );
+}
+
+#[test]
+fn a_rested_cpu_page_shows_the_newer_second_whole_once_its_reader_replies() {
+    // Goal: the reply a CPU page asked its reader for, where a newer View could not build its
+    // bars, brings the newer second's charts and bars together. Method: the page rests over a
+    // View of 9,999 and 10,000, takes a View whose newest second, 10,001, holds no complete
+    // reading, then its reader's reading of 10,001 with that second's logical CPUs, and the
+    // second its charts show and the second its bars name.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = rested_on("cpu", &seconds[..2], worker_reading(&seconds[..2]));
+    let mut lacking = seconds[..2].to_vec();
+    lacking.push(reading_at(10_001, 0));
+    dashboard.take_view(Arc::new(view(2, &[], &lacking)));
+    let mut reply = worker_reading(&seconds);
+    let read = super::draw_store_view_logical_cpus_of(&view(3, &[], &seconds)).unwrap();
+    reply.cpu_detail = Some(crate::live_source::Presentation::Shared(read.bars));
+    reply.cpu_history = Some(read.heatmap);
+    reply.generation = dashboard.generation;
+
+    assert!(dashboard.receive(Update::Ready(reply)));
+
+    assert_eq!(
+        (dashboard.shown_second(), shown_logical_cpus(&dashboard).0),
+        (Some(10_001), Some(seconds[2].wall_ns))
+    );
+}
+
+#[test]
+fn a_followed_cpu_page_holding_aside_a_view_that_lacks_its_logical_cpus_keeps_its_reader_reading() {
+    // Goal: a CPU page that holds aside a View whose logical CPUs could not be built keeps its
+    // reader reading, since only the reader's reply brings the bars that let the page put that
+    // View in place. Method: the page follows a View of 9,999 and 10,000 with their logical CPUs,
+    // takes a View whose newest second, 10,001, holds no complete reading, then takes the rest a
+    // followed page takes.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = followed_on("cpu", &seconds, readings(&seconds));
+    seconds.push(reading_at(10_001, 0));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    dashboard.tick_rest();
+
+    assert!(!dashboard.reader_rested());
+}
+
+#[test]
+fn a_second_held_while_the_cpu_page_holds_a_view_aside_keeps_the_charts_it_was_held_over() {
+    // Goal: the reply that brings a held second's readings leaves the charts the second was held
+    // over, though the CPU page held aside a newer View until its reader's reply. Method: the
+    // page rests over a View of 9,999 and 10,000 with their logical CPUs, takes a View whose
+    // newest second, 10,001, holds no complete reading, holds 10,000, takes its reader's reading
+    // of 10,000, then the newest second its charts end at.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = rested_on("cpu", &seconds, worker_reading(&seconds));
+    let held = worker_reading(&seconds);
+    seconds.push(reading_at(10_001, 0));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    hold_on(&mut dashboard, &seconds[1]);
+    let mut reply = held;
+    reply.generation = dashboard.generation;
+
+    assert!(dashboard.receive(Update::Ready(reply)));
+
+    assert_eq!(dashboard.store_view_last_second(), Some(10_000));
+}
+
+#[test]
+fn a_followed_cpu_page_whose_reader_reads_on_asks_nothing_for_the_logical_cpus_a_view_lacks() {
+    // Goal: a CPU page whose reader still reads each second, so its readings keep their points,
+    // asks the reader for nothing more where a View holds no logical CPUs, since its next reading
+    // brings them. Method: the page follows a View of 9,999 and 10,000 with its reader reading,
+    // then takes a View whose newest second, 10,001, holds no complete reading, then the read it
+    // waits on against the one it had.
+    let mut seconds = cpu_seconds(9_999..=10_000);
+    let mut dashboard = followed_on("cpu", &seconds, readings(&seconds));
+    let read = dashboard.generation;
+    seconds.push(reading_at(10_001, 0));
+
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    assert_eq!(dashboard.generation, read);
+}
+
+#[test]
+fn a_cpu_page_holding_a_view_it_did_not_draw_keeps_its_reader_reading() {
+    // Goal: a CPU page rests its reader only on the logical CPUs of the View it holds, not on
+    // those of a View before it, as when the page takes a View ahead of a reading it then refuses,
+    // which leaves that View undrawn. Method: the page follows a View of 9,999 and 10,000 with
+    // their logical CPUs, places a View of 10,001 without drawing it, then takes the rest a
+    // followed page takes.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.store_view_place(Arc::new(view(2, &[], &seconds)));
+
+    dashboard.tick_rest();
+
+    assert!(dashboard.followed_store_view().is_some());
+    assert!(!dashboard.reader_rested());
+}
+
+#[test]
+fn a_cpu_page_held_on_a_second_shows_the_logical_cpus_its_reader_read_of_it() {
+    // Goal: a held second shows the bars and heatmap the reader read of it, not those of the
+    // View's newest second, though the page draws its machine charts from the View it held.
+    // Method: the page follows a View of 10,001, holds 10,000, then takes its reader's reading
+    // of 10,000 with that second's logical CPUs, and the second its bars and its heatmap name.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+    hold_on(&mut dashboard, &seconds[1]);
+    let mut held = readings(&seconds[..2]);
+    let drawn = super::draw_store_view_logical_cpus_of(&view(1, &[], &seconds[..2])).unwrap();
+    held.cpu_detail = Some(crate::live_source::Presentation::Shared(drawn.bars));
+    held.cpu_history = Some(drawn.heatmap);
+    held.generation = dashboard.generation;
+
+    assert!(dashboard.receive(Update::Ready(held)));
+
+    assert_eq!(
+        shown_logical_cpus(&dashboard),
+        (Some(seconds[1].wall_ns), Some(10_000))
+    );
+}
+
+#[test]
+fn a_second_inspected_on_a_followed_cpu_page_shows_the_logical_cpus_of_that_second() {
+    // Goal: a hover on the second the reader last read shows that second's bars, not those of
+    // the View's newer second the page drew in place of the reading's. Method: the page reads
+    // 9,999 and 10,000, takes a View of 10,001, then a hover on 10,000 shows its reading, and
+    // the second the bars it shows name.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    dashboard.preview = Some(preview_on(&dashboard, &seconds[1]));
+
+    let bars = dashboard
+        .reading_snapshot()
+        .and_then(|snapshot| snapshot.cpu_detail.as_deref())
+        .and_then(|activity| activity.observation["wall_ns"].as_u64());
+    assert_eq!(bars, Some(seconds[1].wall_ns));
+}
+
+#[test]
+fn a_second_inspected_on_a_followed_cpu_page_asks_its_reader_for_none_of_its_logical_cpus() {
+    // Goal: a hover on the second the reader last read reads nothing of it, since the heatmap
+    // drawn from the View holds that second's bars, though the reading's bars name the View's
+    // newer second. Method: the page reads 9,999 and 10,000, takes a View of 10,001, then
+    // whether a hover on 10,000 waits on a read.
+    let seconds = cpu_seconds(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    let preview = preview_on(&dashboard, &seconds[1]);
+
+    assert!(preview.complete);
+}
+
+#[test]
+fn a_second_inspected_on_a_followed_cpu_page_past_a_page_of_logical_cpus_asks_its_reader() {
+    // Goal: a hover on the second the reader last read, on a Mac with more logical CPUs than one
+    // page of the heatmap holds, asks the reader for that second's bars, which neither the
+    // reading, whose bars the View's newer second replaced, nor that page holds. Method: the
+    // page reads 9,999 and 10,000 of a Mac past one page, takes a View of 10,001, then whether a
+    // hover on 10,000 waits on its read.
+    let seconds = cpu_seconds_past_a_page(9_999..=10_001);
+    let mut dashboard = followed_on("cpu", &seconds[..2], readings(&seconds[..2]));
+    dashboard.take_view(Arc::new(view(2, &[], &seconds)));
+
+    let preview = preview_on(&dashboard, &seconds[1]);
+
+    assert!(!preview.complete);
+}
+
+/// The second the bars of the page's reading name and the second its heatmap selects.
+fn shown_logical_cpus(dashboard: &LiveDashboard) -> (Option<u64>, Option<u64>) {
+    let snapshot = dashboard.snapshot.as_deref().unwrap();
+    let bars = snapshot
+        .cpu_detail
+        .as_deref()
+        .and_then(|activity| activity.observation["wall_ns"].as_u64());
+    let heatmap = snapshot.cpu_history.as_deref().and_then(|history| {
+        let (second, _) = history.target(history.selected()?)?;
+        Some(second)
+    });
+
+    (bars, heatmap)
+}
+
+/// A hover's reading of `second`, which the page's reading already holds.
+fn preview_on(dashboard: &LiveDashboard, second: &MachineSecond) -> Preview {
+    let named = |identity| collector::recording::identity_text(collector::ring::Identity(identity));
+    let identity = json!({"run": named(second.run).to_string(),
+        "boot": named(second.boot).to_string(), "publication": second.publication});
+    let target = Target::exact(second.wall_ns / super::NANOSECONDS_PER_SECOND, &identity).unwrap();
+    let accepted = dashboard.snapshot.as_deref().unwrap();
+
+    Preview::resident(accepted, &dashboard.request, target)
+}
+
+/// Holds `second` on `dashboard`, as a click on a chart does.
+fn hold_on(dashboard: &mut LiveDashboard, second: &MachineSecond) {
+    let reading = preview_on(dashboard, second);
+    dashboard.request.second = Some(reading.target.second);
+    dashboard.request.identity = reading.target.identity.clone();
+    dashboard.hold = Some(crate::live_dashboard::hold::Hold {
+        last: reading.target.second,
+        anchor_second: reading.target.second,
+        reading,
+    });
+}
+
 macro_rules! record_of_a_refused_second_cases {
-    ($($name:ident, $route:expr;)*) => {$(
+    ($($name:ident, $route:expr, $over:expr;)*) => {$(
         #[test]
         fn $name() {
             // Goal: the page shows what the store's record of a second holds where the store
             // refused that second's complete reading, even where the worker read the same
             // second, whose point then holds none of the readings. Method: the worker reads
             // 10,000 and a refused 10,001 and writes the point it writes for a refused second,
-            // the View of them rests the reader, then the readings of the shown second against
-            // the record's.
-            assert_shows_the_record_of_a_refused_second($route);
+            // the page follows the View of them, resting its reader where it rests one, then the
+            // readings of the shown second against the record's.
+            assert_shows_the_record_of_a_refused_second($route, $over);
         }
     )*};
 }
@@ -377,22 +772,45 @@ record_of_a_refused_second_cases! {
     // Every row asserts the same readings of the same summary, so the rows differ only in the
     // page that rests over the refused second. Network has no row, since its own test asserts
     // the traffic and that its first two cards are not Unavailable.
-    a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read, "overview";
-    a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read, "memory";
-    a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read, "storage";
-    a_rested_gpu_page_shows_the_record_of_a_refused_second_the_worker_read, "gpu";
+    a_rested_overview_shows_the_record_of_a_refused_second_the_worker_read, "overview",
+        rested_over_a_refused_second;
+    a_rested_memory_page_shows_the_record_of_a_refused_second_the_worker_read, "memory",
+        rested_over_a_refused_second;
+    a_rested_storage_page_shows_the_record_of_a_refused_second_the_worker_read, "storage",
+        rested_over_a_refused_second;
+    a_rested_gpu_page_shows_the_record_of_a_refused_second_the_worker_read, "gpu",
+        rested_over_a_refused_second;
+    // CPU follows the View with its reader reading on, since these seconds hold no logical CPUs,
+    // which its bars and heatmap draw from the View only where they do.
+    a_followed_cpu_page_shows_the_record_of_a_refused_second_the_worker_read, "cpu",
+        followed_over_a_refused_second;
 }
 
-/// Rests `route` over a View whose newest second the store refused a complete reading of and
-/// the worker read, and asserts the page shows what that second's record holds.
-fn assert_shows_the_record_of_a_refused_second(route: &str) {
-    let (dashboard, refused) = rested_over_a_refused_second(route);
+/// Puts `route` over a View whose newest second the store refused a complete reading of and
+/// the worker read, as `over` does, and asserts the page shows what that second's record holds.
+fn assert_shows_the_record_of_a_refused_second(
+    route: &str,
+    over: fn(&str) -> (LiveDashboard, MachineSecond),
+) {
+    let (dashboard, refused) = over(route);
 
     let shown = dashboard.shown_summary();
 
     let memory = refused.memory.unwrap();
     assert_eq!(dashboard.shown_second(), Some(10_001));
     assert_eq!(shown["cpu_percent"].as_f64(), refused.cpu_percent);
+    assert_eq!(
+        shown["cpu_level_percent"][0].as_f64(),
+        refused.cpu_level_percent[0]
+    );
+    assert_eq!(
+        shown["cpu_level_percent"][1].as_f64(),
+        refused.cpu_level_percent[1]
+    );
+    assert_eq!(
+        shown["performance_levels"],
+        json!([{"name": "Super", "logical_cpus": 6}, {"name": "Performance", "logical_cpus": 12}])
+    );
     assert_eq!(
         shown["power_watts"].as_f64(),
         refused.power_watts.map(f64::from)
@@ -503,13 +921,25 @@ fn a_rested_memory_page_shows_the_app_memory_of_a_second_without_a_complete_read
 /// refused a complete reading of, which the worker read and wrote its point of a refused second
 /// for, and that second.
 fn rested_over_a_refused_second(route: &str) -> (LiveDashboard, MachineSecond) {
+    let (mut dashboard, refused) = followed_over_a_refused_second(route);
+
+    dashboard.tick_rest();
+
+    assert!(dashboard.reader_rested());
+    (dashboard, refused)
+}
+
+/// A page on `route` that follows, without resting its reader, a View whose newest second,
+/// 10,001, the store refused a complete reading of, which the worker read and wrote its point of
+/// a refused second for, and that second.
+fn followed_over_a_refused_second(route: &str) -> (LiveDashboard, MachineSecond) {
     let mut refused = reading_at(10_001, 0);
     refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
     let seconds = [with_memory_reading(reading_at(10_000, 0)), refused.clone()];
     let mut reading = readings(&seconds);
     reading.selection.legacy_mut().unwrap()["summary"] = missing_point(&refused);
 
-    (rested_on(route, &seconds, reading), refused)
+    (followed_on(route, &seconds, reading), refused)
 }
 
 /// The point the worker writes for `second` where the store holds no complete reading of it,
@@ -531,14 +961,26 @@ fn missing_point(second: &MachineSecond) -> Value {
 fn rested_on(
     route: &str,
     seconds: &[MachineSecond],
+    reading: Box<crate::live_source::Snapshot>,
+) -> LiveDashboard {
+    let mut dashboard = followed_on(route, seconds, reading);
+    dashboard.tick_rest();
+    assert!(dashboard.reader_rested());
+
+    dashboard
+}
+
+/// A page on `route` that took `reading`, the worker's reading of `seconds`, and then the View
+/// of the same seconds, its reader not yet resting.
+fn followed_on(
+    route: &str,
+    seconds: &[MachineSecond],
     mut reading: Box<crate::live_source::Snapshot>,
 ) -> LiveDashboard {
     let mut dashboard = opening_on(route);
     reading.generation = dashboard.generation;
     assert!(dashboard.receive(Update::Ready(reading)));
     dashboard.take_view(Arc::new(view(1, &[], seconds)));
-    dashboard.tick_rest();
-    assert!(dashboard.reader_rested());
 
     dashboard
 }
@@ -823,6 +1265,33 @@ fn a_rested_gpu_page_reads_its_cards_of_a_refused_second_as_its_record_holds_the
     let readings: Vec<&str> = cards.iter().map(|card| card.1.as_str()).collect();
     assert_ne!(readings[0], "Unavailable", "{cards:?}");
     assert_eq!(readings[2], "Unavailable", "{cards:?}");
+    assert_eq!(readings[3], "Unavailable", "{cards:?}");
+}
+
+#[test]
+fn a_followed_cpu_page_reads_its_cards_of_a_refused_second_as_its_record_holds_them() {
+    // Goal: at a second the store refused a complete reading of, the CPU page's cards of all
+    // cores and of each performance level show the record's, and its card of the load average
+    // reads unavailable, since no reading of that second holds it. Method: the CPU page follows,
+    // its reader reading on, a View whose newest second is a refused second the worker read, then
+    // the page's cards against the cards of a summary holding only the record's CPU activity and
+    // performance levels, in the order the page's card list holds them.
+    let (dashboard, refused) = followed_over_a_refused_second("cpu");
+
+    let cards = texts(&summary::cards_of_summary(
+        "cpu",
+        &dashboard.shown_summary(),
+    ));
+
+    let record = json!({"cpu_percent": refused.cpu_percent,
+        "cpu_level_percent": refused.cpu_level_percent,
+        "performance_levels": [{"name": "Super", "logical_cpus": 6},
+            {"name": "Performance", "logical_cpus": 12}]});
+    assert_eq!(cards, texts(&summary::cards_of_summary("cpu", &record)));
+    let readings: Vec<&str> = cards.iter().map(|card| card.1.as_str()).collect();
+    assert_ne!(readings[0], "Unavailable", "{cards:?}");
+    assert_ne!(readings[1], "Unavailable", "{cards:?}");
+    assert_ne!(readings[2], "Unavailable", "{cards:?}");
     assert_eq!(readings[3], "Unavailable", "{cards:?}");
 }
 
@@ -1783,19 +2252,33 @@ mod when_the_page_has_a_chart_by_app {
 
         #[test]
         fn a_hover_reads_the_chart_drawn_from_the_view() {
-            // Goal: a hover on a page whose reading left its chart by App to the View reads the
-            // chart the View drew, and the worker goes on building none. Method: the CPU page
-            // drawn from a View takes a reading that left the chart to it, then a hover of the
-            // worker's readings begins.
-            let mut dashboard = drawn_from_view("cpu");
+            // Goal: a hover on a page that draws only its chart by App from the View, and whose
+            // reading left that chart to it, reads the chart the View drew, and the worker goes
+            // on building none. Method: the Energy page drawn from a View takes a reading that
+            // left the chart to it, then a hover of the worker's readings begins.
+            let mut dashboard = drawn_from_view("energy");
             dashboard.accept(left_to_the_view(&trends()));
-            let drawn = std::ptr::from_ref(dashboard.attribution_history(Metric::Cpu).unwrap());
+            let drawn = std::ptr::from_ref(dashboard.attribution_history(Metric::Power).unwrap());
 
             dashboard.preview = Some(preview(&dashboard));
 
-            let hovered = dashboard.attribution_history(Metric::Cpu).unwrap();
+            let hovered = dashboard.attribution_history(Metric::Power).unwrap();
             assert!(std::ptr::eq(hovered, drawn));
             assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
+        }
+
+        #[test]
+        fn the_reading_draws_it_while_a_hover_holds_a_machine_page() {
+            // Goal: a hover on a page that draws its machine charts from the View holds the
+            // page still, as it holds the worker's readings, so the hover's reading brings the
+            // chart by App. Method: the CPU page drawn from a View takes a reading that left the
+            // chart to it, then a hover of the worker's readings begins.
+            let mut dashboard = drawn_from_view("cpu");
+            dashboard.accept(left_to_the_view(&trends()));
+
+            dashboard.preview = Some(preview(&dashboard));
+
+            assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
         }
 
         #[gpui::test]
@@ -1839,6 +2322,22 @@ mod when_the_page_has_a_chart_by_app {
 
             assert!(left.store_panels.version.is_some());
             assert!(brought.store_panels.version.is_none());
+        }
+
+        #[test]
+        fn a_window_closed_keeps_none_of_the_logical_cpus_of_the_cpu_page() {
+            // Goal: a closed window keeps the charts its reading left to the View but not the
+            // bars and heatmap of the CPU page, which the window opened again builds of the
+            // store's newest View. Method: the CPU page drawn from a View takes a reading that
+            // left its chart by App to the View, then the window closes.
+            let mut dashboard = drawn_from_view("cpu");
+            dashboard.accept(left_to_the_view(&trends()));
+            assert!(dashboard.store_panels.logical_cpus.is_some());
+
+            let state = dashboard.window_state();
+
+            assert!(state.store_panels.version.is_some());
+            assert!(state.store_panels.logical_cpus.is_none());
         }
 
         /// Holds the View's newest second on `dashboard`, as a click on a chart does.
@@ -3091,20 +3590,20 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn a_followed_cpu_page_drawn_from_the_view_reads_no_app_history(cx: &mut gpui::TestAppContext) {
-    // Goal: while the CPU page draws its chart by App from the store's View, the worker's
+fn a_followed_energy_page_drawn_from_the_view_reads_no_app_history(cx: &mut gpui::TestAppContext) {
+    // Goal: while the Energy page draws its chart by App from the store's View, the worker's
     // reading of each new second builds no App history of it and still ranks the Apps a hover
-    // reads, and the page reads the chart the View drew. Method: the CPU page over a real store
+    // reads, and the page reads the chart the View drew. Method: the Energy page over a real store
     // and reader settles on the View, then the recording publishes a second and the page takes
     // the worker's reading of it.
-    let (recording, page) = followed_page_read_again(cx, "cpu");
+    let (recording, page) = followed_page_read_again(cx, "energy");
 
     cx.update(|cx| {
         let page = page.read(cx);
         let snapshot = page.snapshot.as_ref().unwrap();
         assert!(snapshot.app_attribution_history.is_none());
         assert!(snapshot.app_ranks.is_some());
-        assert!(page.attribution_history(Metric::Cpu).is_some());
+        assert!(page.attribution_history(Metric::Power).is_some());
     });
     drop(recording);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
@@ -3140,6 +3639,43 @@ fn a_followed_memory_page_reads_no_resident_history_past_its_first_reading(
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
+#[gpui::test]
+fn a_followed_cpu_page_over_a_real_store_shows_the_logical_cpus_of_the_views_newest_second(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: over a real store and reader, the CPU page rests its reader and shows the bars of
+    // the View's newest second, which fails where the store names a second one way in its
+    // readings and another in its Apps. Method: a CPU page over a real store and reader settles
+    // on the View, the recording publishes a third second, and the page ticks until it draws
+    // that second from the View, then whether its reader rests and the second its bars name.
+    let (mut recording, page) = followed_page_settled(cx, "cpu");
+
+    recording.publish_resources();
+    tick_until_drawn(cx, &page, recording.last_second());
+
+    cx.update(|cx| {
+        let page = page.read(cx);
+        let newest = page.store_view.as_ref().unwrap().seconds.last().unwrap();
+        let bars = page
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .cpu_detail
+            .as_deref()
+            .map(|activity| {
+                let observation = &activity.observation;
+                (
+                    observation["publication"].as_u64(),
+                    observation["wall_ns"].as_u64(),
+                )
+            });
+        assert!(page.reader_rested());
+        assert_eq!(bars, Some((Some(newest.publication), Some(newest.wall_ns))));
+    });
+    drop(recording);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
 /// Ticks `page` until it draws `second` from the store's View.
 fn tick_until_drawn(
     cx: &mut gpui::TestAppContext,
@@ -3163,16 +3699,16 @@ fn tick_until_drawn(
 }
 
 #[gpui::test]
-fn a_cpu_page_hidden_with_a_reading_on_its_way_keeps_its_chart_by_app(
+fn an_energy_page_hidden_with_a_reading_on_its_way_keeps_its_chart_by_app(
     cx: &mut gpui::TestAppContext,
 ) {
     // Goal: a reading the worker built while the View drew the chart, which the page takes
     // after macOS hid the window and the page let go of the View, shows the chart drawn from
     // the View with its history, and so does the window shown again before the store's next
-    // View. Method: the CPU page over a real store and reader settles on the View, the
+    // View. Method: the Energy page over a real store and reader settles on the View, the
     // recording publishes a second, the worker reads it, macOS hides the window, and the page
     // ticks, then macOS shows the window and the page ticks again.
-    let (mut recording, page) = followed_page_read_again(cx, "cpu");
+    let (mut recording, page) = followed_page_read_again(cx, "energy");
     recording.publish_resources();
     let second = recording.last_second();
     wait_for_worker_reading(cx, &page, second);
@@ -3185,30 +3721,30 @@ fn a_cpu_page_hidden_with_a_reading_on_its_way_keeps_its_chart_by_app(
         let snapshot = page.snapshot.as_ref().unwrap();
         assert_eq!(snapshot.selection["second"].as_u64(), Some(second));
         assert!(page.store_view.is_none());
-        assert!(by_app_holds(&page.panels, Metric::Cpu.panel_id()));
-        assert!(page.attribution_history(Metric::Cpu).is_some());
+        assert!(by_app_holds(&page.panels, Metric::Power.panel_id()));
+        assert!(page.attribution_history(Metric::Power).is_some());
     });
     page.update(cx, |page, cx| page.observe_visibility_callback(true, cx));
     page.update(cx, LiveDashboard::tick);
     cx.update(|cx| {
         let page = page.read(cx);
-        assert!(by_app_holds(&page.panels, Metric::Cpu.panel_id()));
-        assert!(page.attribution_history(Metric::Cpu).is_some());
+        assert!(by_app_holds(&page.panels, Metric::Power.panel_id()));
+        assert!(page.attribution_history(Metric::Power).is_some());
     });
     drop(recording);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
 #[gpui::test]
-fn a_second_inspected_on_a_cpu_page_drawn_from_the_view_reads_its_chart_until_the_reply(
+fn a_second_inspected_on_an_energy_page_drawn_from_the_view_reads_its_chart_until_the_reply(
     cx: &mut gpui::TestAppContext,
 ) {
     // Goal: a second chosen without a hold, as an arrow step past the readings or the
     // automation's inspect chooses one, keeps the chart's readouts on the history the View
-    // drew until the reading of that second replaces them. Method: the CPU page over a real
+    // drew until the reading of that second replaces them. Method: the Energy page over a real
     // store and reader settles on the View and the worker's reading, then inspects the second
     // before the newest.
-    let (recording, page) = followed_page_read_again(cx, "cpu");
+    let (recording, page) = followed_page_read_again(cx, "energy");
     let second = recording.last_second() - 1;
 
     page.update(cx, |page, cx| page.inspect(second, cx));
@@ -3217,7 +3753,7 @@ fn a_second_inspected_on_a_cpu_page_drawn_from_the_view_reads_its_chart_until_th
         let page = page.read(cx);
         assert_eq!(page.request.second, Some(second));
         assert!(page.awaiting_reply());
-        assert!(page.attribution_history(Metric::Cpu).is_some());
+        assert!(page.attribution_history(Metric::Power).is_some());
     });
     drop(recording);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
@@ -3651,7 +4187,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // Method: hold the worker at the start of a step, publish a second, wake the page as the
         // store does, let the worker read the second, wake the page as the worker does, and count
         // the page's draws.
-        let mut followed = Followed::open(cx, "cpu");
+        let mut followed = Followed::open(cx, "energy");
         followed.wait_for_a_keyed_question();
         let drawn = followed.renders();
         followed.publish_with_the_worker_held();
@@ -3688,7 +4224,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // after it finds nothing new. Method: hold the worker, publish a second, let the worker
         // read it, wake the page as the worker does and then as the store does, and count the
         // page's draws.
-        let mut followed = Followed::open(cx, "cpu");
+        let mut followed = Followed::open(cx, "energy");
         followed.wait_for_a_keyed_question();
         let drawn = followed.renders();
         followed.publish_with_the_worker_held();
@@ -3707,7 +4243,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
         // Method: hold the worker so that its reading does not come, publish a second, wake the
         // page as the store does, which leaves the View to the reading, and tick it as its timer
         // does, and count the page's draws.
-        let mut followed = Followed::open(cx, "cpu");
+        let mut followed = Followed::open(cx, "energy");
         followed.wait_for_a_keyed_question();
         let earlier = followed.view_publication();
         let drawn = followed.renders();
@@ -3789,7 +4325,7 @@ mod when_the_store_or_the_worker_wakes_the_page {
             // from the earlier View for the reading and again from the new one. Method: hold the
             // worker, publish a second, wake the page as the store does, let the worker read the
             // second, wake the page as the worker does, and count the page's builds.
-            let mut followed = Followed::open(cx, "cpu");
+            let mut followed = Followed::open(cx, "energy");
             followed.wait_for_a_keyed_question();
             let built = followed.builds();
             followed.publish_with_the_worker_held();

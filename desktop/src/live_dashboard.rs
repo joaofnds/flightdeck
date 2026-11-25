@@ -924,6 +924,10 @@ impl LiveDashboard {
         if self.followed_store_view().is_none() {
             return;
         }
+        // The CPU page's reader reads its cores where the View could not build them.
+        if !self.store_view_draws_whole_page() {
+            return;
+        }
 
         match self.worker.hand_over() {
             Ok(Some(resting)) => {
@@ -1288,6 +1292,7 @@ impl LiveDashboard {
         self.settings.open = false;
         if self.request.route != route {
             self.sections.reset();
+            self.switch_route_store_view();
             // The points of the page's charts are most of its reading, and the charts it keeps
             // already draw them. The page's next reading brings them again, so a reading that
             // left them to the View waits for that reading too once its page is left.
