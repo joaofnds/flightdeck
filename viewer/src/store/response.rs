@@ -111,12 +111,18 @@ impl QueryContext {
             .iter()
             .filter(|second| response_in_range(second, range))
             .count();
-        let display_bytes = self
+        // A second `ranked` holds keeps the bytes it took, since they follow from its block.
+        let seconds_display_bytes: Vec<usize> = self
             .seconds()
             .iter()
-            .map(response_rank_display_bytes)
-            .max()
-            .unwrap_or(0);
+            .map(|second| {
+                let key = ObservationKey::of(&second.observation);
+                ranked
+                    .display_bytes(&key, second.block())
+                    .unwrap_or_else(|| response_rank_display_bytes(second))
+            })
+            .collect();
+        let display_bytes = seconds_display_bytes.iter().copied().max().unwrap_or(0);
         let mut reservation = self.reserve_response(
             size_of::<ContextRanks<WindowRanks>>()
                 + 2 * size_of::<usize>()
@@ -138,7 +144,7 @@ impl QueryContext {
             ranks: window,
             reservation,
         });
-        *ranked = app_ranks_ranked(self.seconds(), &window);
+        *ranked = app_ranks_ranked(self.seconds(), &seconds_display_bytes, &window);
 
         Ok(window)
     }
@@ -329,17 +335,20 @@ fn app_ranks_window(
     Ok(window)
 }
 
-/// The window `window`, with the block of each second of `seconds` it holds ranks of.
+/// The window `window`, with the block of each second of `seconds` it holds ranks of and the
+/// bytes the names of those ranks take at most, `display_bytes` in the order of `seconds`.
 fn app_ranks_ranked(
     seconds: &[QuerySecond],
+    display_bytes: &[usize],
     window: &Arc<ContextRanks<WindowRanks>>,
 ) -> RankedSeconds {
     let mut ranked = RankedSeconds::of(window);
     assert!(seconds.len() <= super::SECONDS_MAX);
-    for second in seconds {
+    assert_eq!(display_bytes.len(), seconds.len());
+    for (second, display_bytes) in seconds.iter().zip(display_bytes) {
         let key = ObservationKey::of(&second.observation);
         if window.shared(&key).is_some() {
-            ranked.place(key, second.block());
+            ranked.place(key, second.block(), *display_bytes);
         }
     }
     assert_eq!(ranked.second_count(), window.held_values());

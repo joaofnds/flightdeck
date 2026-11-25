@@ -9,7 +9,7 @@ use crate::live::identity_fixture::Fixture;
 use crate::store::apps::TickApps;
 use crate::store::block::BLOCK_WALL_NS;
 use crate::store::ring::Ring;
-use crate::store::{ByteBudget, Held, Missing, QueryContext};
+use crate::store::{ByteBudget, Held, Missing, QueryContext, QuerySecond};
 
 const NS: u64 = 1_000_000_000;
 /// A wall second of the half minute before the one `NEWER_BLOCK_SECOND` opens, so the store
@@ -74,13 +74,16 @@ impl Followed {
 
 /// The key of the observation `context` holds at the wall second `second`.
 fn key_at(context: &QueryContext, second: u64) -> ObservationKey {
-    let held = context
+    key(&held_at(context, second).observation)
+}
+
+/// The second `context` holds at the wall second `second`.
+fn held_at(context: &QueryContext, second: u64) -> &QuerySecond {
+    context
         .seconds()
         .iter()
         .find(|held| held.observation.wall_ns.map(|wall_ns| wall_ns / NS) == Some(second))
-        .unwrap();
-
-    key(&held.observation)
+        .unwrap()
 }
 
 #[test]
@@ -177,6 +180,72 @@ fn a_second_whose_block_the_store_replaced_is_ranked_again() {
         second.get(&joined).unwrap()
     ));
     assert_eq!(first.get(&joined), second.get(&joined));
+}
+
+#[test]
+fn a_second_keeps_the_bytes_of_its_names_only_while_its_block_holds_its_apps() {
+    // Goal: the bytes the names of a second's ranks take, which a reading reserves, are taken
+    // from the reading before only for a second still in the block it was ranked in, since only
+    // that block is known to hold the Apps it held. Method: rank a store of two blocks, take in
+    // a second that joins the newer one, and ask what the reader keeps of each second for the
+    // block the store holds it in now and for the other block.
+    let mut store = Followed::new();
+    store.publish(OLDER_BLOCK_SECOND);
+    store.publish(NEWER_BLOCK_SECOND);
+    let mut ranked = RankedSeconds::default();
+    let first = store.context();
+    drop(first.app_ranks(&mut ranked).unwrap());
+    store.publish(NEWER_BLOCK_SECOND + 1);
+    let context = store.context();
+
+    let older = held_at(&context, OLDER_BLOCK_SECOND);
+    let joined = held_at(&context, NEWER_BLOCK_SECOND);
+    let joined_before = held_at(&first, NEWER_BLOCK_SECOND);
+    assert!(!Arc::ptr_eq(joined.block(), joined_before.block()));
+
+    assert_eq!(
+        ranked.display_bytes(&key(&older.observation), older.block()),
+        Some(super::response_rank_display_bytes(older))
+    );
+    assert_eq!(
+        ranked.display_bytes(&key(&older.observation), joined.block()),
+        None
+    );
+    assert_eq!(
+        ranked.display_bytes(&key(&joined.observation), joined.block()),
+        None
+    );
+    assert_eq!(
+        ranked.display_bytes(&key(&joined.observation), joined_before.block()),
+        Some(super::response_rank_display_bytes(joined_before))
+    );
+}
+
+#[test]
+fn a_reading_reserves_for_the_names_by_the_bytes_the_reading_before_kept() {
+    // Goal: a reading takes the bytes of a second's names from the reading before rather than
+    // walking the names again. Method: rank a store, note larger bytes than any second's names
+    // take for one second still in its block, read the same context again, and compare its
+    // reservation with a reading from nothing.
+    let mut store = Followed::new();
+    store.publish(OLDER_BLOCK_SECOND);
+    store.publish(NEWER_BLOCK_SECOND);
+    let context = store.context();
+    let mut ranked = RankedSeconds::default();
+    drop(context.app_ranks(&mut ranked).unwrap());
+    let walked = context
+        .seconds()
+        .iter()
+        .map(super::response_rank_display_bytes)
+        .max()
+        .unwrap();
+    let older = held_at(&context, OLDER_BLOCK_SECOND);
+    ranked.place(key(&older.observation), older.block(), walked + 1000);
+    let expected = context.app_ranks(&mut RankedSeconds::default()).unwrap();
+
+    let shown = context.app_ranks(&mut ranked).unwrap();
+
+    assert_eq!(shown.bytes(), expected.bytes() + 1000);
 }
 
 #[test]
