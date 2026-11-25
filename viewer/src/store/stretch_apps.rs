@@ -108,9 +108,7 @@ impl StretchApps {
     pub(super) fn close(&mut self, seconds: u32) {
         let seconds = u64::from(seconds);
         for row in &mut self.rows {
-            assert!(seconds > 0);
-            // The division floors.
-            row.resident_bytes = row.resident.known / seconds;
+            row.close(seconds);
         }
         self.totals = Totals::of_rows(&self.rows);
         self.closing_number = CLOSING_NUMBER_NEXT.fetch_add(1, Ordering::Relaxed);

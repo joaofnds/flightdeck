@@ -23,6 +23,10 @@ use persistence::retention::Retained;
 mod stretch_apps;
 use stretch_apps::StretchApps;
 
+#[cfg(test)]
+#[path = "stretch_row_tests.rs"]
+mod row_tests;
+
 /// The Apps a stretch holds at most, as many as a second holds, past which it holds none and
 /// says so.
 const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
@@ -31,8 +35,15 @@ const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
 /// stretch adds them up.
 const RATES: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
 
+/// Where resident memory stands among the amounts a row adds up, after `RATES`.
+const RESIDENT_PLACE: usize = RATES.len();
+
+/// How many amounts a row adds up: what the App used of each of `RATES`, then its resident
+/// memory.
+const AMOUNT_COUNT: usize = RATES.len() + 1;
+
 const _: () = {
-    assert!(size_of::<StretchRow>() <= 184);
+    assert!(size_of::<StretchRow>() <= 88);
 };
 
 /// Where `metric`, a rate a stretch adds up, stands among `RATES`.
@@ -241,17 +252,46 @@ pub(super) struct StretchRow {
     name: Arc<RankedApp>,
     /// Whether the App rule found every member of the App at each second that holds it.
     membership_complete: bool,
-    /// What the App used of each of `RATES`, in their order.
-    rates: [Amount; RATES.len()],
-    /// The App's resident memory added up over the seconds that hold it.
-    resident: Amount,
+    /// What the App used of each of `RATES`, and its resident memory, added up over the seconds
+    /// that hold it.
+    amounts: Amounts,
     /// The App's resident memory over the stretch's seconds that hold their Apps, once the
     /// stretch is closed, as a second without the App counts it as none.
     resident_bytes: u64,
 }
 
+/// What a row adds up of each of `RATES` and of resident memory, in that order, kept once where
+/// they repeat one another, as they do for nearly every App, and whole where they do not.
+#[derive(Clone, Debug)]
+enum Amounts {
+    Alike(AlikeAmounts),
+    Apart(Box<[Amount; AMOUNT_COUNT]>),
+}
+
+/// The amounts of an App whose members measured each of `RATES` and its resident memory at the
+/// same seconds, the rates over the same intervals, every member measuring each and none
+/// overflowing, but for a GPU that measured nothing.
+#[derive(Clone, Copy, Debug)]
+struct AlikeAmounts {
+    /// What the App used of each of `RATES`, and its resident memory, in that order.
+    known: [u64; AMOUNT_COUNT],
+    measured_ns: u64,
+    measured_seconds: u32,
+    measured_members: u32,
+    gpu: GpuMeasurement,
+}
+
+/// How the GPU measured the App's members beside the other rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GpuMeasurement {
+    /// The GPU measured the App as the other rates did, as on a Mac whose GPU measures its Apps.
+    AsTheOtherRates,
+    /// The GPU measured none of the members that measured the other rates.
+    OfNoMember,
+}
+
 /// What an App used of one resource, added up over some seconds.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Amount {
     /// What the App used over the seconds that measured it, added up.
     known: u64,
@@ -485,8 +525,7 @@ impl StretchRow {
         Self {
             name,
             membership_complete: true,
-            rates: [Amount::default(); RATES.len()],
-            resident: Amount::default(),
+            amounts: Amounts::default(),
             resident_bytes: 0,
         }
     }
@@ -496,14 +535,16 @@ impl StretchRow {
     fn add(&mut self, app: &AppRow, elapsed_ns: Option<u64>) {
         assert_eq!(key_of(&self.name), key_of(&app.name));
 
-        for (amount, metric) in self.rates.iter_mut().zip(RATES) {
+        let mut amounts = self.amounts.unpacked();
+        for (amount, metric) in amounts.iter_mut().zip(RATES) {
             let measure = app.measure(metric);
             match elapsed_ns {
                 Some(elapsed_ns) => amount.add_rate(&measure, elapsed_ns),
                 None => amount.add_members(&measure),
             }
         }
-        self.resident.add(&app.measure(Metric::Resident));
+        amounts[RESIDENT_PLACE].add(&app.measure(Metric::Resident));
+        self.amounts.keep(amounts);
         self.membership_complete &= app.membership_complete;
     }
 
@@ -512,7 +553,7 @@ impl StretchRow {
     /// overflowed counts none of the stretch, where its seconds one by one would count those that
     /// did not.
     pub(super) fn rate_measured(&self, metric: Metric) -> Option<(u64, u64)> {
-        let rate = &self.rates[rate_place(metric)];
+        let rate = self.amounts.amount(rate_place(metric));
         let known = rate.measured()?;
         assert!(rate.measured_ns > 0);
         Some((known, rate.measured_ns))
@@ -521,20 +562,132 @@ impl StretchRow {
     /// The App's resident memory added up over the stretch's seconds that measured it, and how
     /// many they are.
     pub(super) fn resident_measured(&self) -> Option<(u64, u32)> {
-        let known = self.resident.measured()?;
+        let resident = self.amounts.amount(RESIDENT_PLACE);
+        let known = resident.measured()?;
 
-        Some((known, self.resident.measured_seconds))
+        Some((known, resident.measured_seconds))
     }
 
     /// Adds `other`, the same App's readings over seconds of the stretch it does not hold.
     fn add_row(&mut self, other: &Self) {
         assert_eq!(key_of(&self.name), key_of(&other.name));
 
-        for (amount, other) in self.rates.iter_mut().zip(&other.rates) {
+        let mut amounts = self.amounts.unpacked();
+        for (amount, other) in amounts.iter_mut().zip(&other.amounts.unpacked()) {
             amount.add_amount(other);
         }
-        self.resident.add_amount(&other.resident);
+        self.amounts.keep(amounts);
         self.membership_complete &= other.membership_complete;
+    }
+
+    /// Finds the App's resident memory over the stretch's `seconds` that hold their Apps, once
+    /// the store adds no more seconds to the stretch.
+    fn close(&mut self, seconds: u64) {
+        assert!(seconds > 0);
+        // The division floors.
+        self.resident_bytes = self.amounts.amount(RESIDENT_PLACE).known / seconds;
+    }
+}
+
+impl Default for Amounts {
+    /// Nothing of any resource, over no seconds.
+    fn default() -> Self {
+        Self::Alike(AlikeAmounts {
+            known: [0; AMOUNT_COUNT],
+            measured_ns: 0,
+            measured_seconds: 0,
+            measured_members: 0,
+            gpu: GpuMeasurement::OfNoMember,
+        })
+    }
+}
+
+impl Amounts {
+    /// What the App used of the resource at `place`, without building the other amounts.
+    fn amount(&self, place: usize) -> Amount {
+        match self {
+            Self::Alike(alike) => alike.amount(place),
+            Self::Apart(amounts) => amounts[place],
+        }
+    }
+
+    /// What the App used of each of `RATES`, then its resident memory.
+    fn unpacked(&self) -> [Amount; AMOUNT_COUNT] {
+        match self {
+            Self::Alike(alike) => alike.unpacked(),
+            Self::Apart(amounts) => **amounts,
+        }
+    }
+
+    /// Keeps `amounts`, what the App used of each of `RATES` and then its resident memory, once
+    /// where they repeat one another, and whole in the box already held, or a new one, where
+    /// they do not.
+    fn keep(&mut self, amounts: [Amount; AMOUNT_COUNT]) {
+        if let Some(alike) = AlikeAmounts::of(&amounts) {
+            *self = Self::Alike(alike);
+            return;
+        }
+
+        match self {
+            Self::Apart(apart) => **apart = amounts,
+            Self::Alike(_) => *self = Self::Apart(Box::new(amounts)),
+        }
+    }
+}
+
+impl AlikeAmounts {
+    /// `amounts` kept once, where they repeat one another as the type's doc says.
+    fn of(amounts: &[Amount; AMOUNT_COUNT]) -> Option<Self> {
+        let cpu = &amounts[rate_place(Metric::Cpu)];
+        let gpu = if amounts[rate_place(Metric::Gpu)].measured_seconds == 0 {
+            GpuMeasurement::OfNoMember
+        } else {
+            GpuMeasurement::AsTheOtherRates
+        };
+        let alike = Self {
+            known: amounts.map(|amount| amount.known),
+            measured_ns: cpu.measured_ns,
+            measured_seconds: cpu.measured_seconds,
+            measured_members: cpu.measured_members,
+            gpu,
+        };
+
+        // Keeps nothing a reader would read otherwise than from `amounts`.
+        (alike.unpacked() == *amounts).then_some(alike)
+    }
+
+    fn unpacked(&self) -> [Amount; AMOUNT_COUNT] {
+        std::array::from_fn(|place| self.amount(place))
+    }
+
+    /// The amount at `place` among the row's amounts.
+    fn amount(&self, place: usize) -> Amount {
+        let alike = Amount {
+            known: self.known[place],
+            measured_ns: self.measured_ns,
+            measured_seconds: self.measured_seconds,
+            measured_members: self.measured_members,
+            unavailable_members: 0,
+            overflowed: false,
+        };
+        if place == RESIDENT_PLACE {
+            // Resident memory is no rate, so it is measured over no interval.
+            return Amount {
+                measured_ns: 0,
+                ..alike
+            };
+        }
+        if place == rate_place(Metric::Gpu) && self.gpu == GpuMeasurement::OfNoMember {
+            return Amount {
+                measured_ns: 0,
+                measured_seconds: 0,
+                measured_members: 0,
+                unavailable_members: self.measured_members,
+                ..alike
+            };
+        }
+
+        alike
     }
 }
 
@@ -669,9 +822,12 @@ impl Rankable for StretchRow {
     /// stretch's seconds.
     fn measure(&self, metric: Metric) -> Measure {
         if metric == Metric::Resident {
-            return self.resident.measure(self.resident_bytes);
+            return self
+                .amounts
+                .amount(RESIDENT_PLACE)
+                .measure(self.resident_bytes);
         }
-        let rate = &self.rates[rate_place(metric)];
+        let rate = self.amounts.amount(rate_place(metric));
         rate.measure(rate.known)
     }
 

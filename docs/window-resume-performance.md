@@ -305,14 +305,16 @@ runs of each in turn. In three runs of each, two loaders read 352 ms and 91 MB, 
 
 The Store reserves the stretches when it starts: 375 buffers of 2,048 rows, whatever the hour
 holds, which a page holds in RAM only once a stretch writes to it. A row took 152 bytes when
-this was measured, 116.7 MB (111.3 MiB) in all. Since each row adds up GPU time too it takes
-184 bytes, so the reservation is 141.3 MB (134.8 MiB), which this pair did not measure.
+this was measured, 116.7 MB (111.3 MiB) in all. A row adds up GPU time too and keeps once what
+its amounts repeat of one another, so it takes 88 bytes and the reservation is 67.6 MB
+(64.5 MiB), which this pair did not measure. A row whose amounts do not repeat keeps them in
+160 bytes outside the reservation, which 3.2% of the rows of this Mac's stretches did.
 `vmmap -summary` of one process of each, once it held every App, counted
 327.7 MiB allocated in malloc zones for this revision against 198.0 MiB for the base. Of the
 difference, 43 MiB more sat in malloc regions holding live data and 59 MiB more in freed
 regions that stay dirty, and an earlier pair put the freed difference at 88 MiB. The live
 difference is above the 19 MB the stretches were estimated at when they were chosen. The
-reservation is above the 135 MB that holding every App at every second of the hour would take
+reservation is half the 135 MB that holding every App at every second of the hour would take
 at 461 Apps a second, and the stretches fill it only if each holds 2,048 Apps.
 
 ## Profiling and reproduction

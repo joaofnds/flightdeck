@@ -12,7 +12,7 @@ use super::{
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{App, Key, KeyKind, Measure, Rankable, RankedApp};
+use crate::live_app_response::{App, Key, KeyKind, Measure, Metric, Rankable, RankedApp};
 use collector::ring::{Identity, RunIdentity};
 
 const RUN: RunIdentity = RunIdentity {
@@ -1615,7 +1615,7 @@ fn chosen_over(leaders: &mut Leaders, readings: &Readings<'_>, window: WallSecon
 
 /// What one App used over one second, with no energy, GPU time or disk bytes measured where it
 /// names none.
-struct Used<'key> {
+pub(super) struct Used<'key> {
     key: &'key [u8],
     cpu_ns: u64,
     energy_nj: Option<u64>,
@@ -1704,10 +1704,16 @@ fn second_at(wall_second: u64) -> MachineSecond {
 
 /// The Apps at `wall_second`, as `used` names them, in key order.
 fn second_with(wall_second: u64, used: &[Used<'_>]) -> AppsSecond {
+    let apps: Vec<_> = used.iter().map(app).collect();
+    second_of_apps(wall_second, &apps)
+}
+
+/// The Apps `apps` at `wall_second`, in key order, measured over one second.
+fn second_of_apps(wall_second: u64, apps: &[App]) -> AppsSecond {
     let budget = Arc::new(super::ByteBudget::new(1024 * 1024 * 1024));
     let mut rows = AppRows::default();
-    rows.replace_admitted(used.len(), &budget).unwrap();
-    let mut apps = AppsSecond {
+    rows.replace_admitted(apps.len(), &budget).unwrap();
+    let mut second = AppsSecond {
         apps: rows,
         observation: Some(super::take_observation(&RUN, &second_at(wall_second))),
         missing: None,
@@ -1715,12 +1721,13 @@ fn second_with(wall_second: u64, used: &[Used<'_>]) -> AppsSecond {
         membership_complete: true,
         ..AppsSecond::default()
     };
-    for used in used {
-        apps.apps.push(AppRow::new(&app(used), name(used.key)));
+    for app in apps {
+        let key = app.key.bytes.clone();
+        second.apps.push(AppRow::new(app, name(&key)));
     }
-    apps.totals = super::Totals::of(&apps.apps);
+    second.totals = super::Totals::of(&second.apps);
 
-    apps
+    second
 }
 
 /// The App `used` names, one member that measured the CPU time, resident memory, energy, GPU time
@@ -1983,4 +1990,434 @@ fn a_closed_stretch_weighs_each_rate_by_its_interval() {
         Some(12 * i128::from(NANOSECONDS_PER_SECOND))
     );
     assert!((read.mean().unwrap() - 30.0).abs() < 0.01);
+}
+
+#[test]
+fn a_row_of_an_app_at_every_second_answers_what_they_add_up_to() {
+    // Goal: an App's row of a stretch answers each reader what the App used over the stretch's
+    // seconds. Method: A uses CPU, energy, disk and memory at each of ten seconds and no GPU,
+    // and every reader of its row is read.
+    let stretch = stretch_of_one_app(&regular(b"/A.app"));
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                measured(10_000),
+                measured(20_000),
+                measured(30_000),
+                GPU_UNMEASURED,
+                measured(4_096),
+            ],
+            rates_measured: [
+                Some((10_000, TEN_SECONDS_NS)),
+                Some((20_000, TEN_SECONDS_NS)),
+                Some((30_000, TEN_SECONDS_NS)),
+                None,
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_of_an_app_that_left_within_the_stretch_answers_what_its_own_seconds_add_up_to() {
+    // Goal: an App held at only some of a stretch's seconds answers what it used at those, and
+    // its memory over all of them. Method: A is held at each of ten seconds and B at the first
+    // five, and every reader of B's row is read.
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| {
+            let a = app(&regular(b"/A.app"));
+            if wall_second < 1_005 {
+                apps_at(wall_second, &[a, app(&regular(b"/B.app"))])
+            } else {
+                apps_at(wall_second, &[a])
+            }
+        })
+        .collect();
+
+    let stretch = AppsStretch::of_seconds(100, &seconds);
+
+    assert_eq!(
+        answers_of(&stretch, b"/B.app"),
+        RowAnswers {
+            measures: [
+                measured(5_000),
+                measured(10_000),
+                measured(15_000),
+                GPU_UNMEASURED,
+                measured(2_048),
+            ],
+            rates_measured: [
+                Some((5_000, 5 * NANOSECONDS_PER_SECOND)),
+                Some((10_000, 5 * NANOSECONDS_PER_SECOND)),
+                Some((15_000, 5 * NANOSECONDS_PER_SECOND)),
+                None,
+            ],
+            resident_measured: Some((20_480, 5)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_with_members_that_did_not_measure_a_rate_answers_how_many() {
+    // Goal: a row keeps the members of its App that did not measure a resource. Method: A's
+    // CPU time counts two members that did not measure it at each of ten seconds, and every
+    // reader of its row is read.
+    let cpu_ns = Measure {
+        unavailable_members: 2,
+        ..measured(1_000)
+    };
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| {
+            let a = App {
+                cpu_ns,
+                ..app(&regular(b"/A.app"))
+            };
+            apps_at(wall_second, &[a])
+        })
+        .collect();
+
+    let stretch = AppsStretch::of_seconds(100, &seconds);
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                Measure {
+                    unavailable_members: 2,
+                    ..measured(10_000)
+                },
+                measured(20_000),
+                measured(30_000),
+                GPU_UNMEASURED,
+                measured(4_096),
+            ],
+            rates_measured: [
+                Some((10_000, TEN_SECONDS_NS)),
+                Some((20_000, TEN_SECONDS_NS)),
+                Some((30_000, TEN_SECONDS_NS)),
+                None,
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_whose_measure_overflowed_answers_no_rate_of_it() {
+    // Goal: a resource whose measure overflowed at one second gives the App no rate of it over
+    // the stretch. Method: A's CPU time overflows at the fourth of ten seconds, and every reader
+    // of its row is read.
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| {
+            let mut a = app(&regular(b"/A.app"));
+            if wall_second == 1_003 {
+                a.cpu_ns.overflowed = true;
+            }
+            apps_at(wall_second, &[a])
+        })
+        .collect();
+
+    let stretch = AppsStretch::of_seconds(100, &seconds);
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                Measure {
+                    overflowed: true,
+                    ..measured(9_000)
+                },
+                measured(20_000),
+                measured(30_000),
+                GPU_UNMEASURED,
+                measured(4_096),
+            ],
+            rates_measured: [
+                None,
+                Some((20_000, TEN_SECONDS_NS)),
+                Some((30_000, TEN_SECONDS_NS)),
+                None,
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_whose_gpu_measured_answers_its_gpu_time() {
+    // Goal: on a Mac whose GPU measures its Apps, a row answers the App's GPU time as it does
+    // its other rates. Method: A uses the GPU too at each of ten seconds, and every reader of
+    // its row is read.
+    let stretch = stretch_of_one_app(&regular_on_the_gpu(b"/A.app"));
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                measured(10_000),
+                measured(20_000),
+                measured(30_000),
+                measured(40_000),
+                measured(4_096),
+            ],
+            rates_measured: [
+                Some((10_000, TEN_SECONDS_NS)),
+                Some((20_000, TEN_SECONDS_NS)),
+                Some((30_000, TEN_SECONDS_NS)),
+                Some((40_000, TEN_SECONDS_NS)),
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_with_a_second_measured_over_no_interval_answers_the_rates_of_the_others() {
+    // Goal: a second that measured its Apps over no interval, as a run's first does, adds the
+    // App's memory but none of its rates. Method: the first of A's ten seconds measured over no
+    // interval, and every reader of its row is read.
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| {
+            let mut second = apps_at(wall_second, &[app(&regular(b"/A.app"))]);
+            if wall_second == 1_000 {
+                Arc::get_mut(&mut second).unwrap().elapsed_ns = None;
+            }
+            second
+        })
+        .collect();
+
+    let stretch = AppsStretch::of_seconds(100, &seconds);
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                measured(9_000),
+                measured(18_000),
+                measured(27_000),
+                GPU_UNMEASURED,
+                measured(4_096),
+            ],
+            rates_measured: [
+                Some((9_000, 9 * NANOSECONDS_PER_SECOND)),
+                Some((18_000, 9 * NANOSECONDS_PER_SECOND)),
+                Some((27_000, 9 * NANOSECONDS_PER_SECOND)),
+                None,
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: true,
+        }
+    );
+}
+
+#[test]
+fn a_row_added_up_from_two_stretches_answers_what_both_add_up_to() {
+    // Goal: a row a load adds to the row of the same stretch the store took in answers what the
+    // App used over both. Method: the store takes in the first five of ten seconds, A using a
+    // microsecond of CPU at each, and adds a load's stretch of the other five, A using two at
+    // each, and B only there, then closes it and reads every reader of A's and B's rows.
+    let stretches = stretches_with_a_load_added();
+
+    let stretch = stretches.held().next().unwrap();
+    let answers = [
+        answers_of(stretch, b"/A.app"),
+        answers_of(stretch, b"/B.app"),
+    ];
+    let five_seconds_ns = 5 * NANOSECONDS_PER_SECOND;
+    assert_eq!(
+        answers,
+        [
+            RowAnswers {
+                measures: [
+                    measured(15_000),
+                    measured(20_000),
+                    measured(30_000),
+                    GPU_UNMEASURED,
+                    measured(4_096),
+                ],
+                rates_measured: [
+                    Some((15_000, TEN_SECONDS_NS)),
+                    Some((20_000, TEN_SECONDS_NS)),
+                    Some((30_000, TEN_SECONDS_NS)),
+                    None,
+                ],
+                resident_measured: Some((40_960, 10)),
+                membership_complete: true,
+            },
+            RowAnswers {
+                measures: [
+                    measured(5_000),
+                    measured(10_000),
+                    measured(15_000),
+                    GPU_UNMEASURED,
+                    measured(2_048),
+                ],
+                rates_measured: [
+                    Some((5_000, five_seconds_ns)),
+                    Some((10_000, five_seconds_ns)),
+                    Some((15_000, five_seconds_ns)),
+                    None,
+                ],
+                resident_measured: Some((20_480, 5)),
+                membership_complete: true,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_row_of_an_app_not_found_whole_at_a_second_answers_so() {
+    // Goal: a row keeps that the App rule missed a member of the App at one of its seconds.
+    // Method: A's membership is incomplete at the fourth of ten seconds, and every reader of its
+    // row is read.
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| {
+            let mut a = app(&regular(b"/A.app"));
+            a.membership_complete = wall_second != 1_003;
+            apps_at(wall_second, &[a])
+        })
+        .collect();
+
+    let stretch = AppsStretch::of_seconds(100, &seconds);
+
+    assert_eq!(
+        answers_of(&stretch, b"/A.app"),
+        RowAnswers {
+            measures: [
+                measured(10_000),
+                measured(20_000),
+                measured(30_000),
+                GPU_UNMEASURED,
+                measured(4_096),
+            ],
+            rates_measured: [
+                Some((10_000, TEN_SECONDS_NS)),
+                Some((20_000, TEN_SECONDS_NS)),
+                Some((30_000, TEN_SECONDS_NS)),
+                None,
+            ],
+            resident_measured: Some((40_960, 10)),
+            membership_complete: false,
+        }
+    );
+}
+
+const TEN_SECONDS_NS: u64 = 10 * NANOSECONDS_PER_SECOND;
+
+/// What one member that did not measure the GPU adds up to over any seconds.
+const GPU_UNMEASURED: Measure = Measure {
+    known: 0,
+    measured_members: 0,
+    unavailable_members: 1,
+    overflowed: false,
+};
+
+/// What every reader of an App's row of a stretch answers: its measure of CPU time, energy,
+/// disk bytes, GPU time and resident memory, its rates as the chart's leaders take them, its
+/// resident memory as they take it, and whether the App rule found it whole.
+#[derive(Debug, PartialEq)]
+struct RowAnswers {
+    measures: [Measure; 5],
+    rates_measured: [Option<(u64, u64)>; 4],
+    resident_measured: Option<(u64, u32)>,
+    membership_complete: bool,
+}
+
+/// What every reader answers of the row of the App `key` names in `stretch`.
+fn answers_of(stretch: &AppsStretch, key: &[u8]) -> RowAnswers {
+    let rows = stretch.apps().unwrap();
+    let row = super::attribution::found_in(rows, &name(key)).unwrap();
+    let rates = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
+
+    RowAnswers {
+        measures: [
+            Metric::Cpu,
+            Metric::Power,
+            Metric::Disk,
+            Metric::Gpu,
+            Metric::Resident,
+        ]
+        .map(|metric| row.measure(metric)),
+        rates_measured: rates.map(|metric| row.rate_measured(metric)),
+        resident_measured: row.resident_measured(),
+        membership_complete: super::attribution::PointRow::membership_complete(row),
+    }
+}
+
+/// What one member that measured `known` adds up to.
+fn measured(known: u64) -> Measure {
+    Measure {
+        known,
+        measured_members: 1,
+        unavailable_members: 0,
+        overflowed: false,
+    }
+}
+
+/// One second's use of the App `key` names: a microsecond of CPU time, two of energy, three
+/// kilobytes of disk and four kibibytes of memory, and no GPU time.
+pub(super) fn regular(key: &[u8]) -> Used<'_> {
+    Used {
+        energy_nj: Some(2_000),
+        disk_io_bytes: Some(3_000),
+        resident_bytes: 4_096,
+        ..cpu(key, 1_000)
+    }
+}
+
+/// One second's use of the App `key` names as `regular`'s, and four microseconds of GPU time.
+pub(super) fn regular_on_the_gpu(key: &[u8]) -> Used<'_> {
+    Used {
+        gpu_ns: Some(4_000),
+        ..regular(key)
+    }
+}
+
+/// The Apps `apps` at `wall_second`, in key order, measured over one second, as a stretch takes
+/// them.
+fn apps_at(wall_second: u64, apps: &[App]) -> Arc<AppsSecond> {
+    Arc::new(second_of_apps(wall_second, apps))
+}
+
+/// The stretch of the ten seconds from 1,000, at each of which the one App `used` names uses
+/// what it names.
+pub(super) fn stretch_of_one_app(used: &Used<'_>) -> AppsStretch {
+    let seconds: Vec<_> = (1_000..1_010)
+        .map(|wall_second| apps_at(wall_second, &[app(used)]))
+        .collect();
+
+    AppsStretch::of_seconds(100, &seconds)
+}
+
+/// The stretch of the ten seconds from 1,000, of which the store takes in the first five, A
+/// using a microsecond of CPU at each, and adds a load's stretch of the other five, A using two
+/// at each, and B only there, before it closes the stretch.
+pub(super) fn stretches_with_a_load_added() -> Stretches {
+    let mut stretches = Stretches::new(1, 1);
+    for wall_second in 1_000..1_005 {
+        let apps = apps_at(wall_second, &[app(&regular(b"/A.app"))]);
+        stretches.take(100, &apps, &RUN, &second_at(wall_second));
+    }
+    let folded: Vec<_> = (1_005..1_010)
+        .map(|wall_second| {
+            let a = Used {
+                cpu_ns: 2_000,
+                ..regular(b"/A.app")
+            };
+            apps_at(wall_second, &[app(&a), app(&regular(b"/B.app"))])
+        })
+        .collect();
+    stretches.add_folded(&AppsStretch::of_seconds(100, &folded));
+
+    let closing = apps_at(1_010, &[app(&regular(b"/A.app"))]);
+    stretches.take(101, &closing, &RUN, &second_at(1_010));
+
+    stretches
 }
