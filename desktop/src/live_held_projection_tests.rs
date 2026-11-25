@@ -320,156 +320,134 @@ fn assert_lines_drawn(panels: &[std::rc::Rc<Panel>], unrecorded: &[(&str, &str)]
 /// as Memory, Network, Storage and GPU do.
 const HOUR_DETAIL_FIRST: u64 = 9_041;
 
-/// An hour of seconds that ends at 10,000, each with the complete reading the Memory page draws:
-/// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
-/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+/// What a second of `hour` is, which a page's readings of it follow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HourSecond {
+    /// A second like those beside it.
+    Ordinary,
+    /// One of the hour's two peaks, at 7,013 and 9,040.
+    Peak,
+    /// The first second after the gap or the restart, 7,600 and 8,000, which has no rates.
+    AfterBreak,
+}
+
+/// An hour of seconds that ends at 10,000, each with the complete reading `each` writes for a
+/// page given its wall second and what the second is: a gap from 7,500 to 7,599, a collector
+/// restart at 8,000, a peak at 7,013 in an older stretch, and one at 9,040, which lies at the
+/// join of the older tail and the full-detail seconds.
+fn hour(each: impl Fn(MachineSecond, u64, HourSecond) -> MachineSecond) -> Vec<MachineSecond> {
+    (6_400..=10_000)
+        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
+        .map(|wall_second| {
+            let segment = match wall_second {
+                ..7_500 => 0,
+                7_500..8_000 => 1,
+                8_000.. => 2,
+            };
+            let mut second = reading_at(wall_second, segment);
+            if wall_second >= 8_000 {
+                second.run = [5, 6];
+            }
+            let moment = match wall_second {
+                7_013 | 9_040 => HourSecond::Peak,
+                7_600 | 8_000 => HourSecond::AfterBreak,
+                _ => HourSecond::Ordinary,
+            };
+            if moment == HourSecond::AfterBreak {
+                second.elapsed_ns = None;
+            }
+
+            each(second, wall_second, moment)
+        })
+        .collect()
+}
+
+/// The `hour` of the complete readings the Memory page draws.
 fn memory_hour() -> Vec<MachineSecond> {
-    (6_400..=10_000)
-        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
-        .map(|wall_second| {
-            let segment = match wall_second {
-                ..7_500 => 0,
-                7_500..8_000 => 1,
-                8_000.. => 2,
-            };
-            let mut second = reading_at(wall_second, segment);
-            if wall_second >= 8_000 {
-                second.run = [5, 6];
-            }
-            let peak = matches!(wall_second, 7_013 | 9_040);
-            let memory = second.memory.as_mut().unwrap();
-            // Every reading moves over each stretch, so the reach of each names it.
-            memory.total_bytes += wall_second * 4_096;
-            memory.swap_total_bytes += wall_second * 8_192;
-            if peak {
-                memory.app_bytes = memory.app_bytes.map(|bytes| bytes * 4);
-                memory.wired_bytes *= 4;
-                memory.compressed_bytes *= 4;
-                memory.swap_used_bytes *= 4;
-                memory.total_bytes *= 2;
-                memory.swap_total_bytes *= 2;
-            }
-            let mut rates = memory_rates(&second);
-            if peak {
-                rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
-            }
-            // A gap and a restart each leave the first second after them with no rates.
-            if matches!(wall_second, 7_600 | 8_000) {
-                second.elapsed_ns = None;
-                rates = [None; 5];
-            }
-            with_memory_rates(second, rates)
-        })
-        .collect()
+    hour(|mut second, wall_second, moment| {
+        let memory = second.memory.as_mut().unwrap();
+        // Every reading moves over each stretch, so the reach of each names it.
+        memory.total_bytes += wall_second * 4_096;
+        memory.swap_total_bytes += wall_second * 8_192;
+        if moment == HourSecond::Peak {
+            memory.app_bytes = memory.app_bytes.map(|bytes| bytes * 4);
+            memory.wired_bytes *= 4;
+            memory.compressed_bytes *= 4;
+            memory.swap_used_bytes *= 4;
+            memory.total_bytes *= 2;
+            memory.swap_total_bytes *= 2;
+        }
+        let mut rates = memory_rates(&second);
+        if moment == HourSecond::Peak {
+            rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
+        }
+        if moment == HourSecond::AfterBreak {
+            rates = [None; 5];
+        }
+
+        with_memory_rates(second, rates)
+    })
 }
 
-/// An hour of seconds that ends at 10,000, each with the complete reading the Network page draws:
-/// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
-/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+/// The `hour` of the complete readings the Network page draws.
 fn network_hour() -> Vec<MachineSecond> {
-    (6_400..=10_000)
-        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
-        .map(|wall_second| {
-            let segment = match wall_second {
-                ..7_500 => 0,
-                7_500..8_000 => 1,
-                8_000.. => 2,
-            };
-            let mut second = reading_at(wall_second, segment);
-            if wall_second >= 8_000 {
-                second.run = [5, 6];
-            }
-            let peak = matches!(wall_second, 7_013 | 9_040);
-            let mut rates = network_rates(&second);
-            if peak {
-                let traffic = second.network.as_mut().unwrap();
-                traffic.received_bps *= 10.0;
-                traffic.sent_bps *= 10.0;
-                rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
-            }
-            // A gap and a restart each leave the first second after them with no rates.
-            if matches!(wall_second, 7_600 | 8_000) {
-                second.elapsed_ns = None;
-                second.network = None;
-                rates = [None; 4];
-            }
-            with_network_rates(second, rates)
-        })
-        .collect()
+    hour(|mut second, _, moment| {
+        let mut rates = network_rates(&second);
+        if moment == HourSecond::Peak {
+            let traffic = second.network.as_mut().unwrap();
+            traffic.received_bps *= 10.0;
+            traffic.sent_bps *= 10.0;
+            rates = rates.map(|rate| rate.map(|rate| rate * 10.0));
+        }
+        if moment == HourSecond::AfterBreak {
+            second.network = None;
+            rates = [None; 4];
+        }
+
+        with_network_rates(second, rates)
+    })
 }
 
-/// An hour of seconds that ends at 10,000, each with the complete reading the Storage page draws:
-/// a gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
-/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+/// The `hour` of the complete readings the Storage page draws.
 fn storage_hour() -> Vec<MachineSecond> {
-    (6_400..=10_000)
-        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
-        .map(|wall_second| {
-            let segment = match wall_second {
-                ..7_500 => 0,
-                7_500..8_000 => 1,
-                8_000.. => 2,
-            };
-            let mut second = reading_at(wall_second, segment);
-            if wall_second >= 8_000 {
-                second.run = [5, 6];
-            }
-            let peak = matches!(wall_second, 7_013 | 9_040);
-            let mut rates = storage_rates(&second);
-            if peak {
-                second.disk_read_bps = Some(1e12);
-                second.disk_written_bps = Some(1e12);
-                rates = rates.map(|rate| rate.map(|rate| rate * 1_000.0));
-            }
-            // A gap and a restart each leave the first second after them with no rates.
-            if matches!(wall_second, 7_600 | 8_000) {
-                second.elapsed_ns = None;
-                second.disk_read_bps = None;
-                second.disk_written_bps = None;
-                rates = [None; 6];
-            }
-            with_storage_rates(second, rates)
-        })
-        .collect()
+    hour(|mut second, _, moment| {
+        let mut rates = storage_rates(&second);
+        if moment == HourSecond::Peak {
+            second.disk_read_bps = Some(1e12);
+            second.disk_written_bps = Some(1e12);
+            rates = rates.map(|rate| rate.map(|rate| rate * 1_000.0));
+        }
+        if moment == HourSecond::AfterBreak {
+            second.disk_read_bps = None;
+            second.disk_written_bps = None;
+            rates = [None; 6];
+        }
+
+        with_storage_rates(second, rates)
+    })
 }
 
-/// An hour of seconds that ends at 10,000, each with the complete reading the GPU page draws: a
-/// gap from 7,500 to 7,599, a collector restart at 8,000, a peak at 7,013 in an older stretch,
-/// and one at 9,040, which lies at the join of the older tail and the full-detail seconds.
+/// The `hour` of the complete readings the GPU page draws.
 fn gpu_hour() -> Vec<MachineSecond> {
-    (6_400..=10_000)
-        .filter(|wall_second| !(7_500..7_600).contains(wall_second))
-        .map(|wall_second| {
-            let segment = match wall_second {
-                ..7_500 => 0,
-                7_500..8_000 => 1,
-                8_000.. => 2,
-            };
-            let mut second = reading_at(wall_second, segment);
-            if wall_second >= 8_000 {
-                second.run = [5, 6];
-            }
-            let peak = matches!(wall_second, 7_013 | 9_040);
-            // Every reading moves over each stretch, so the reach of each names it.
-            let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
-            second.gpu_celsius = Some(f32::from(quarter_degrees) / 4.0 + 40.0);
-            let mut watts = Some(gpu_watts(&second));
-            let mut memory_bytes = gpu_memory_bytes(&second);
-            if peak {
-                second.gpu_active_percent = Some(100.0);
-                second.gpu_celsius = Some(110.0);
-                watts = watts.map(|watts| watts * 10.0);
-                memory_bytes = memory_bytes.map(|bytes| bytes.map(|bytes| bytes * 4));
-            }
-            // A gap and a restart each leave the first second after them with no rates.
-            if matches!(wall_second, 7_600 | 8_000) {
-                second.elapsed_ns = None;
-                second.gpu_active_percent = None;
-                watts = None;
-            }
-            with_gpu_readings(second, watts, memory_bytes)
-        })
-        .collect()
+    hour(|mut second, wall_second, moment| {
+        // Every reading moves over each stretch, so the reach of each names it.
+        let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
+        second.gpu_celsius = Some(f32::from(quarter_degrees) / 4.0 + 40.0);
+        let mut watts = Some(gpu_watts(&second));
+        let mut memory_bytes = gpu_memory_bytes(&second);
+        if moment == HourSecond::Peak {
+            second.gpu_active_percent = Some(100.0);
+            second.gpu_celsius = Some(110.0);
+            watts = watts.map(|watts| watts * 10.0);
+            memory_bytes = memory_bytes.map(|bytes| bytes.map(|bytes| bytes * 4));
+        }
+        if moment == HourSecond::AfterBreak {
+            second.gpu_active_percent = None;
+            watts = None;
+        }
+
+        with_gpu_readings(second, watts, memory_bytes)
+    })
 }
 
 /// `seconds` by the stretch each lies in, oldest first.
