@@ -488,6 +488,35 @@ impl MachineSecond {
             .and_then(CompleteMachine::gpu_memory_allocated_bytes)
     }
 
+    /// The mean clock of each performance level while its cores were active, level 0 first, as
+    /// the second's complete reading holds it, `None` where the second has no complete reading.
+    #[must_use]
+    pub fn cpu_level_ghz(&self) -> Option<[Option<f64>; 2]> {
+        self.complete().and_then(CompleteMachine::cpu_level_ghz)
+    }
+
+    /// The load averages over 1, 5 and 15 minutes at the second, as its complete reading holds
+    /// them, `None` where the second has no complete reading.
+    #[must_use]
+    pub fn load_average(&self) -> Option<[f64; 3]> {
+        self.complete().and_then(CompleteMachine::load_average)
+    }
+
+    /// The file entries open across the system at the second, as its complete reading holds them,
+    /// `None` where the second has no complete reading.
+    #[must_use]
+    pub fn open_files(&self) -> Option<u64> {
+        self.complete().and_then(CompleteMachine::open_files)
+    }
+
+    /// The share of the kernel's limit the open files take at the second, as its complete reading
+    /// holds it, `None` where the second has no complete reading.
+    #[must_use]
+    pub fn open_files_percent(&self) -> Option<f64> {
+        self.complete()
+            .and_then(CompleteMachine::open_files_percent)
+    }
+
     #[must_use]
     pub fn cpu_counters(&self) -> Option<&[CpuCounter]> {
         self.complete()

@@ -256,6 +256,33 @@ impl CompleteMachine {
         self.point.system.gpu_memory_allocated_bytes
     }
 
+    /// The mean clock of each performance level while its cores were active, in gigahertz, level
+    /// 0, the fastest, first, `None` where the readings give no clock of any level.
+    #[must_use]
+    pub fn cpu_level_ghz(&self) -> Option<[Option<f64>; 2]> {
+        self.point.cpu_level_ghz
+    }
+
+    /// The load averages over 1, 5 and 15 minutes, `None` where the reading holds no system
+    /// group.
+    #[must_use]
+    pub fn load_average(&self) -> Option<[f64; 3]> {
+        self.point.system.load_average
+    }
+
+    /// The file entries open across the system, `None` where the reading holds no system group.
+    #[must_use]
+    pub fn open_files(&self) -> Option<u64> {
+        self.point.system.open_files
+    }
+
+    /// The share of the kernel's limit the open files take, `None` where the reading holds no
+    /// system group or macOS reported no limit.
+    #[must_use]
+    pub fn open_files_percent(&self) -> Option<f64> {
+        self.point.system.open_files_percent
+    }
+
     /// The reservation charges one physical owner even when Views and sampled tails share it.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -313,6 +340,29 @@ impl CpuReading {
                 continuous: reading.tick.continuous_ns,
             },
         })))
+    }
+
+    /// The per-CPU readings of `second` that the store keeps where it refused the second's
+    /// complete reading, a counter of each of as many logical CPUs as its performance levels
+    /// name, whose interval is refused, charged to `budget`, so a test outside the viewer can
+    /// give a refused second the logical CPUs it holds.
+    #[must_use]
+    pub fn of_levels(second: &MachineSecond, budget: &Arc<ByteBudget>) -> Arc<Self> {
+        let Some(reservation) = budget.reserve(size_of::<Self>() + ARC_BYTES) else {
+            panic!("the budget has no room for the per-CPU readings");
+        };
+
+        Arc::new(Self {
+            cpus: counters_of_levels(second),
+            interval: CpuIntervalState::Refused("fixture"),
+            observation: MachineIdentity {
+                publication: second.publication,
+                run_tick: second.run_tick,
+                wall: second.wall_ns,
+                continuous: second.continuous_ns,
+            },
+            reservation,
+        })
     }
 
     pub(super) fn counters(&self, second: &MachineSecond) -> Option<&[CpuCounter]> {
@@ -487,6 +537,73 @@ impl CompleteMachine {
         Self::of_point(second, point, budget)
     }
 
+    /// The complete reading of `second` whose CPU reads the activity and sensor the second's
+    /// record holds, a counter of each of as many logical CPUs as its performance levels name,
+    /// which the CPU counts, each level's clock
+    /// `level_ghz`, the load averages `load_average`, and the open files `open_files` with their
+    /// share of the limit `open_files_percent`, charged to `budget`, so a test outside the viewer
+    /// can give a second the complete reading the CPU page's machine charts draw.
+    #[must_use]
+    pub fn of_cpu(
+        second: &MachineSecond,
+        level_ghz: [Option<f64>; 2],
+        load_average: Option<[f64; 3]>,
+        open_files: Option<u64>,
+        open_files_percent: Option<f64>,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        let logical_cpu_count = second
+            .performance_levels
+            .map(|[fastest, slower]| fastest.logical_cpus + slower.logical_cpus);
+        let mut point = Point {
+            cpu_percent: second.cpu_percent,
+            cpu_level_percent: Some(second.cpu_level_percent),
+            cpu_level_ghz: Some(level_ghz),
+            logical_cpu_count,
+            cpu_celsius: second.cpu_celsius.map(f64::from),
+            ..Point::default()
+        };
+        point.system.load_average = load_average;
+        point.system.open_files = open_files;
+        point.system.open_files_percent = open_files_percent;
+        if let Some(levels) = &second.performance_levels {
+            point.system.machine = point.system.machine.with_levels(levels);
+        }
+        let mut reading = Self::of_point(second, point, budget);
+
+        let Some(complete) = Arc::get_mut(&mut reading) else {
+            unreachable!("a complete reading just built has no other owner");
+        };
+        complete.cpus = counters_of_levels(second);
+        reading
+    }
+
+    /// `reading`, a complete reading no other owner holds yet, with each logical CPU busy for the
+    /// share `busy_percent` gives it over the interval since `previous`, so a test outside the
+    /// viewer can give a second the cores the CPU page's bars and heatmap draw.
+    #[must_use]
+    pub fn with_cpu_interval(
+        mut reading: Arc<Self>,
+        busy_percent: Vec<Option<f64>>,
+        previous: &MachineSecond,
+    ) -> Arc<Self> {
+        let Some(complete) = Arc::get_mut(&mut reading) else {
+            panic!("another owner holds the complete reading");
+        };
+        complete.interval = CpuIntervalState::Available(CapturedInterval {
+            values: busy_percent,
+            unavailable_reason: None,
+            previous: Some(CpuPrevious {
+                publication: previous.publication,
+                run_tick: previous.run_tick,
+                wall_ns: previous.wall_ns,
+                continuous_ns: previous.continuous_ns,
+            }),
+        });
+
+        reading
+    }
+
     /// The complete reading of `second` whose readings are `point`, charged to `budget`.
     fn of_point(second: &MachineSecond, point: Point, budget: &Arc<ByteBudget>) -> Arc<Self> {
         let Some(reservation) = budget.reserve(size_of::<Self>() + ARC_BYTES) else {
@@ -506,6 +623,20 @@ impl CompleteMachine {
             reservation,
         })
     }
+}
+
+/// A counter of each logical CPU the performance levels of `second` name, for a fixture.
+fn counters_of_levels(second: &MachineSecond) -> Vec<CpuCounter> {
+    let count = second.performance_levels.map_or(0, |[fastest, slower]| {
+        fastest.logical_cpus + slower.logical_cpus
+    });
+
+    (0..count)
+        .map(|cpu| CpuCounter {
+            cpu,
+            ticks: CPUTicks::default(),
+        })
+        .collect()
 }
 
 fn capture_interval(

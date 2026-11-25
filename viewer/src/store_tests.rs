@@ -1469,6 +1469,37 @@ pub(crate) fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<Vi
     }
 }
 
+/// The context of `store` that follows the newest second, failing after ten seconds, as
+/// `view_where` does.
+pub(crate) fn followed_context(store: &Store) -> Arc<super::QueryContext> {
+    let handle = store.query_handle();
+    let request = super::QueryRequest {
+        epoch: 0,
+        source: None,
+        selection: super::QuerySelection::FollowLatest,
+    };
+    handle.submit(request).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(reply) = handle.take() {
+            match reply.outcome {
+                super::QueryOutcome::Ready(context) => return context,
+                super::QueryOutcome::NeedsLoad(_) => {
+                    handle.submit(request).unwrap();
+                }
+                super::QueryOutcome::Unavailable(reason) => {
+                    panic!("unavailable context: {reason:?}")
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the store built no followed context"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn a_store_holds_each_ticks_second_oldest_first() {
     // Goal: the store takes in every tick the ring holds when it starts. Method: publish three

@@ -9,7 +9,7 @@ use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation};
 #[path = "cpu_history_typed.rs"]
 mod typed;
 
-pub use typed::{CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow};
+pub use typed::{CpuDetail, CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow};
 
 pub(crate) const PAGE_CPUS: usize = 32;
 pub(crate) const RESPONSE_BYTES_MAX: usize = 7 * 1024 * 1024;

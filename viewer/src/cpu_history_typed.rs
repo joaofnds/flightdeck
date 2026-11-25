@@ -33,6 +33,17 @@ pub struct CpuHistoryIdentity {
     pub wall_ns: u64,
 }
 
+/// The cores of one second as the CPU page's bars draw them: each logical CPU's busy share over
+/// the interval since the reading before, or why the interval has none.
+pub struct CpuDetail {
+    pub identity: CpuHistoryIdentity,
+    /// The reading the interval runs from, where it is held.
+    pub previous: Option<CpuHistoryIdentity>,
+    pub unavailable_reason: Option<&'static str>,
+    /// One reading for each logical CPU, in the order of their indices.
+    pub busy_percent: Vec<Option<f64>>,
+}
+
 pub struct CpuHistoryRow {
     pub cpu: u32,
     /// One reading for each observation of the history, in the same order.

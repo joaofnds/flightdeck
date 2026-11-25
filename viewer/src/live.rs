@@ -693,7 +693,8 @@ mod tests {
     use crate::session::CHARTED_SECONDS;
     use collector::recording::{RegisteredRun, Registration, Registry, identity_text};
     use collector::ring::{
-        Dropped, IdentityObservation, ObservationTimes, Place, Readings, RingReader, Shape, Writer,
+        Dropped, IdentityObservation, ObservationTimes, Place, Readings, RingReader, RunIdentity,
+        Shape, Writer,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -715,6 +716,11 @@ mod tests {
     mod gpu_tests {
         use super::*;
         include!("live_gpu_tests.rs");
+    }
+
+    mod cpu_tests {
+        use super::*;
+        include!("live_cpu_tests.rs");
     }
 
     mod battery_tests {
@@ -743,6 +749,13 @@ mod tests {
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// The dictionary of a ring `RingFixture::started_with` starts, and of a run after it.
+    const STARTED_CAPACITY: collector::ring::DictionaryCapacity =
+        collector::ring::DictionaryCapacity {
+            entries: 2,
+            arena_bytes: 256,
+        };
 
     /// What starts a test ring's recording with the records its test reads, as
     /// `Registration::start_with_system`, `start_with_disks` and `start_with_battery` do.
@@ -842,11 +855,7 @@ mod tests {
                 lock_path: root.join("ring.lock"),
                 name_prefix: format!("/fdlv{}x{serial}", std::process::id()),
             };
-            let capacity = collector::ring::DictionaryCapacity {
-                entries: 2,
-                arena_bytes: 256,
-            };
-            let (writer, registered) = start(&root, &place, *shape, capacity, 0)
+            let (writer, registered) = start(&root, &place, *shape, STARTED_CAPACITY, 0)
                 .unwrap()
                 .into_parts();
             registered.unwrap();
@@ -863,6 +872,24 @@ mod tests {
         /// The run after `self`'s in the same recording, as after a collector restart, whose ring
         /// has `self`'s shape and which the registry lists after the runs already there.
         fn next_run(&self) -> Self {
+            self.next_run_through(|place, shape, identity| {
+                Writer::create_recording(place, shape, identity, 0)
+            })
+        }
+
+        /// The run after `self`'s as `next_run` starts it, whose ring holds the system records,
+        /// as `Registration::start_with_system` starts the first run's.
+        fn next_system_run(&self) -> Self {
+            self.next_run_through(|place, shape, identity| {
+                Writer::create_with_system(place, shape, STARTED_CAPACITY, identity, 0)
+            })
+        }
+
+        /// The run after `self`'s, whose ring `create` makes at its place with `self`'s shape.
+        fn next_run_through(
+            &self,
+            create: impl FnOnce(&Place, Shape, &RunIdentity) -> std::io::Result<Writer>,
+        ) -> Self {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let place = Place {
                 lock_path: self.root.join(format!("run-{serial}.lock")),
@@ -873,7 +900,7 @@ mod tests {
             let shape = RingReader::open_generation(self.writer.name())
                 .unwrap()
                 .shape();
-            let writer = Writer::create_recording(&place, shape, &identity, 0).unwrap();
+            let writer = create(&place, shape, &identity).unwrap();
             let mut registry = Registry::read(&self.root).unwrap();
             // The registry holds two runs, so a third retires the first, whose readings are saved.
             if registry.runs.len() == 2 {

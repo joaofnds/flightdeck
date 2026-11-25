@@ -21,10 +21,10 @@ const _: () = {
     assert!(EARLIER_STRIDE_SECONDS == 10);
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
-    // `MachineStretch`, so the Mac's readings cost a store about 3.6 MiB.
-    assert!(size_of::<MachineStretch>() <= 10 * 1024);
+    // `MachineStretch`, so the Mac's readings cost a store about 4.2 MiB.
+    assert!(size_of::<MachineStretch>() <= 12 * 1024);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 3_700 * 1024);
+    assert!(allocated * size_of::<MachineStretch>() <= 4_400 * 1024);
 };
 
 pub type Gauge = GaugeSummary<MachinePlace>;
@@ -37,6 +37,10 @@ pub type Category = CategorySummary<u8, MachinePlace, CATEGORY_CHANGES_KEPT>;
 pub struct MachineStretch {
     pub cpu_percent: Rate,
     pub cpu_level_percent: [Rate; 2],
+    /// The mean clock of each level while its cores were active, level 0 first, which only a
+    /// second's complete reading holds (`MachineSecond::cpu_level_ghz`), so each reads none at a
+    /// second without one.
+    pub cpu_level_ghz: [Rate; 2],
     pub gpu_active_percent: Rate,
     /// The GPU's power, which only a second's complete reading holds (`MachineSecond::gpu_watts`),
     /// so it reads none at a second without one.
@@ -65,6 +69,13 @@ pub struct MachineStretch {
     pub power_watts: Gauge,
     pub soc_celsius: Gauge,
     pub gpu_celsius: Gauge,
+    pub cpu_celsius: Gauge,
+    /// The 1, 5 and 15 minute load averages, in that order. Only a second's complete reading
+    /// holds the load averages and the open files (`MachineSecond::load_average`), so each of
+    /// these and the two open files gauges reads none at a second without one.
+    pub load_average: [Gauge; 3],
+    pub open_files: Gauge,
+    pub open_files_percent: Gauge,
     pub fan_mean_rpm: Gauge,
     pub pressure: Category,
     pub thermal_pressure: Category,
@@ -89,6 +100,17 @@ impl MachineStretch {
             .push(second.soc_celsius.map(f64::from), follows, place);
         self.gpu_celsius
             .push(second.gpu_celsius.map(f64::from), follows, place);
+        self.cpu_celsius
+            .push(second.cpu_celsius.map(f64::from), follows, place);
+        let load_average = second.load_average();
+        for (window, average) in self.load_average.iter_mut().enumerate() {
+            let value = load_average.and_then(|load| load.get(window).copied());
+            average.push(value, follows, place);
+        }
+        self.open_files
+            .push(second.open_files().map(number), follows, place);
+        self.open_files_percent
+            .push(second.open_files_percent(), follows, place);
         self.gpu_memory_in_use_bytes.push(
             second.gpu_memory_in_use_bytes().map(number),
             follows,
@@ -136,6 +158,11 @@ impl MachineStretch {
             .zip(second.cpu_level_percent)
         {
             level.push(rate(percent), follows, place);
+        }
+        let level_ghz = second.cpu_level_ghz();
+        for (level, ghz) in self.cpu_level_ghz.iter_mut().enumerate() {
+            let value = level_ghz.and_then(|ghz| ghz.get(level).copied().flatten());
+            ghz.push(rate(value), follows, place);
         }
         self.gpu_active_percent
             .push(rate(second.gpu_active_percent), follows, place);

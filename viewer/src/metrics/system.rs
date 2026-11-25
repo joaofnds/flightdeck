@@ -130,6 +130,24 @@ struct ComputerLevel {
     logical_cpus: u64,
 }
 
+#[cfg(any(test, feature = "fixtures"))]
+impl ComputerPoint {
+    /// The machine with the performance `levels`, as a tick that recorded them names them, for
+    /// a reading a test builds.
+    #[must_use]
+    pub(crate) fn with_levels(self, levels: &[collector::system::PerformanceLevel; 2]) -> Self {
+        let levels = levels.each_ref().map(|level| ComputerLevel {
+            name: level.name.as_str().to_owned(),
+            logical_cpus: u64::from(level.logical_cpus),
+        });
+
+        Self {
+            levels: Some(levels),
+            ..self
+        }
+    }
+}
+
 impl ComputerPoint {
     pub fn bytes(&self) -> usize {
         self.model.as_ref().map_or(0, String::capacity)

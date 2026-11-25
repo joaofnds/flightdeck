@@ -24,6 +24,7 @@ mod sampled;
 mod second;
 mod selection;
 mod stretch;
+mod view_cpu;
 
 #[cfg(test)]
 #[path = "store/startup_tests.rs"]
@@ -65,7 +66,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
 pub use crate::cpu_history::{
-    CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow,
+    CpuDetail, CpuHistory, CpuHistoryIdentity, CpuHistoryObservation, CpuHistoryRow,
 };
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, Missing};
 pub use attribution::{
@@ -92,10 +93,11 @@ pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
 pub(crate) use second::reading_at;
 pub use second::{
     BatterySecond, CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious,
-    MachineAdmission, MachineCaptureError, MachineSecond, MemoryRate, MemorySecond, NetworkRate,
-    PointRate, Reading, StorageRate, Traffic, readings,
+    CpuReading, MachineAdmission, MachineCaptureError, MachineSecond, MemoryRate, MemorySecond,
+    NetworkRate, PointRate, Reading, StorageRate, Traffic, readings,
 };
 pub use stretch::AppsStretch;
+pub use view_cpu::LogicalCpus;
 
 use apps::TickApps;
 use collector::ring::{Identity, RunIdentity};
