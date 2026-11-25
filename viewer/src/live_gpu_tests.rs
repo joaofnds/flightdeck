@@ -1,4 +1,4 @@
-use collector::ring::{DictionaryCapacity, IdentityPublication, SupplementalReadings};
+use collector::ring::{IdentityPublication, SupplementalReadings};
 
 /// The tick of the run `gpu_publish` writes at which the GPU power, the GPU memory in use, the
 /// GPU memory allocated and the GPU sensor each read their highest, in that order.
@@ -77,48 +77,7 @@ fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
 
 /// A ring with the system records, which carry the GPU memory macOS reports.
 fn gpu_fixture() -> RingFixture {
-    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "flightdeck-live-gpu-{}-{serial}",
-        std::process::id()
-    ));
-    drop(persistence::Store::open(&root).unwrap());
-    let place = Place {
-        lock_path: root.join("ring.lock"),
-        name_prefix: format!("/fdgpu{}x{serial}", std::process::id()),
-    };
-    let shape = Shape {
-        slot_count: 120,
-        cpu_capacity: 1,
-        interface_capacity: 1,
-        core_capacity: 1,
-        state_capacity: 1,
-        fan_capacity: 1,
-        process_capacity: 1,
-        coalition_capacity: 1,
-        event_capacity: 8,
-    };
-    let (writer, registered) = Registration::start_with_system(
-        &root,
-        &place,
-        shape,
-        DictionaryCapacity {
-            entries: 2,
-            arena_bytes: 256,
-        },
-        0,
-    )
-    .unwrap()
-    .into_parts();
-    registered.unwrap();
-
-    RingFixture {
-        root,
-        writer,
-        following_fans: 2,
-        owns_root: true,
-        persister: std::sync::Mutex::default(),
-    }
+    RingFixture::started_with("gpu", &one_of_each(120), Registration::start_with_system)
 }
 
 /// Publishes tick `tick` of a run whose GPU energy, GPU memory in use, GPU memory allocated and

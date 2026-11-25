@@ -744,6 +744,31 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
+    /// What starts a test ring's recording with the records its test reads, as
+    /// `Registration::start_with_system`, `start_with_disks` and `start_with_battery` do.
+    type RingStart = fn(
+        &Path,
+        &Place,
+        Shape,
+        collector::ring::DictionaryCapacity,
+        u64,
+    ) -> std::io::Result<collector::recording::StartedRecording>;
+
+    /// A ring of `slot_count` slots with room for one of each table and eight events.
+    fn one_of_each(slot_count: u64) -> Shape {
+        Shape {
+            slot_count,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 8,
+        }
+    }
+
     struct RingFixture {
         root: PathBuf,
         writer: Writer,
@@ -791,6 +816,37 @@ mod tests {
                 name_prefix: format!("/fdretry{}x{serial}", std::process::id()),
             };
             let (writer, registered) = Registration::start(&root, &place, *shape, 0)
+                .unwrap()
+                .into_parts();
+            registered.unwrap();
+
+            Self {
+                root,
+                writer,
+                following_fans: 2,
+                owns_root: true,
+                persister: std::sync::Mutex::default(),
+            }
+        }
+
+        /// A run in a ring of `shape` that records into a new root named after `name`, whose
+        /// recording `start` begins with the records the test reads.
+        fn started_with(name: &str, shape: &Shape, start: RingStart) -> Self {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "flightdeck-live-{name}-{}-{serial}",
+                std::process::id()
+            ));
+            drop(persistence::Store::open(&root).unwrap());
+            let place = Place {
+                lock_path: root.join("ring.lock"),
+                name_prefix: format!("/fdlv{}x{serial}", std::process::id()),
+            };
+            let capacity = collector::ring::DictionaryCapacity {
+                entries: 2,
+                arena_bytes: 256,
+            };
+            let (writer, registered) = start(&root, &place, *shape, capacity, 0)
                 .unwrap()
                 .into_parts();
             registered.unwrap();

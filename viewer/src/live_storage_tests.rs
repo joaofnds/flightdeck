@@ -1,5 +1,5 @@
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
-use collector::ring::{DictionaryCapacity, IdentityPublication, SupplementalReadings};
+use collector::ring::{IdentityPublication, SupplementalReadings};
 
 use crate::store::PointRate;
 
@@ -47,48 +47,11 @@ fn storage_fixture() -> RingFixture {
 }
 
 fn storage_fixture_with_slots(slot_count: u64) -> RingFixture {
-    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "flightdeck-live-storage-{}-{serial}",
-        std::process::id()
-    ));
-    drop(persistence::Store::open(&root).unwrap());
-    let place = Place {
-        lock_path: root.join("ring.lock"),
-        name_prefix: format!("/fdsv{}x{serial}", std::process::id()),
-    };
-    let shape = Shape {
-        slot_count,
-        cpu_capacity: 1,
-        interface_capacity: 1,
-        core_capacity: 1,
-        state_capacity: 1,
-        fan_capacity: 1,
-        process_capacity: 1,
-        coalition_capacity: 1,
-        event_capacity: 8,
-    };
-    let (writer, registered) = Registration::start_with_disks(
-        &root,
-        &place,
-        shape,
-        DictionaryCapacity {
-            entries: 2,
-            arena_bytes: 256,
-        },
-        0,
+    RingFixture::started_with(
+        "storage",
+        &one_of_each(slot_count),
+        Registration::start_with_disks,
     )
-    .unwrap()
-    .into_parts();
-    registered.unwrap();
-
-    RingFixture {
-        root,
-        writer,
-        following_fans: 2,
-        owns_root: true,
-        persister: std::sync::Mutex::default(),
-    }
 }
 
 fn storage_snapshot(tick: u64) -> DiskSnapshot {

@@ -1,5 +1,5 @@
 use collector::battery::BatteryReading;
-use collector::ring::{DictionaryCapacity, IdentityPublication};
+use collector::ring::IdentityPublication;
 
 #[test]
 fn follows_and_reopens_battery_gauges_with_unavailable_publications() {
@@ -45,41 +45,7 @@ fn follows_and_reopens_battery_gauges_with_unavailable_publications() {
 }
 
 fn battery_fixture() -> RingFixture {
-    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir()
-        .join(format!("flightdeck-live-battery-{}-{serial}", std::process::id()));
-    drop(persistence::Store::open(&root).unwrap());
-    let place = Place {
-        lock_path: root.join("ring.lock"),
-        name_prefix: format!("/fdbv{}x{serial}", std::process::id()),
-    };
-    let shape = Shape {
-        slot_count: 8,
-        cpu_capacity: 1,
-        interface_capacity: 1,
-        core_capacity: 1,
-        state_capacity: 1,
-        fan_capacity: 1,
-        process_capacity: 1,
-        coalition_capacity: 1,
-        event_capacity: 8,
-    };
-    let (writer, registered) = Registration::start_with_battery(
-        &root,
-        &place,
-        shape,
-        DictionaryCapacity { entries: 2, arena_bytes: 256 },
-        0,
-    ).unwrap().into_parts();
-    registered.unwrap();
-
-    RingFixture {
-        root,
-        writer,
-        following_fans: 2,
-        owns_root: true,
-        persister: std::sync::Mutex::default(),
-    }
+    RingFixture::started_with("battery", &one_of_each(8), Registration::start_with_battery)
 }
 
 fn battery_publish(fixture: &mut RingFixture, tick: u64, battery: Option<&BatteryReading>) {
