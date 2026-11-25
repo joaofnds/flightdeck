@@ -426,10 +426,11 @@ impl Store {
             return;
         }
 
-        if !active {
-            self.shared.catching_up.store(true, Ordering::Release);
-            self.shared.catch_up.store(true, Ordering::Release);
-        }
+        // A hide asks for the catch-up, so that no View is taken while the window is hidden. A
+        // show asks again, since a turn that had read `active` before the hide landed answers
+        // the hide's request while hidden, and the show would then wait for the next reading.
+        self.shared.catching_up.store(true, Ordering::Release);
+        self.shared.catch_up.store(true, Ordering::Release);
         if let Some(thread) = &self.thread {
             thread.thread().unpark();
         }
