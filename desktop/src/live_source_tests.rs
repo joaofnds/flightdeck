@@ -87,6 +87,26 @@ fn a_chart_request_carries_the_older_tail_and_a_hover_request_does_not() {
 }
 
 #[test]
+fn a_reading_that_drops_its_points_lets_go_of_its_older_tail() {
+    // Goal: a reading whose page is left holds none of the older tail, which the page's next
+    // reading brings again. Method: read a recording with a minute sealed long before its newest
+    // second, with the tail, and drop the reading's points.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut request = SealedRecording::request();
+    request.earlier = crate::live_source::Earlier::Load;
+    let mut snapshot = recording.read(request).unwrap();
+    assert!(snapshot.selection.get("earlier_trends").is_some());
+
+    snapshot.drop_points();
+
+    assert!(snapshot.selection.get("earlier_trends").is_none());
+    assert_eq!(
+        snapshot.selection["earlier_stride_seconds"],
+        viewer::EARLIER_STRIDE_SECONDS
+    );
+}
+
+#[test]
 fn a_computer_request_goes_without_the_older_tail() {
     // Goal: the Computer page, which draws no chart, reads none of the saved readings older than
     // the full-detail context that a chart's request reads. Method: ask for the tail on Computer
@@ -265,6 +285,27 @@ fn a_followed_page_older_tail_takes_in_a_minute_saved_after_the_session_opened()
     let later = reader.earlier(&recording, 2260);
 
     assert_eq!(later["earlier_trends"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn reads_of_a_page_in_one_stretch_share_one_older_tail() {
+    // Goal: a page read again within one stretch holds the very list of older points its read
+    // before holds, as the session shares it, rather than a copy. Method: read the tail of two
+    // contexts a second apart in one stretch, keep both selections, and compare where their
+    // tails' points live.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+
+    let first = reader.earlier_selection(&recording, 2200);
+    let second = reader.earlier_selection(&recording, 2201);
+
+    let first_tail = first.get("earlier_trends").unwrap();
+    assert_eq!(first_tail.as_array().unwrap().len(), 1);
+    assert!(std::ptr::eq(
+        first_tail,
+        second.get("earlier_trends").unwrap()
+    ));
 }
 
 #[test]
@@ -1402,6 +1443,15 @@ impl SnapshotReader {
 
     /// What a page's older tail adds to a selection whose context ends at `last_second`.
     fn earlier(&mut self, recording: &SealedRecording, last_second: u64) -> serde_json::Value {
+        self.earlier_selection(recording, last_second).json()
+    }
+
+    /// A selection whose context ends at `last_second`, with the page's older tail added.
+    fn earlier_selection(
+        &mut self,
+        recording: &SealedRecording,
+        last_second: u64,
+    ) -> viewer::Selection {
         let mut selection =
             viewer::Selection::from_json(json!({"context_last_second": last_second}));
         let pending = super::store_reader::read_earlier_selection(
@@ -1414,7 +1464,7 @@ impl SnapshotReader {
         );
         assert!(!pending);
 
-        selection.json()
+        selection
     }
 
     fn read_at(&mut self, root: &std::path::Path) -> Result<Option<Box<super::Snapshot>>, String> {

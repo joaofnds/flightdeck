@@ -10,9 +10,9 @@ use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::session::{
     ContextRange, ContextSelection, EARLIER_STRIDE_SECONDS, KeptTail, LEAD_IN_SECONDS,
-    LOADED_SECONDS, OBSERVATIONS_MAX, TailRange, Verified,
+    LOADED_SECONDS, TailRange, Verified,
 };
-use crate::{Cancellation, Session};
+use crate::{Cancellation, EarlierTail, Session};
 
 #[path = "app_resident_history.rs"]
 pub(crate) mod resident_history;
@@ -31,7 +31,6 @@ pub(crate) mod window;
 mod process_groups;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// How far a context moves before `list_saved_for` lists the saved minutes again.
 const SAVED_LISTING_SECONDS: u64 = 60;
 pub struct LiveSession {
@@ -247,7 +246,7 @@ impl LiveSession {
     /// seconds. Each sealed minute the tail needs is read once, at the latest when the tail first
     /// needs it, so following the newest second reads a minute about once a minute and a stride
     /// inside the kept minutes reads nothing.
-    pub fn earlier_context(&mut self, context_last_second: u64) -> Result<Value> {
+    pub fn earlier_context(&mut self, context_last_second: u64) -> Result<EarlierTail> {
         if let Some(tail) = self.earlier_context_kept(context_last_second)? {
             return Ok(tail);
         }
@@ -266,7 +265,10 @@ impl LiveSession {
     /// keeps answer it or the minutes it lacks read in one batch, as the tail of the newest
     /// second needs about once a minute, and `None` where answering would read more or list the
     /// saved minutes again.
-    pub fn earlier_context_at_once(&mut self, context_last_second: u64) -> Result<Option<Value>> {
+    pub fn earlier_context_at_once(
+        &mut self,
+        context_last_second: u64,
+    ) -> Result<Option<EarlierTail>> {
         if let Some(tail) = self.earlier_context_kept(context_last_second)? {
             return Ok(Some(tail));
         }
@@ -282,31 +284,21 @@ impl LiveSession {
     }
 
     /// The older tail `earlier_context` gives for `context_last_second`, when the minutes it
-    /// keeps answer it, and `None` when answering would read saved history.
-    pub fn earlier_context_kept(&self, context_last_second: u64) -> Result<Option<Value>> {
+    /// keeps answer it, and `None` when answering would read saved history. It takes `&self`,
+    /// yet a read changes the session: it assembles the tail the session keeps where the range
+    /// changed, and moves that tail's split to the read's first second, so the next read starts
+    /// from there.
+    pub fn earlier_context_kept(&self, context_last_second: u64) -> Result<Option<EarlierTail>> {
         let first_second = context_last_second.saturating_sub(LOADED_SECONDS + LEAD_IN_SECONDS - 1);
-        let respond = |points: &[Value]| {
-            let points: Vec<&Value> = points
-                .iter()
-                .filter(|point| {
-                    point["wall_ns"]
-                        .as_u64()
-                        .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND >= first_second)
-                })
-                .collect();
-            context_bytes_of(&points)?;
-
-            Ok(json!({"earlier_trends": points,
-                "earlier_stride_seconds": EARLIER_STRIDE_SECONDS}))
-        };
-
-        match &self.history {
+        let trends = match &self.history {
             Some(history) => {
                 let range = TailRange::of_context(context_last_second);
-                self.earlier.answer(history, range, respond)
+                self.earlier.answer(history, range, first_second)?
             }
-            None => respond(&[]).map(Some),
-        }
+            None => Some(Arc::new(Value::Array(Vec::new()))),
+        };
+
+        Ok(trends.map(|trends| EarlierTail::of(trends, EARLIER_STRIDE_SECONDS)))
     }
 
     pub fn cpu_detail(&self) -> Result<Value> {
@@ -659,22 +651,6 @@ fn same(left: &Value, right: &Value) -> bool {
     left["run"] == right["run"]
         && left["boot"] == right["boot"]
         && left["publication"] == right["publication"]
-}
-
-fn context_bytes_of(points: &[&Value]) -> Result<()> {
-    if points.len() > OBSERVATIONS_MAX {
-        return Err(Error::Bound("context observations"));
-    }
-
-    if serde_json::to_vec(points)
-        .map_err(std::io::Error::other)?
-        .len()
-        > CONTEXT_BYTES_MAX
-    {
-        return Err(Error::Bound("context bytes"));
-    }
-
-    Ok(())
 }
 
 /// Selects the newest reading the session lists, the last of its second's alternatives.
@@ -1076,28 +1052,6 @@ mod tests {
                 std::fs::remove_dir_all(&self.root).unwrap();
             }
         }
-    }
-
-    #[test]
-    fn context_rejects_more_than_4096_scalar_points() {
-        // Goal: the context budget refuses a result larger than the public observation bound.
-        // Method: measure 4097 individually tiny scalar values, whose bytes fit the other bound.
-        let points = vec![json!({"cpu_percent":0}); 4097];
-
-        let result = context_bytes_of(&points.iter().collect::<Vec<_>>());
-
-        assert!(matches!(result, Err(Error::Bound("context observations"))));
-    }
-
-    #[test]
-    fn context_rejects_more_than_eight_mib_of_serialized_scalars() {
-        // Goal: a small point count cannot evade the separate serialized context byte bound.
-        // Method: encode one 8 MiB value, whose JSON framing exceeds the 8 MiB contract.
-        let points = [Value::String("x".repeat(8 * 1024 * 1024))];
-
-        let result = context_bytes_of(&points.iter().collect::<Vec<_>>());
-
-        assert!(matches!(result, Err(Error::Bound("context bytes"))));
     }
 
     #[test]

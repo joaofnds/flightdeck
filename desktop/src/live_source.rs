@@ -188,9 +188,7 @@ impl Snapshot {
     fn remove_points(&mut self) {
         self.selection.edit(|selection| {
             drop(selection.take_trends());
-            if let Some(mut fields) = selection.fields_mut() {
-                drop(fields.remove("earlier_trends"));
-            }
+            drop(selection.take_earlier_trends());
         });
     }
 }
@@ -1725,8 +1723,7 @@ fn reader_earlier(
         session.earlier_context(last).map(Some)
     };
     match tail {
-        Ok(Some(Value::Object(tail))) => fields.extend(tail),
-        Ok(Some(_)) => unreachable!("The older tail is an object"),
+        Ok(Some(tail)) => fields.insert_earlier_tail(tail),
         Ok(None) => return true,
         Err(error) => {
             fields.insert("earlier_error".into(), error.to_string().into());

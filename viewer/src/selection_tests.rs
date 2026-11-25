@@ -98,35 +98,34 @@ fn an_insert_of_the_chart_points_among_the_fields_stops_the_program() {
 #[test]
 #[should_panic(expected = "A selection's chart points are read through Selection::trends")]
 fn an_extend_that_carries_the_chart_points_stops_the_program() {
-    // Goal: extending the fields refuses a map that carries the chart points' key, as the
-    // older tail's map must not. Method: extend the fields of a split selection with a map
-    // holding "earlier_trends" and "trends".
+    // Goal: extending the fields refuses a map that carries the chart points' key, since the
+    // selection holds its points apart from its fields. Method: extend the fields of a split
+    // selection with a map holding "alternatives" and "trends".
     let mut selection = Selection::from_json(selection_json());
-    let Value::Object(tail) = json!({"earlier_trends": [], "trends": []}) else {
-        unreachable!("The tail is an object");
+    let Value::Object(map) = json!({"alternatives": [], "trends": []}) else {
+        unreachable!("The map is an object");
     };
 
-    selection.fields_mut().unwrap().extend(tail);
+    selection.fields_mut().unwrap().extend(map);
 }
 
 #[test]
 fn the_fields_take_and_give_up_other_keys() {
-    // Goal: the fields add, extend and remove every key but the chart points' as the JSON
-    // object did. Method: insert one field, extend with another, remove the first, then read
-    // both.
+    // Goal: the fields add, extend and remove other keys as the JSON object did. Method: insert
+    // one field, extend with another, remove the first, then read both.
     let mut selection = Selection::from_json(selection_json());
-    let Value::Object(tail) = json!({"earlier_trends": [1]}) else {
-        unreachable!("The tail is an object");
+    let Value::Object(map) = json!({"alternatives": [1]}) else {
+        unreachable!("The map is an object");
     };
 
     let mut fields = selection.fields_mut().unwrap();
     fields.insert("earlier_error".to_owned(), json!("gone"));
-    fields.extend(tail);
+    fields.extend(map);
     let removed = fields.remove("earlier_error");
 
     assert_eq!(removed, Some(json!("gone")));
     assert_eq!(selection.get("earlier_error"), None);
-    assert_eq!(selection["earlier_trends"], json!([1]));
+    assert_eq!(selection["alternatives"], json!([1]));
     assert_eq!(selection.trends().unwrap().len(), 2);
 }
 
@@ -173,6 +172,67 @@ fn taking_the_chart_points_leaves_the_other_fields() {
     let mut expected = selection_json();
     expected.as_object_mut().unwrap().remove("trends");
     assert_eq!(selection.json(), expected);
+}
+
+#[test]
+fn taking_a_shared_older_tail_copies_none_of_its_points() {
+    // Goal: a page that lets go of its older tail, as one whose points the View draws does each
+    // reading, copies none of the points the session still shares with it. Method: give a
+    // selection a tail another holder shares, take it out, and count the allocations and the
+    // holders of the list.
+    let points = std::sync::Arc::new(json!([{"wall_ns": 1}, {"wall_ns": 2}]));
+    let mut selection = Selection::from_json(selection_json());
+    selection
+        .fields_mut()
+        .unwrap()
+        .insert_earlier_tail(super::EarlierTail::of(std::sync::Arc::clone(&points), 10));
+
+    let (taken, requests) = observe(|| selection.take_earlier_trends());
+
+    assert_eq!(requests, 0);
+    assert!(std::sync::Arc::ptr_eq(&taken.unwrap(), &points));
+    assert!(selection.get("earlier_trends").is_none());
+    assert_eq!(std::sync::Arc::strong_count(&points), 1);
+}
+
+#[test]
+#[should_panic(expected = "the older tail leaves by take_earlier_trends")]
+fn removing_the_older_tail_as_a_field_is_refused() {
+    // Goal: no edit copies the older tail out of the list the session shares by removing it as
+    // a field. Method: give a selection a tail and remove it as a field.
+    let points = std::sync::Arc::new(json!([{"wall_ns": 1}]));
+    let mut selection = Selection::from_json(selection_json());
+    let mut fields = selection.fields_mut().unwrap();
+    fields.insert_earlier_tail(super::EarlierTail::of(points, 10));
+
+    drop(fields.remove("earlier_trends"));
+}
+
+#[test]
+#[should_panic(expected = "the older tail comes in by insert_earlier_tail")]
+fn inserting_the_older_tail_as_a_field_is_refused() {
+    // Goal: no field edit gives a selection an older tail that shares no list with the session,
+    // so the tail comes in only as the list it shares. Method: insert a list of points under the
+    // older tail's key.
+    let mut selection = Selection::from_json(selection_json());
+
+    selection
+        .fields_mut()
+        .unwrap()
+        .insert("earlier_trends".to_owned(), json!([{"wall_ns": 1}]));
+}
+
+#[test]
+#[should_panic(expected = "!fields.contains_key(EARLIER_TRENDS_KEY)")]
+fn a_selection_whose_fields_hold_an_older_tail_stops_the_program() {
+    // Goal: a selection the Store builds never hides an older tail among its fields, where
+    // reading the tail would not find it. Method: make a selection of fields that hold the
+    // older tail's key.
+    let Value::Object(fields) = json!({"earlier_trends": []}) else {
+        unreachable!("The fields are an object");
+    };
+
+    drop(Selection::of(fields, Trends::default()));
 }
 
 #[test]

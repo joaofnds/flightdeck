@@ -38,7 +38,7 @@ pub use live::window::{ObservationKey, Window};
 /// The most bytes the live App history caches, which every App history response reports.
 pub use live_app_history::BYTES_MAX as APP_HISTORY_BYTES_MAX;
 pub(crate) use selection::ChartPoint;
-pub use selection::{Selection, SelectionFields, TrendPoint, Trends};
+pub use selection::{EarlierTail, Selection, SelectionFields, TrendPoint, Trends};
 #[cfg(any(test, feature = "fixtures"))]
 pub use session::reach_of_readings;
 pub use session::{

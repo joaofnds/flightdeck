@@ -189,7 +189,7 @@ fn the_older_tail_leaves_out_what_expired() {
         .unwrap();
 
     let cut_ns = earlier_wall(361) * NANOSECONDS_PER_SECOND;
-    let walls = |tail: &Value| -> Vec<u64> {
+    let walls = |tail: &EarlierTail| -> Vec<u64> {
         tail["earlier_trends"]
             .as_array()
             .unwrap()
@@ -444,7 +444,7 @@ fn gives_the_tail_a_reopened_session_reads_while_minutes_seal() {
 
     let (kept, _) = earlier_follow(&mut fixture, &mut session);
 
-    let reopened: Vec<(u64, Value)> = kept
+    let reopened: Vec<(u64, EarlierTail)> = kept
         .iter()
         .map(|(last, _)| (*last, earlier_reopened(&fixture.root, *last)))
         .collect();
@@ -908,6 +908,76 @@ fn answers_a_kept_tail_after_its_read_is_canceled() {
 }
 
 #[test]
+fn reads_in_one_stretch_share_one_tail_and_the_read_that_crosses_it_moves() {
+    // Goal: a page reading each second gets the tail of the second before until its context
+    // crosses into the next stretch, and each tail is the one a newly opened session reads.
+    // Method: read the tail at eleven context last seconds in a row, the first ten in one
+    // stretch whose first second holds no point, the eleventh in the next, whose limit adds
+    // minute 13's first reading, and compare each with the one before and a reopened session's.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let first_last = earlier_context_last(earlier_wall(13 * 60 + 1));
+
+    let tails: Vec<EarlierTail> = (0..=EARLIER_STRIDE_SECONDS)
+        .map(|step| session.earlier_context(first_last + step).unwrap())
+        .collect();
+
+    let shared: Vec<(usize, bool)> = (1..10)
+        .map(|step| (step, tails[step].shares_points_with(&tails[0])))
+        .collect();
+    assert_eq!(shared, (1..10).map(|step| (step, true)).collect::<Vec<_>>());
+    assert!(!tails[10].shares_points_with(&tails[9]));
+    let last_wall = |tail: &EarlierTail| {
+        let points = tail["earlier_trends"].as_array().unwrap();
+        points.last().unwrap()["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND
+    };
+    assert!(last_wall(&tails[9]) < earlier_wall(13 * 60 + 1));
+    assert_eq!(last_wall(&tails[10]), earlier_wall(13 * 60 + 1));
+    let steps: [u64; 3] = [0, 9, 10];
+    let kept: Vec<(u64, EarlierTail)> = steps
+        .iter()
+        .map(|&step| (step, tails[usize::try_from(step).unwrap()].clone()))
+        .collect();
+    let reopened: Vec<(u64, EarlierTail)> = steps
+        .iter()
+        .map(|&step| (step, earlier_reopened(&fixture.root, first_last + step)))
+        .collect();
+    assert_eq!(kept, reopened);
+}
+
+#[test]
+fn a_tail_whose_first_second_passes_a_point_and_returns_gives_it_again() {
+    // Goal: the first point of the tail leaves once the context's first second passes it and
+    // comes back when a read returns before it, within one stretch, as a page that steps back a
+    // second does. Method: read the tail from a first second at minute 2's first reading, a
+    // second later, and at it again, and compare each with a newly opened session's.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let at_point = earlier_wall(2 * 60 + 1) + LOADED_SECONDS + LEAD_IN_SECONDS - 1;
+    assert_eq!(
+        TailRange::of_context(at_point),
+        TailRange::of_context(at_point + 1)
+    );
+
+    let held = session.earlier_context(at_point).unwrap();
+    let passed = session.earlier_context(at_point + 1).unwrap();
+    let returned = session.earlier_context(at_point).unwrap();
+
+    let first_wall = |tail: &EarlierTail| {
+        tail["earlier_trends"][0]["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND
+    };
+    assert_eq!(first_wall(&held), earlier_wall(2 * 60 + 1));
+    assert_eq!(first_wall(&passed), earlier_wall(2 * 60 + 11));
+    assert_eq!(returned, held);
+    assert_eq!(passed, earlier_reopened(&fixture.root, at_point + 1));
+    assert_eq!(returned, earlier_reopened(&fixture.root, at_point));
+}
+
+#[test]
 fn keeps_the_minutes_a_canceled_fill_finished() {
     // Goal: a canceled read of the tail loses only the minutes of the batch it was reading.
     // Method: cancel once the first minute is kept, read the tail again in the next epoch, and
@@ -940,7 +1010,7 @@ fn keeps_the_minutes_a_canceled_fill_finished() {
 fn earlier_follow(
     fixture: &mut RingFixture,
     session: &mut LiveSession,
-) -> (Vec<(u64, Value)>, u64) {
+) -> (Vec<(u64, EarlierTail)>, u64) {
     let seals = [0, 3, 9];
     let mut tails = Vec::new();
     let mut reads = 0;
@@ -1004,7 +1074,7 @@ fn earlier_segments(points: &Value) -> Vec<Vec<u64>> {
 }
 
 /// The tail a newly opened session reads for the context ending at `last`.
-fn earlier_reopened(root: &Path, last: u64) -> Value {
+fn earlier_reopened(root: &Path, last: u64) -> EarlierTail {
     LiveSession::open(root).unwrap().earlier_context(last).unwrap()
 }
 

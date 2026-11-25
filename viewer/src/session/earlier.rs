@@ -4,6 +4,7 @@
 //! once, and assembles each stride's tail from the minutes it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds};
@@ -37,6 +38,8 @@ const EARLIER_SECONDS: u64 = LOADED_SECONDS + LEAD_IN_SECONDS - CHARTED_SECONDS;
 /// The seconds after the tail's limit whose readings decide whether its last segment joins the
 /// full-detail context.
 const JOIN_SECONDS: u64 = 2 * EARLIER_STRIDE_SECONDS;
+/// The bytes an older tail's points take once written out, at most.
+const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// Older segments are numbered above any the full-detail context counts, so a segment of the
 /// tail is never mistaken for one of the recent readings.
 const SEGMENT_BASE: u64 = 1 << 32;
@@ -106,6 +109,112 @@ impl TailRange {
     fn join_second(self) -> u64 {
         self.limit_second + JOIN_SECONDS
     }
+}
+
+/// The older tail last assembled for a range, in time order, split where the last answer began,
+/// so a read whose first second leaves the split where it is shares that answer's list.
+pub(crate) struct AssembledTail {
+    range: TailRange,
+    /// The points before the first the last answer held.
+    before: Vec<Value>,
+    /// The points from the first the last answer held, as the JSON list it shares.
+    answer: Arc<Value>,
+    /// Whether `answer` is known to pass the bound.
+    bounded: bool,
+}
+
+impl AssembledTail {
+    /// The tail of `points`, which `context_points_order` sorted, so their wall seconds never
+    /// fall, as the split of `answer` needs.
+    fn new(range: TailRange, points: Vec<Value>) -> Self {
+        Self::new_in_wall_order(&points);
+
+        Self {
+            range,
+            before: Vec::new(),
+            answer: Arc::new(Value::Array(points)),
+            bounded: false,
+        }
+    }
+
+    /// Asserts that each point stands no earlier than the point before it. A point with no wall
+    /// time stands first, as `context_points_order` puts it, and is never held.
+    fn new_in_wall_order(points: &[Value]) {
+        for pair in points.windows(2) {
+            assert!(
+                pair[0]["wall_ns"].as_u64() <= pair[1]["wall_ns"].as_u64(),
+                "An older tail's points are in time order"
+            );
+        }
+    }
+
+    /// The points from `first_second` on, as a JSON list a context can carry. The split moves
+    /// only where a point crosses `first_second`, which copies the list once where a page still
+    /// holds the last answer. The points are in time order, so the points held are those after
+    /// the split. The bound is `context_bytes_of` alone, which no caller replaces, and it is
+    /// checked again only after points came back into the answer.
+    fn answer(&mut self, first_second: u64) -> Result<Arc<Value>> {
+        let held = |point: &Value| {
+            point["wall_ns"]
+                .as_u64()
+                .is_some_and(|wall| wall / NS >= first_second)
+        };
+        let points = assembled_points(&self.answer);
+        if points.first().is_some_and(|point| !held(point)) {
+            // A cut leaves fewer points and fewer bytes of the list, so a list that passed the
+            // bound passes it still, and one that failed is checked again.
+            let count = points.partition_point(|point| !held(point));
+            let points = assembled_points_mut(&mut self.answer);
+            self.before.extend(points.drain(..count));
+        } else if self.before.last().is_some_and(held) {
+            let index = self.before.partition_point(|point| !held(point));
+            let moved = self.before.split_off(index);
+            let points = assembled_points_mut(&mut self.answer);
+            drop(points.splice(..0, moved));
+            self.bounded = false;
+        }
+
+        if !self.bounded {
+            context_bytes_of(assembled_points(&self.answer))?;
+            self.bounded = true;
+        }
+
+        Ok(Arc::clone(&self.answer))
+    }
+}
+
+/// Refuses a tail of more points or bytes than a context carries.
+fn context_bytes_of(points: &[Value]) -> Result<()> {
+    if points.len() > OBSERVATIONS_MAX {
+        return Err(Error::Bound("context observations"));
+    }
+
+    if serde_json::to_vec(points)
+        .map_err(std::io::Error::other)?
+        .len()
+        > CONTEXT_BYTES_MAX
+    {
+        return Err(Error::Bound("context bytes"));
+    }
+
+    Ok(())
+}
+
+fn assembled_points(answer: &Value) -> &[Value] {
+    let Some(points) = answer.as_array() else {
+        unreachable!("An older tail is a JSON list");
+    };
+
+    points
+}
+
+/// The points of `answer`, copied first where a page still holds them.
+fn assembled_points_mut(answer: &mut Arc<Value>) -> &mut Vec<Value> {
+    let Some(points) = Arc::make_mut(answer).as_array_mut() else {
+        unreachable!("An older tail is a JSON list");
+    };
+
+    points
 }
 
 /// The sealed minutes the older tail of a saved session keeps. The tail assembled from them is
@@ -240,7 +349,9 @@ impl KeptTail {
             let Some(step) = self.next(history, &needed) else {
                 self.fill_drop(history, &needed);
                 let points = self.assemble(history, range, &needed, &retained)?;
-                history.earlier_tail.replace(Some((range, points)));
+                history
+                    .earlier_tail
+                    .replace(Some(AssembledTail::new(range, points)));
                 return Ok(());
             };
             if self.fill_readings(history, range, &needed) > OBSERVATIONS_MAX {
@@ -339,32 +450,41 @@ impl KeptTail {
         assert!(self.minutes.len() <= history.windows.len());
     }
 
-    /// Gives `respond` the tail of `range`, where answering reads no saved history, and `None`
-    /// where it would.
-    pub(crate) fn answer<T>(
+    /// The points of the tail of `range` from `first_second` on, as a JSON list a context can
+    /// carry, where answering reads no saved history, and `None` where it would. A read that
+    /// finds the range and the first point of the read before shares that read's list.
+    pub(crate) fn answer(
         &self,
         history: &Session,
         range: TailRange,
-        respond: impl FnOnce(&[Value]) -> Result<T>,
-    ) -> Result<Option<T>> {
+        first_second: u64,
+    ) -> Result<Option<Arc<Value>>> {
         if !history.span_holds(range.context_last_second())? {
             return Ok(None);
         }
-        if let Some((assembled, points)) = history.earlier_tail.borrow().as_ref() {
-            if *assembled == range {
-                return respond(points).map(Some);
+        let assembled = history
+            .earlier_tail
+            .borrow()
+            .as_ref()
+            .is_some_and(|tail| tail.range == range);
+        if !assembled {
+            let retained = history.reader().retained();
+            let needed = history.earlier_needed(range, &retained);
+            if self.next(history, &needed).is_some() {
+                return Ok(None);
             }
-        }
-        let retained = history.reader().retained();
-        let needed = history.earlier_needed(range, &retained);
-        if self.next(history, &needed).is_some() {
-            return Ok(None);
+            let points = self.assemble(history, range, &needed, &retained)?;
+            history
+                .earlier_tail
+                .replace(Some(AssembledTail::new(range, points)));
         }
 
-        let points = self.assemble(history, range, &needed, &retained)?;
-        let response = respond(&points);
-        history.earlier_tail.replace(Some((range, points)));
-        response.map(Some)
+        let mut tail = history.earlier_tail.borrow_mut();
+        let Some(tail) = tail.as_mut() else {
+            unreachable!("The older tail was assembled above");
+        };
+
+        tail.answer(first_second).map(Some)
     }
 
     /// The first read the tail needs, in the session's order of minutes, so a minute is read
@@ -928,5 +1048,105 @@ mod tests {
 
         assert_eq!(segment_numbers(&observations), [1, 1, 1, 2, 2]);
         assert!(segment_numbers(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_assembled_tail_checks_its_bound_only_once_its_answer_changes() {
+        // Goal: a read whose first second leaves the kept answer as it was shares that answer
+        // and checks no bound, and a read that moves its first point, forward or back, gives
+        // the points from its first second. Method: assemble four points ten seconds apart,
+        // answer from first seconds that move forward and back across them, and count what each
+        // read allocates, since the bound writes the points out and a read that shares its
+        // answer allocates nothing.
+        let points = (0..4)
+            .map(|stretch| serde_json::json!({ "wall_ns": (100 + stretch * 10) * NS }))
+            .collect();
+        let mut tail = AssembledTail::new(TailRange::of_context(10_000), points);
+
+        let (answers, allocated): (Vec<Arc<Value>>, Vec<bool>) =
+            [100, 101, 105, 110, 115, 100, 100]
+                .into_iter()
+                .map(|first_second| {
+                    let (answer, allocations) =
+                        crate::allocation_tests::observe(|| tail.answer(first_second));
+                    (answer.unwrap(), allocations > 0)
+                })
+                .unzip();
+
+        let lengths: Vec<usize> = answers
+            .iter()
+            .map(|answer| assembled_points(answer).len())
+            .collect();
+        assert_eq!(lengths, [4, 3, 3, 3, 2, 4, 4]);
+        assert_eq!(allocated, [true, true, false, false, true, true, false]);
+        assert!(Arc::ptr_eq(&answers[1], &answers[2]));
+        assert!(Arc::ptr_eq(&answers[1], &answers[3]));
+        assert!(Arc::ptr_eq(&answers[5], &answers[6]));
+        assert_eq!(answers[5], answers[0]);
+    }
+
+    #[test]
+    fn an_assembled_tail_whose_answer_fails_its_bound_fails_every_read_of_it() {
+        // Goal: a tail too large for a context never reaches a page, however often it is read,
+        // and a read that brings a left point back checks the bound again. Method: assemble one
+        // point more than a context carries, one second apart, and answer from its first second
+        // twice, from the second after, which leaves the first point out, and from its first
+        // second again.
+        let points = (0..=OBSERVATIONS_MAX)
+            .map(|index| {
+                let second = 100 + u64::try_from(index).unwrap();
+                serde_json::json!({ "wall_ns": second * NS })
+            })
+            .collect();
+        let mut tail = AssembledTail::new(TailRange::of_context(10_000), points);
+
+        let first = tail.answer(100);
+        let second = tail.answer(100);
+        let cut = tail.answer(101);
+        let returned = tail.answer(100);
+
+        assert!(matches!(first, Err(Error::Bound("context observations"))));
+        assert!(matches!(second, Err(Error::Bound("context observations"))));
+        assert_eq!(assembled_points(&cut.unwrap()).len(), OBSERVATIONS_MAX);
+        assert!(matches!(
+            returned,
+            Err(Error::Bound("context observations"))
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "An older tail's points are in time order")]
+    fn an_assembled_tail_whose_points_are_out_of_time_order_stops_the_program() {
+        // Goal: a tail whose points come out of time order stops the program, since its split
+        // would hold other points than those from a read's first second. Method: assemble two
+        // points, the later first.
+        let points = vec![
+            serde_json::json!({ "wall_ns": 110 * NS }),
+            serde_json::json!({ "wall_ns": 100 * NS }),
+        ];
+
+        drop(AssembledTail::new(TailRange::of_context(10_000), points));
+    }
+
+    #[test]
+    fn context_rejects_more_than_4096_scalar_points() {
+        // Goal: the context budget refuses a result larger than the public observation bound.
+        // Method: measure 4097 individually tiny scalar values, whose bytes fit the other bound.
+        let points = vec![serde_json::json!({"cpu_percent":0}); 4097];
+
+        let result = context_bytes_of(&points);
+
+        assert!(matches!(result, Err(Error::Bound("context observations"))));
+    }
+
+    #[test]
+    fn context_rejects_more_than_eight_mib_of_serialized_scalars() {
+        // Goal: a small point count cannot evade the separate serialized context byte bound.
+        // Method: encode one 8 MiB value, whose JSON framing exceeds the 8 MiB contract.
+        let points = [Value::String("x".repeat(8 * 1024 * 1024))];
+
+        let result = context_bytes_of(&points);
+
+        assert!(matches!(result, Err(Error::Bound("context bytes"))));
     }
 }

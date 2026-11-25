@@ -37,8 +37,8 @@ pub struct Session {
     /// The wall-clock bounds of each window's readings, from its manifest, or from its ticks
     /// where the manifest holds none.
     wall_bounds: Vec<Option<TimeBounds>>,
-    /// The older tail last assembled from these windows and the range it covers.
-    earlier_tail: std::cell::RefCell<Option<(TailRange, Vec<Value>)>>,
+    /// The older tail last assembled from these windows, split where its last answer began.
+    earlier_tail: std::cell::RefCell<Option<earlier::AssembledTail>>,
     /// The context a select read last from these windows, which a select of the same context
     /// takes again without a read, since a session's sealed windows never change. It holds one
     /// context, of at most `OBSERVATIONS_MAX` observations.
