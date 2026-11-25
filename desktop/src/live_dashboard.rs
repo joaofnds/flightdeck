@@ -924,7 +924,7 @@ impl LiveDashboard {
         if self.followed_store_view().is_none() {
             return;
         }
-        // The CPU page's reader reads its cores where the View could not build them.
+        // The CPU page's reader reads its logical CPUs where the View could not build them.
         if !self.store_view_draws_whole_page() {
             return;
         }

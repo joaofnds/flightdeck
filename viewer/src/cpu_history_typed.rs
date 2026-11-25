@@ -33,7 +33,7 @@ pub struct CpuHistoryIdentity {
     pub wall_ns: u64,
 }
 
-/// The cores of one second as the CPU page's bars draw them: each logical CPU's busy share over
+/// The logical CPUs of one second as the CPU page's bars draw them: the busy share of each over
 /// the interval since the reading before, or why the interval has none.
 pub struct CpuDetail {
     pub identity: CpuHistoryIdentity,

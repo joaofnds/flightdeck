@@ -580,7 +580,7 @@ impl CompleteMachine {
 
     /// `reading`, a complete reading no other owner holds yet, with each logical CPU busy for the
     /// share `busy_percent` gives it over the interval since `previous`, so a test outside the
-    /// viewer can give a second the cores the CPU page's bars and heatmap draw.
+    /// viewer can give a second the logical CPUs the CPU page's bars and heatmap draw.
     #[must_use]
     pub fn with_cpu_interval(
         mut reading: Arc<Self>,

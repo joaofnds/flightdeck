@@ -427,9 +427,9 @@ impl LiveDashboard {
         let mut preview = Preview::resident(snapshot, &self.request, target);
         preview.held = in_view;
         // The View holds the second's readings and top Apps, so the page reads nothing of it
-        // unless it shows a detail only the reader reads, as the CPU page does of its cores. Of
-        // an older stretch the View sampled no tick of, it holds the readings alone, and the top
-        // Apps the page's reading ranked complete them.
+        // unless it shows a detail only the reader reads, as the CPU page does of its logical
+        // CPUs. Of an older stretch the View sampled no tick of, it holds the readings alone,
+        // and the top Apps the page's reading ranked complete them.
         if let Some(held) = &preview.held {
             let ranked_by_reading = held.second.is_some() && preview.reading.rankings.is_some();
             let detailed = super::resident_detail_complete(&self.request.route, &preview.reading);

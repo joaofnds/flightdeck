@@ -277,7 +277,8 @@ fn cpu_refused_count(view: &crate::store::View) -> usize {
         .count()
 }
 
-/// `detail` as the reader writes the cores of a second, but for the losses beside each identity.
+/// `detail` as the reader writes the logical CPUs of a second, but for the losses beside each
+/// identity.
 fn cpu_detail_json(detail: &crate::store::CpuDetail) -> Value {
     let identity = |identity: &crate::store::CpuHistoryIdentity| {
         serde_json::json!({"run":identity.run,"boot":identity.boot,

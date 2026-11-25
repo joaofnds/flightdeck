@@ -161,8 +161,9 @@ impl CPUActivity {
         Ok(activity)
     }
 
-    /// The bars of `detail`, the cores the store's View built of its newest second, which it
-    /// refuses where `decode` refuses the same cores written as JSON for `selected`.
+    /// The bars of `detail`, the logical CPUs the store's View built of its newest second,
+    /// which it refuses where `decode` refuses the same logical CPUs written as JSON for
+    /// `selected`.
     pub fn from_store(detail: viewer::store::CpuDetail, selected: &Value) -> Result<Self, String> {
         let observation = crate::live_cpu_history::identity_value(detail.identity);
         identity_validate(&observation, selected)?;
@@ -697,11 +698,11 @@ mod tests {
         ($($name:ident, $busy_percent:expr, $unavailable_reason:expr;)*) => {$(
             #[test]
             fn $name() {
-                // Goal: the bars of the cores the store's View built are the bars decode makes
-                // of the same cores written as JSON. Method: one logical CPU's share and its
-                // interval's reason, built from the View's typed cores and decoded from their
-                // JSON, then both results.
-                let detail = cores($busy_percent, $unavailable_reason);
+                // Goal: the bars of the logical CPUs the store's View built are the bars decode
+                // makes of the same logical CPUs written as JSON. Method: one logical CPU's
+                // share and its interval's reason, built from the View's typed value and
+                // decoded from its JSON, then both results.
+                let detail = logical_cpus($busy_percent, $unavailable_reason);
                 let written = written_as_json(&detail);
                 let selected = written["observation"].clone();
 
@@ -723,10 +724,10 @@ mod tests {
         ($($name:ident, $busy_percent:expr, $refusal:expr;)*) => {$(
             #[test]
             fn $name() {
-                // Goal: the View's cores are refused where a share is not one from 0 to 100,
-                // before it is narrowed to the bars' f32, so rounding admits none. Method: one
-                // logical CPU's share built from the View's typed cores, then the refusal.
-                let detail = cores(Some($busy_percent), None);
+                // Goal: the View's logical CPUs are refused where a share is not one from 0 to
+                // 100, before it is narrowed to the bars' f32, so rounding admits none. Method:
+                // one logical CPU's share built from the View's typed value, then the refusal.
+                let detail = logical_cpus(Some($busy_percent), None);
                 let selected = written_as_json(&detail)["observation"].clone();
 
                 let built = CPUActivity::from_store(detail, &selected);
@@ -745,9 +746,9 @@ mod tests {
         from_store_refuses_a_share_that_is_not_a_number, f64::NAN, NOT_A_NUMBER;
     }
 
-    /// The cores of the second `activity` names, with one logical CPU busy for `busy_percent`
-    /// over the interval since the second before, which `unavailable_reason` says is missing.
-    fn cores(
+    /// The logical CPUs of the second `activity` names, with one busy for `busy_percent` over
+    /// the interval since the second before, which `unavailable_reason` says is missing.
+    fn logical_cpus(
         busy_percent: Option<f64>,
         unavailable_reason: Option<&'static str>,
     ) -> viewer::store::CpuDetail {
@@ -767,7 +768,7 @@ mod tests {
         }
     }
 
-    /// `detail` as the reader writes the same cores.
+    /// `detail` as the reader writes the same logical CPUs.
     fn written_as_json(detail: &viewer::store::CpuDetail) -> Value {
         let mut written = activity();
         written["interval_available"] = json!(detail.unavailable_reason.is_none());

@@ -321,7 +321,7 @@ fn resident_complete(
 }
 
 /// Whether `reading` holds the detail the page `route` shows of its second beside its readings
-/// and top Apps, which only the reader reads: the CPU page's cores and the Apps page's App.
+/// and top Apps, which only the reader reads: the CPU page's logical CPUs and the Apps page's App.
 fn resident_detail_complete(route: &str, reading: &Snapshot) -> bool {
     match route {
         "cpu" => reading.cpu_detail.is_some(),
