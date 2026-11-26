@@ -1,29 +1,9 @@
-use super::{CategorySummary, Extreme, GaugeSummary, Mark, RateSummary, fixed_from_value};
+use super::{CategoryHighest, Extreme, GaugeSummary, RateHighest, fixed_from_value};
 
 fn gauge_of(readings: &[(Option<f64>, bool)], first_place: u32) -> GaugeSummary<u32> {
     let mut summary = GaugeSummary::default();
     for (place, (value, follows)) in (first_place..).zip(readings) {
         summary.push(*value, *follows, place);
-    }
-
-    summary
-}
-
-fn rate_of(readings: &[(Option<(f64, u64)>, bool)], first_place: u32) -> RateSummary<u32> {
-    let mut summary = RateSummary::default();
-    for (place, (rate, follows)) in (first_place..).zip(readings) {
-        summary.push(*rate, *follows, place);
-    }
-
-    summary
-}
-
-type Thermal = CategorySummary<u8, u32, 3>;
-
-fn thermal_of(readings: &[(Option<u8>, bool)], first_place: u32) -> Thermal {
-    let mut summary = Thermal::default();
-    for (place, (category, follows)) in (first_place..).zip(readings) {
-        summary.push(*category, *follows, place);
     }
 
     summary
@@ -139,32 +119,19 @@ fn a_reading_that_does_not_follow_counts_as_a_break_with_or_without_a_value() {
 }
 
 #[test]
-fn a_rate_counts_in_its_mean_for_as_long_as_its_interval_lasted() {
-    // Goal: a long interval weighs more than a short one, as the counter's growth does, where a
-    // gauge's readings each count the same.
-    // Method: reduce a rate over one second and a rate over three seconds.
-    let second = 1_000_000_000;
-    let readings = [
-        (Some((100.0, second)), true),
-        (Some((0.0, 3 * second)), true),
-    ];
+fn a_rate_over_no_interval_never_becomes_the_highest() {
+    // Goal: no division by a time that did not pass reaches a peak, however high it reads.
+    // Method: a rate with no elapsed time above a rate over a second.
+    let mut highest = RateHighest::<u32>::default();
 
-    let summary = rate_of(&readings, 0);
+    highest.push(Some((5.0, 0)), 0);
+    highest.push(Some((1.0, 1_000_000_000)), 1);
 
-    assert!((summary.mean().unwrap() - 25.0).abs() < 0.001);
-    assert_eq!(summary.covered_ns(), Some(4 * i128::from(second)));
-}
-
-#[test]
-fn a_rate_over_no_interval_is_missing() {
-    // Goal: no division by a time that did not pass.
-    // Method: reduce a rate with no elapsed time and a reading with no rate.
-    let readings = [(Some((5.0, 0)), true), (None, true)];
-
-    let summary = rate_of(&readings, 0);
-
-    assert_eq!(summary.measured, None);
-    assert_eq!(summary.missing, 2);
+    let expected = Extreme {
+        value: 1.0,
+        place: 1,
+    };
+    assert_eq!(highest.reading, Some(expected));
 }
 
 #[test]
@@ -195,35 +162,6 @@ fn a_reading_too_small_for_the_total_still_counts_as_a_value() {
 }
 
 #[test]
-fn a_category_keeps_each_change_and_the_highest_with_their_places() {
-    // Goal: a brief change of thermal state stays visible where no mean could show it.
-    // Method: reduce readings that rise for one reading and fall back.
-    let readings = [0, 0, 2, 0, 0].map(|category| (Some(category), true));
-
-    let summary = thermal_of(&readings, 0);
-
-    let changes: Vec<_> = summary.changes().copied().collect();
-    let mark = |category, place| Mark { category, place };
-    assert_eq!(changes, [mark(2, 2), mark(0, 3)]);
-    assert_eq!(summary.highest, Some(mark(2, 2)));
-    assert_eq!(summary.first, Some(mark(0, 0)));
-    assert_eq!(summary.last, Some(mark(0, 4)));
-}
-
-#[test]
-fn a_category_counts_the_changes_it_could_not_keep() {
-    // Goal: the size of a summary stays fixed however often a category changes, and a reader knows
-    // what was left out.
-    // Method: reduce more changes than the summary keeps.
-    let readings = [0, 1, 0, 1, 0, 1].map(|category| (Some(category), true));
-
-    let summary = thermal_of(&readings, 0);
-
-    assert_eq!(summary.changes().count(), 3);
-    assert_eq!(summary.change_count, 5);
-}
-
-#[test]
 fn merging_gauges_cut_anywhere_equals_reducing_their_readings() {
     // Goal: a stream reduced in any partition gives what a batch reduction gives, for every
     // statistic and with ties, gaps and breaks among the readings.
@@ -251,84 +189,20 @@ fn merging_gauges_cut_anywhere_equals_reducing_their_readings() {
 }
 
 #[test]
-fn merging_rates_cut_anywhere_equals_reducing_their_readings() {
-    // Goal: rates, whose mean weighs each by its interval, keep the same property as gauges.
-    // Method: generate rates over varied intervals, reduce them whole, and merge four parts.
-    let mut generator = Generator(2);
-    for _case in 0..2_000 {
-        let length = usize::try_from(generator.next_below(40)).unwrap();
-        let readings: Vec<_> = (0..length)
-            .map(|_| {
-                let elapsed_ns = generator.next_below(4) * 500_000_000;
-                (
-                    generator.value().map(|rate| (rate, elapsed_ns)),
-                    generator.follows(),
-                )
-            })
-            .collect();
-        let [one, two, three] = generator.cuts(length);
-
-        let mut merged = rate_of(&readings[..one], 0);
-        for (start, end) in [(one, two), (two, three), (three, length)] {
-            let first_place = u32::try_from(start).unwrap();
-            merged.merge(&rate_of(&readings[start..end], first_place));
-        }
-
-        assert_eq!(
-            merged,
-            rate_of(&readings, 0),
-            "{readings:?} cut at {one} {two} {three}"
-        );
-    }
-}
-
-#[test]
-fn merging_categories_cut_anywhere_equals_reducing_their_readings() {
-    // Goal: a change that falls on a cut is found as it is anywhere else, kept or counted.
-    // Method: generate categories, reduce them whole, and merge the reductions of four parts.
-    let mut generator = Generator(3);
-    for _case in 0..2_000 {
-        let length = usize::try_from(generator.next_below(40)).unwrap();
-        let readings: Vec<_> = (0..length)
-            .map(|_| {
-                let category = match generator.next_below(8) {
-                    0 => None,
-                    _ => Some(u8::try_from(generator.next_below(4)).unwrap()),
-                };
-                (category, generator.follows())
-            })
-            .collect();
-        let [one, two, three] = generator.cuts(length);
-
-        let mut merged = thermal_of(&readings[..one], 0);
-        for (start, end) in [(one, two), (two, three), (three, length)] {
-            let first_place = u32::try_from(start).unwrap();
-            merged.merge(&thermal_of(&readings[start..end], first_place));
-        }
-
-        assert_eq!(
-            merged,
-            thermal_of(&readings, 0),
-            "{readings:?} cut at {one} {two} {three}"
-        );
-    }
-}
-
-#[test]
 fn a_summary_keeps_the_earliest_of_readings_that_tie() {
     // Goal: a peak two readings share names the first of them, so a reduction and a merge of the
     // same readings name the same reading.
     // Method: two equal readings of a gauge and of a category, at different places.
     let mut gauge = GaugeSummary::<u32>::default();
-    let mut thermal = Thermal::default();
+    let mut thermal = CategoryHighest::<u8, u32>::default();
 
     gauge.push(Some(5.0), true, 1);
     gauge.push(Some(5.0), true, 2);
-    thermal.push(Some(3), true, 1);
-    thermal.push(Some(3), true, 2);
+    thermal.push(Some(3), 1);
+    thermal.push(Some(3), 2);
 
     let measured = gauge.measured.unwrap();
     assert_eq!(measured.maximum.place, 1);
     assert_eq!(measured.minimum.place, 1);
-    assert_eq!(thermal.highest.unwrap().place, 1);
+    assert_eq!(thermal.reading.unwrap().place, 1);
 }

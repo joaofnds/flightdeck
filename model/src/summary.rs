@@ -18,7 +18,6 @@ const _: () = {
     // A summary holds no buffer, so what a chart keeps follows its series and its tier and not the
     // recording's length.
     assert!(size_of::<GaugeSummary<u32>>() <= 128);
-    assert!(size_of::<RateSummary<u32>>() <= 128);
 };
 
 /// One value of a reduction and the reading it came from.
@@ -47,35 +46,37 @@ pub struct Measured<Place> {
     pub minimum: Extreme<Place>,
     pub maximum: Extreme<Place>,
     pub last: Extreme<Place>,
-    /// How many readings had values.
+    /// How many readings had values, which their mean divides by.
     pub count: u32,
     total: i128,
-    weight: i128,
     overflowed: bool,
 }
 
-/// What a gauge and a rate share: the readings with values, and how many had none or did not
-/// follow the reading before them. A reading of zero is a value. A reading that did not follow
-/// marks a break in the line a reader must not draw across.
+/// Readings of a quantity at an instant, such as a temperature or the memory in use, each counting
+/// the same in a mean: the readings with values, and how many had none or did not follow the
+/// reading before them. A reading of zero is a value. A reading that did not follow marks a break
+/// in the line a reader must not draw across.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Reduction<Place> {
+pub struct GaugeSummary<Place> {
     pub measured: Option<Measured<Place>>,
     pub missing: u32,
     pub breaks: u32,
 }
 
-impl<Place: Copy> Reduction<Place> {
-    /// The mean of the readings over what they were weighted by, or `None` with no reading or
-    /// where the total outgrew what it counts. The division truncates a fraction of the total's
-    /// finest unit.
+impl<Place: Copy> GaugeSummary<Place> {
+    /// The mean of the readings, or `None` with no reading or where the total outgrew what it
+    /// counts. The division truncates a fraction of the total's finest unit.
     #[must_use]
     pub fn mean(&self) -> Option<f64> {
         let measured = self.measured.as_ref().filter(|found| !found.overflowed)?;
 
-        Some(value_from_fixed(measured.total / measured.weight))
+        Some(value_from_fixed(
+            measured.total / i128::from(measured.count),
+        ))
     }
 
-    fn push(&mut self, value: Option<f64>, weight: u64, follows: bool, place: Place) {
+    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
+    pub fn push(&mut self, value: Option<f64>, follows: bool, place: Place) {
         if !follows {
             self.breaks += 1;
         }
@@ -86,20 +87,18 @@ impl<Place: Copy> Reduction<Place> {
         };
 
         let mark = Extreme { value, place };
-        let total = fixed.checked_mul(i128::from(weight));
         self.merge_measured(Measured {
             minimum: mark,
             maximum: mark,
             last: mark,
             count: 1,
-            total: total.unwrap_or(0),
-            weight: i128::from(weight),
-            overflowed: total.is_none(),
+            total: fixed,
+            overflowed: false,
         });
     }
 
-    /// Takes in the reduction of the readings right after this one's.
-    fn merge(&mut self, next: &Self) {
+    /// Takes in the summary of the readings right after this one's.
+    pub fn merge(&mut self, next: &Self) {
         self.missing += next.missing;
         self.breaks += next.breaks;
         if let Some(measured) = next.measured {
@@ -121,67 +120,7 @@ impl<Place: Copy> Reduction<Place> {
         held.count += next.count;
         let total = held.total.checked_add(next.total);
         held.total = total.unwrap_or(0);
-        held.weight += next.weight;
         held.overflowed = held.overflowed || next.overflowed || total.is_none();
-    }
-}
-
-/// Readings of a quantity at an instant, such as a temperature or the memory in use, each counting
-/// the same in a mean.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct GaugeSummary<Place>(Reduction<Place>);
-
-impl<Place: Copy> GaugeSummary<Place> {
-    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
-    pub fn push(&mut self, value: Option<f64>, follows: bool, place: Place) {
-        self.0.push(value, 1, follows, place);
-    }
-
-    /// Takes in the summary of the readings right after this one's.
-    pub fn merge(&mut self, next: &Self) {
-        self.0.merge(&next.0);
-    }
-}
-
-impl<Place> std::ops::Deref for GaugeSummary<Place> {
-    type Target = Reduction<Place>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// Rates a counter's growth gave over intervals between readings, each counting in a mean for as
-/// long as its interval lasted.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct RateSummary<Place>(Reduction<Place>);
-
-impl<Place: Copy> RateSummary<Place> {
-    /// Takes in the rate over the `elapsed_ns` after the last reading, or `None` where the two
-    /// readings give no rate.
-    pub fn push(&mut self, rate: Option<(f64, u64)>, follows: bool, place: Place) {
-        let (value, elapsed_ns) = rate_reading(rate);
-        self.0.push(value, elapsed_ns, follows, place);
-    }
-
-    /// Takes in the summary of the readings right after this one's.
-    pub fn merge(&mut self, next: &Self) {
-        self.0.merge(&next.0);
-    }
-
-    /// The time the rates covered, in nanoseconds, or `None` with no rate. Time between readings
-    /// that gave no rate is no part of it.
-    #[must_use]
-    pub fn covered_ns(&self) -> Option<i128> {
-        self.0.measured.as_ref().map(|measured| measured.weight)
-    }
-}
-
-impl<Place> std::ops::Deref for RateSummary<Place> {
-    type Target = Reduction<Place>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
@@ -201,112 +140,6 @@ impl<Category: Ord, Place> Mark<Category, Place> {
         } else {
             self
         }
-    }
-}
-
-/// What readings of a category showed, which no mean describes. Keeps the changes between
-/// categories rather than a middle one, the first `CHANGES_KEPT` of them in order and a count of
-/// them all, so a reader knows when any were left out.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CategorySummary<Category, Place, const CHANGES_KEPT: usize> {
-    pub first: Option<Mark<Category, Place>>,
-    pub last: Option<Mark<Category, Place>>,
-    /// The highest category, its earliest reading.
-    pub highest: Option<Mark<Category, Place>>,
-    kept: [Option<Mark<Category, Place>>; CHANGES_KEPT],
-    pub change_count: u32,
-    pub missing: u32,
-    pub breaks: u32,
-}
-
-impl<Category, Place, const CHANGES_KEPT: usize> Default
-    for CategorySummary<Category, Place, CHANGES_KEPT>
-where
-    Category: Copy,
-    Place: Copy,
-{
-    fn default() -> Self {
-        Self {
-            first: None,
-            last: None,
-            highest: None,
-            kept: [None; CHANGES_KEPT],
-            change_count: 0,
-            missing: 0,
-            breaks: 0,
-        }
-    }
-}
-
-impl<Category, Place, const CHANGES_KEPT: usize> CategorySummary<Category, Place, CHANGES_KEPT>
-where
-    Category: Copy + Ord,
-    Place: Copy,
-{
-    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
-    pub fn push(&mut self, category: Option<Category>, follows: bool, place: Place) {
-        if !follows {
-            self.breaks += 1;
-        }
-        let Some(category) = category else {
-            self.missing += 1;
-            return;
-        };
-
-        let mark = Mark { category, place };
-        self.merge(&Self {
-            first: Some(mark),
-            last: Some(mark),
-            highest: Some(mark),
-            ..Self::default()
-        });
-    }
-
-    /// Takes in the summary of the readings right after this one's.
-    pub fn merge(&mut self, next: &Self) {
-        self.missing += next.missing;
-        self.breaks += next.breaks;
-        let Some(next_first) = next.first else {
-            return;
-        };
-
-        let Some(last) = self.last else {
-            self.first = next.first;
-            self.last = next.last;
-            self.highest = next.highest;
-            self.kept = next.kept;
-            self.change_count = next.change_count;
-            return;
-        };
-
-        if last.category != next_first.category {
-            self.merge_change(next_first);
-        }
-        for change in next.kept.iter().flatten() {
-            self.merge_change(*change);
-        }
-        self.change_count += next.change_count.saturating_sub(next.kept_count());
-        self.last = next.last;
-        self.highest = match (self.highest, next.highest) {
-            (Some(held), Some(found)) => Some(held.higher(found)),
-            (held, _) => held,
-        };
-    }
-
-    /// The changes kept, oldest first, each the reading that first showed the new category.
-    pub fn changes(&self) -> impl Iterator<Item = &Mark<Category, Place>> {
-        self.kept.iter().flatten()
-    }
-
-    fn kept_count(&self) -> u32 {
-        crate::u32_from_length(self.kept.iter().flatten().count())
-    }
-
-    fn merge_change(&mut self, change: Mark<Category, Place>) {
-        if let Some(room) = self.kept.iter_mut().find(|kept| kept.is_none()) {
-            *room = Some(change);
-        }
-        self.change_count += 1;
     }
 }
 
@@ -352,7 +185,8 @@ impl<Place> std::ops::Deref for GaugeHighest<Place> {
     }
 }
 
-/// The highest of a counter's rates, as `RateSummary` admits them.
+/// The highest of a counter's rates. A rate over no elapsed time is no rate, so it never becomes
+/// the highest.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RateHighest<Place>(Highest<Place>);
 
@@ -360,7 +194,9 @@ impl<Place: Copy> RateHighest<Place> {
     /// Takes in the rate over the `elapsed_ns` after the last reading, or `None` where the two
     /// readings give no rate.
     pub fn push(&mut self, rate: Option<(f64, u64)>, place: Place) {
-        let (value, _elapsed_ns) = rate_reading(rate);
+        let value = rate
+            .filter(|(_rate, elapsed_ns)| *elapsed_ns > 0)
+            .map(|(rate, _elapsed_ns)| rate);
         self.0.push(value, place);
     }
 }
@@ -410,14 +246,6 @@ impl MachinePlace {
     pub fn second(&self) -> u64 {
         self.wall_ns / 1_000_000_000
     }
-}
-
-/// The rate of `rate` and the nanoseconds it covered. A rate over no time is no rate.
-fn rate_reading(rate: Option<(f64, u64)>) -> (Option<f64>, u64) {
-    let elapsed_ns = rate.map_or(0, |(_rate, elapsed_ns)| elapsed_ns);
-    let value = rate.filter(|_| elapsed_ns > 0).map(|(rate, _)| rate);
-
-    (value, elapsed_ns)
 }
 
 /// `value` in the total's fixed point, rounded toward zero, which keeps its grouping exact. Reads
