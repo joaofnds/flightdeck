@@ -837,7 +837,13 @@ pub(super) fn read_earlier_selection(
         Ok(session)
     });
     let pending = match session {
-        Ok(session) => super::reader_earlier(session, &command.request, tail_at_once, selection),
+        Ok(session) => super::reader_earlier(
+            session,
+            &mut reader.earlier_tail_unread_since,
+            &command.request,
+            tail_at_once,
+            selection,
+        ),
         Err(message) => {
             if let Some(mut fields) = selection.fields_mut() {
                 fields.insert("earlier_error".into(), message.into());

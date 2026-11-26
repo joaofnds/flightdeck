@@ -371,11 +371,12 @@ struct Reader {
     /// notes a new instant, so a page the Store goes on answering lets go once an interval, and
     /// finds nothing to let go of after the first.
     page_caches_unread_since: Option<Instant>,
-    /// Since when nothing reads the older tail: since the reader's rest, until a request that
-    /// reads the tail. The session lets go of the tail `EARLIER_TAIL_KEEP_INTERVAL` later,
-    /// which clears this. It keys on the rest and not on the Store's answer, since a page the
-    /// Store goes on answering reads the tail every reading, and letting go of it then would
-    /// read it again cold once an interval.
+    /// Since when nothing reads the older tail: since the reader's rest, until a reading that
+    /// reads the tail. A hover, a reading that left the tail to the View and a read that skips
+    /// it read none of it, so each leaves this as it found it. The session lets go of the tail
+    /// `EARLIER_TAIL_KEEP_INTERVAL` later, which clears this. It keys on the rest and not on the
+    /// Store's answer, since a page the Store goes on answering reads the tail every reading,
+    /// and letting go of it then would read it again cold once an interval.
     earlier_tail_unread_since: Option<Instant>,
     retry_after: Instant,
 }
@@ -954,11 +955,6 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
                 return Received::Continued;
             };
             mailbox.resting = false;
-            // A hover's read of one second goes without the older tail, so it leaves the tail
-            // as unread as the rest before it did.
-            if !reader_earlier_skips(&next.request) {
-                reader.earlier_tail_unread_since = None;
-            }
             let resting = command.is_none();
             *command = Some(next);
             reader.retry_after = Instant::now();
@@ -1371,7 +1367,13 @@ fn reader_snapshot(
         command.context,
         listing,
     )?);
-    let tail_pending = reader_earlier(session, &command.request, tail_at_once, &mut selection);
+    let tail_pending = reader_earlier(
+        session,
+        &mut reader.earlier_tail_unread_since,
+        &command.request,
+        tail_at_once,
+        &mut selection,
+    );
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     if early {
         histories = reader_snapshot_histories(session, &snapshot);
@@ -1773,9 +1775,11 @@ fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result
 /// a longer range draw, and returns whether the page still waits for them. A step with
 /// `tail_at_once` takes only a tail its session keeps or reads in one batch of saved minutes,
 /// and leaves a longer read to a later step. A failed read leaves the charts at their full-detail
-/// context and says why beside it.
+/// context and says why beside it. A read of the tail clears `earlier_tail_unread_since`, and
+/// nothing else does, so the stamp says since when no reading has read the tail.
 fn reader_earlier(
     session: &mut LiveSession,
+    earlier_tail_unread_since: &mut Option<Instant>,
     request: &Request,
     tail_at_once: bool,
     selection: &mut Selection,
@@ -1789,6 +1793,8 @@ fn reader_earlier(
     let Some(mut fields) = selection.fields_mut() else {
         return false;
     };
+
+    *earlier_tail_unread_since = None;
     let tail = if tail_at_once {
         session.earlier_context_at_once(last)
     } else {

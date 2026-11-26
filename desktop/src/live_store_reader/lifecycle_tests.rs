@@ -1275,6 +1275,60 @@ mod when_the_view_draws_the_page_whole {
             8
         );
     }
+
+    #[test]
+    fn a_reading_left_to_the_view_after_a_rest_lets_go_of_the_tail_an_interval_after_the_rest() {
+        // Goal: a reading that leaves the older tail to the View reads none of it, so a page the
+        // View draws that asks its rested reader for a reading, as a hold does, leaves the tail as
+        // unread as the rest did, and the reader lets go of it an interval after the rest.
+        // Method: read the Network page with its older tail, close the window, ask the rested
+        // reader for the page while the window says the View draws it, step the worker until it
+        // publishes that reading before the interval is over, step it once the interval since the
+        // close is over, and ask the session for the tail it keeps.
+        let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+        let asked = adapter.page_asked_for_after_a_rest(true);
+        assert_eq!(
+            asked.reading.points_keeping,
+            crate::live_source::PointsKeeping::TailLeftToView
+        );
+
+        adapter.worker_step_resting_at(asked.due);
+
+        assert!(
+            adapter
+                .session()
+                .earlier_context_kept(asked.last)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn a_reading_of_the_older_tail_after_a_rest_keeps_the_tail_past_the_interval_after_the_rest() {
+    // Goal: a reading the Store answers that reads the older tail clears the rest's note, so the
+    // reader keeps the tail it just read once an interval since the rest is over, rather than
+    // reading it again cold at the next reading.
+    // Method: read the Network page with its older tail, close the window, ask the rested reader
+    // for the page while the window says the reading draws it, step the worker until it
+    // publishes that reading before the interval is over, step it once the interval since the
+    // close is over, and ask the session for the tail it keeps.
+    let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+    let asked = adapter.page_asked_for_after_a_rest(false);
+    assert_eq!(
+        asked.reading.points_keeping,
+        crate::live_source::PointsKeeping::Kept
+    );
+
+    adapter.worker_step_resting_at(asked.due);
+
+    assert!(
+        adapter
+            .session()
+            .earlier_context_kept(asked.last)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1427,6 +1481,16 @@ fn wait_until_answered(handle: &viewer::store::QueryHandle) {
     panic!("the Store never answered");
 }
 
+/// A page asked for again after its reader rested, as `Adapter::page_asked_for_after_a_rest`
+/// reads it.
+struct AskedAfterARest {
+    reading: Box<crate::live_source::Snapshot>,
+    /// The last second of the context of the older tail the page read before the rest.
+    last: u64,
+    /// When the interval since the rest is over.
+    due: Instant,
+}
+
 struct Adapter {
     root: std::path::PathBuf,
     reader: crate::live_source::Reader,
@@ -1536,6 +1600,43 @@ impl Adapter {
         kept
     }
 
+    /// Reads the Network page with its older tail, closes the window, asks the rested reader for
+    /// the page again while the window says the View draws its charts where `app_chart_from_view`
+    /// holds, and steps the worker until it publishes that reading, a nanosecond before the
+    /// interval since the close is over.
+    fn page_asked_for_after_a_rest(&mut self, app_chart_from_view: bool) -> AskedAfterARest {
+        let last = self.page_with_its_older_tail();
+        let mut kept = self.close_window();
+        let closed = self.reader.earlier_tail_unread_since.unwrap();
+        let due = closed + crate::live_source::EARLIER_TAIL_KEEP_INTERVAL;
+        let before_due = due.checked_sub(Duration::from_nanos(1)).unwrap();
+        self.shared
+            .app_chart_from_view
+            .store(app_chart_from_view, std::sync::atomic::Ordering::Release);
+        let mut asked = request("network");
+        asked.earlier = crate::live_source::Earlier::Load;
+        kept.request(asked).unwrap();
+        self.receive();
+
+        let Update::Ready(reading) = self.worker_step_published_with(|| before_due) else {
+            panic!("the page failed");
+        };
+
+        AskedAfterARest { reading, last, due }
+    }
+
+    /// Takes the page a window asked for as the worker does at the top of its next step, which
+    /// ends the reader's rest.
+    fn receive(&mut self) {
+        let mut command = None;
+
+        let received =
+            crate::live_source::worker_receive(&self.shared, &mut self.reader, &mut command);
+
+        assert_eq!(received, crate::live_source::Received::Taken);
+        self.command = command.unwrap();
+    }
+
     /// Steps the worker once at `now` as it steps while no page reads.
     fn worker_step_resting_at(&mut self, now: Instant) {
         crate::live_source::worker_step(&self.root, &self.shared, &mut self.reader, &mut None, now);
@@ -1562,9 +1663,15 @@ impl Adapter {
 
     /// What the worker's steps publish first, stepping as the worker does with a page to read.
     fn worker_step_published(&mut self) -> Update {
+        self.worker_step_published_with(Instant::now)
+    }
+
+    /// What the worker's steps publish first, stepping as the worker does with a page to read at
+    /// the instant `now` gives each step.
+    fn worker_step_published_with(&mut self, now: impl Fn() -> Instant) -> Update {
         self.shared.mailbox.lock().unwrap().generation = self.command.generation;
         for _ in 0..1_000 {
-            self.worker_step_at(Instant::now());
+            self.worker_step_at(now());
             if let Some(update) = self.shared.mailbox.lock().unwrap().output.take() {
                 return update;
             }
