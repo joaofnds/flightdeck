@@ -13,8 +13,10 @@ use std::time::{Duration, SystemTime};
 /// A build reads each unit's fingerprint on every run, and APFS refreshes an access time only
 /// once it is about a day old, so a unit read today may still show yesterday's read.
 const UNUSED_FOR: Duration = Duration::from_hours(48);
+/// Cargo writes this lock into every directory it builds a profile in, whatever its layout.
+const PROFILE_LOCK: &str = ".cargo-lock";
 /// Cargo holds these in a profile directory while it builds there.
-const LOCKS: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+const LOCKS: [&str; 3] = [PROFILE_LOCK, ".cargo-build-lock", ".cargo-artifact-lock"];
 /// The directories of a profile that keep a unit's outputs under the unit's hash.
 const UNIT_OUTPUTS: [&str; 3] = ["deps", "build", "examples"];
 const HASH_LENGTH: usize = 16;
@@ -88,11 +90,11 @@ fn sweep(target: &Path, now: SystemTime) -> io::Result<Report> {
 fn sweep_profiles(target: &Path) -> io::Result<Vec<PathBuf>> {
     let mut profiles = Vec::new();
     for child in entries(target)? {
-        if directory_exists(&child.join(".fingerprint"))? {
+        if sweep_profiles_holds_lock(&child)? {
             profiles.push(child);
         } else if directory_exists(&child)? {
             for grandchild in entries(&child)? {
-                if directory_exists(&grandchild.join(".fingerprint"))? {
+                if sweep_profiles_holds_lock(&grandchild)? {
                     profiles.push(grandchild);
                 }
             }
@@ -101,6 +103,10 @@ fn sweep_profiles(target: &Path) -> io::Result<Vec<PathBuf>> {
     profiles.sort();
 
     Ok(profiles)
+}
+
+fn sweep_profiles_holds_lock(directory: &Path) -> io::Result<bool> {
+    Ok(metadata(&directory.join(PROFILE_LOCK))?.is_some_and(|lock| lock.is_file()))
 }
 
 /// Takes every lock Cargo takes in `profile`, or gives `None` where a build holds one.
@@ -125,7 +131,8 @@ fn sweep_lock(profile: &Path) -> io::Result<Option<Vec<File>>> {
 
 /// Removes the units of `profile` no build has read since `cutoff`, the outputs no remaining
 /// unit names, and the incremental state no build has written since `cutoff`, and gives how many
-/// it removed.
+/// it removed. Before 1.100 Cargo keeps a unit's fingerprint in `.fingerprint` and its outputs
+/// apart, named with its hash, and since then in one directory, `build/<package>/<hash>`.
 fn sweep_profile(profile: &Path, cutoff: SystemTime) -> io::Result<usize> {
     let mut removed_count = 0;
     let mut live = HashSet::new();
@@ -149,9 +156,34 @@ fn sweep_profile(profile: &Path, cutoff: SystemTime) -> io::Result<usize> {
         }
     }
 
+    for package in entries(&profile.join("build"))? {
+        if directory_exists(&package)? {
+            removed_count += sweep_profile_package(&package, cutoff)?;
+        }
+    }
+
     for crate_path in entries(&profile.join("incremental"))? {
         if sweep_profile_last_write(&crate_path)? < cutoff {
             remove(&crate_path)?;
+            removed_count += 1;
+        }
+    }
+
+    Ok(removed_count)
+}
+
+/// Removes the units in `package`, a package's directory as Cargo lays a profile out since 1.100,
+/// whose fingerprint no build has read since `cutoff`, and gives how many it removed. A directory
+/// a build script wrote before 1.100 can sit here too, so only one named with a hash is a unit.
+fn sweep_profile_package(package: &Path, cutoff: SystemTime) -> io::Result<usize> {
+    let mut removed_count = 0;
+    for unit in entries(package)? {
+        let fingerprint = unit.join("fingerprint");
+        if file_name(&unit).is_some_and(is_hash)
+            && directory_exists(&fingerprint)?
+            && sweep_profile_last_read(&fingerprint)? < cutoff
+        {
+            remove(&unit)?;
             removed_count += 1;
         }
     }
@@ -194,18 +226,23 @@ fn unit_hash(name: &str) -> Option<&str> {
         let Some(hash) = name.get(start..end) else {
             continue;
         };
-        let hexadecimal = hash
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
         let ends = name
             .get(end..)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'));
-        if hexadecimal && ends {
+        if is_hash(hash) && ends {
             return Some(hash);
         }
     }
 
     None
+}
+
+/// Whether `text` is a hash as Cargo writes one: sixteen lowercase hexadecimal digits.
+fn is_hash(text: &str) -> bool {
+    text.len() == HASH_LENGTH
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// The entries of `directory`, or none where it does not exist.
@@ -230,12 +267,16 @@ fn entries(directory: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Whether a directory is at `path`, which none is where the path runs through a file.
 fn directory_exists(path: &Path) -> io::Result<bool> {
+    Ok(metadata(path)?.is_some_and(|found| found.is_dir()))
+}
+
+/// What is at `path`, or `None` where nothing is, as where the path runs through a file.
+fn metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.is_dir()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+        Ok(found) => Ok(Some(found)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(None),
         Err(error) => Err(with_path(path, &error)),
     }
 }

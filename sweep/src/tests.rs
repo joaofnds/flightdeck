@@ -21,8 +21,7 @@ impl Target {
     fn new() -> Self {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("fd-sweep-{}-{serial}", std::process::id()));
-        let profile = root.join("debug");
-        fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+        let profile = profile(&root.join("debug"));
 
         Self { root, profile }
     }
@@ -135,12 +134,52 @@ fn sweeps_a_profile_one_directory_deeper() {
     // Goal: a profile under a directory of its own, as cargo llvm-cov builds one, is swept.
     // Method: put an unused unit in llvm-cov-target/debug and sweep the target.
     let target = Target::new();
-    let profile = target.root.join("llvm-cov-target/debug");
+    let profile = profile(&target.root.join("llvm-cov-target/debug"));
     let unit = fingerprint(&profile, days_ago(30), days_ago(3));
 
     sweep(&target.root, now()).unwrap();
 
     assert!(!unit.exists());
+}
+
+#[test]
+fn removes_a_unit_cargo_1_100_keeps_in_a_directory_of_its_own() {
+    // Goal: since Cargo 1.100 a unit keeps its fingerprint beside its outputs, under
+    // build/<package>/<hash>, and that directory goes once no build has read it for two days.
+    // Method: lay out a profile that way alone, date the read three days back and sweep.
+    let target = Target::new();
+    let profile = profile(&target.root.join("release"));
+    let unit = unit_directory(&profile, days_ago(30), days_ago(3));
+
+    sweep(&target.root, now()).unwrap();
+
+    assert!(!unit.exists());
+}
+
+#[test]
+fn keeps_a_unit_cargo_1_100_keeps_in_a_directory_of_its_own_while_a_build_reads_it() {
+    // Goal: a unit laid out as Cargo 1.100 does stays, outputs too, while a build reads it.
+    // Method: date the read of its fingerprint's hash file a day back and sweep.
+    let target = Target::new();
+    let unit = unit_directory(&target.profile, days_ago(30), days_ago(1));
+
+    sweep(&target.root, now()).unwrap();
+
+    assert!(unit.join("out/libflightdeck.rlib").exists());
+}
+
+#[test]
+fn leaves_a_fingerprint_directory_a_build_script_writes() {
+    // Goal: a directory named fingerprint in a live unit's build script output is no unit.
+    // Method: write an old one under a live unit's out directory and sweep.
+    let target = Target::new();
+    fingerprint(&target.profile, now(), now());
+    let output = format!("build/flightdeck-{HASH}/out/fingerprint/lib-flightdeck");
+    let written = write(&target.profile.join(output), days_ago(30));
+
+    sweep(&target.root, now()).unwrap();
+
+    assert!(written.exists());
 }
 
 #[test]
@@ -200,17 +239,39 @@ fn days_ago(days: u32) -> SystemTime {
     now() - DAY * days
 }
 
-/// A unit's fingerprint in `profile` as Cargo leaves it, written at `built`, whose hash file a
-/// build last read at `read`.
+/// A profile directory at `path`, which Cargo marks with its lock.
+fn profile(path: &Path) -> PathBuf {
+    write(&path.join(".cargo-lock"), now());
+
+    path.to_owned()
+}
+
+/// A unit's fingerprint in `profile` as Cargo leaves it before 1.100, written at `built`, whose
+/// hash file a build last read at `read`.
 fn fingerprint(profile: &Path, built: SystemTime, read: SystemTime) -> PathBuf {
     let unit = profile.join(format!(".fingerprint/flightdeck-{HASH}"));
-    write(&unit.join("lib-flightdeck.json"), built);
-    write(&unit.join("invoked.timestamp"), built);
-    write(&unit.join("dep-lib-flightdeck"), built);
-    let hash_file = write(&unit.join("lib-flightdeck"), built);
-    set_times(&hash_file, read, built);
+    fingerprint_files(&unit, built, read);
 
     unit
+}
+
+/// A unit's directory in `profile` as Cargo lays it out since 1.100, its fingerprint beside its
+/// outputs, written at `built`, whose hash file a build last read at `read`.
+fn unit_directory(profile: &Path, built: SystemTime, read: SystemTime) -> PathBuf {
+    let unit = profile.join(format!("build/flightdeck/{HASH}"));
+    fingerprint_files(&unit.join("fingerprint"), built, read);
+    write(&unit.join("out/libflightdeck.rlib"), built);
+
+    unit
+}
+
+/// The files of a fingerprint in `directory`, written at `built`, the hash file read at `read`.
+fn fingerprint_files(directory: &Path, built: SystemTime, read: SystemTime) {
+    write(&directory.join("lib-flightdeck.json"), built);
+    write(&directory.join("invoked.timestamp"), built);
+    write(&directory.join("dep-lib-flightdeck"), built);
+    let hash_file = write(&directory.join("lib-flightdeck"), built);
+    set_times(&hash_file, read, built);
 }
 
 /// The outputs a unit built under `hash` leaves in `profile`, each a month old.
