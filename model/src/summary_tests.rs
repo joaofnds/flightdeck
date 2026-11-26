@@ -131,7 +131,7 @@ fn a_rate_over_no_interval_never_becomes_the_highest() {
         value: 1.0,
         place: 1,
     };
-    assert_eq!(highest.reading, Some(expected));
+    assert_eq!(highest.highest(), Some(&expected));
 }
 
 #[test]
@@ -189,9 +189,9 @@ fn merging_gauges_cut_anywhere_equals_reducing_their_readings() {
 }
 
 #[test]
-fn a_summary_keeps_the_earliest_of_readings_that_tie() {
-    // Goal: a peak two readings share names the first of them, so a reduction and a merge of the
-    // same readings name the same reading.
+fn a_tie_keeps_the_earliest_reading() {
+    // Goal: a peak two readings share names the first of them, in a gauge's summary and in a
+    // category's highest, so a held second never moves.
     // Method: two equal readings of a gauge and of a category, at different places.
     let mut gauge = GaugeSummary::<u32>::default();
     let mut thermal = CategoryHighest::<u8, u32>::default();
@@ -204,5 +204,5 @@ fn a_summary_keeps_the_earliest_of_readings_that_tie() {
     let measured = gauge.measured.unwrap();
     assert_eq!(measured.maximum.place, 1);
     assert_eq!(measured.minimum.place, 1);
-    assert_eq!(thermal.reading.unwrap().place, 1);
+    assert_eq!(thermal.highest().unwrap().place, 1);
 }

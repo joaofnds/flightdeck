@@ -1,3 +1,4 @@
+use crate::store::tests::highest_kept;
 use collector::ring::{IdentityPublication, SupplementalReadings};
 
 /// The tick of the run `cpu_publish` writes at which the clock of level 0 and of level 1, the
@@ -14,13 +15,12 @@ const OPEN_FILES_LIMIT: u64 = 245_760;
 
 #[test]
 fn a_stretch_keeps_each_cpu_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the highest of each level's clock, each load
-    // average, the open files and their share of the limit, and the CPU sensor the CPU page
-    // draws, with the reading that read the highest, as the session's older tail keeps them for
-    // the same seconds, so a peak of the CPU charts drawn from a store is the peak the tail
-    // draws. Method: each reading rises at its own pace and reads its highest at its own second
-    // of the stretch of 1,030, and the stretch's summaries are set beside the reach of the
-    // tail's point.
+    // Goal: an older stretch keeps the highest of each level's clock, each load average, the open
+    // files and their share of the limit, and the CPU sensor the CPU page draws, with the reading
+    // that read the highest, as the session's older tail keeps them for the same seconds, so a peak
+    // of the CPU charts drawn from a store is the peak the tail draws. Method: each reading rises
+    // at its own pace and reads its highest at its own second of the stretch of 1,030, and the
+    // stretch's highest readings are set beside the reach of the tail's point.
     let mut fixture = cpu_fixture();
     for tick in 1..=70 {
         cpu_publish(&mut fixture, tick);
@@ -51,19 +51,15 @@ fn a_stretch_keeps_each_cpu_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
-        let reading = highest.reading.unwrap();
-        (reading.value, reading.place)
-    };
     let held = [
-        ("cpu_level_ghz/0", kept(&stretch.cpu_level_ghz[0])),
-        ("cpu_level_ghz/1", kept(&stretch.cpu_level_ghz[1])),
-        ("load_average/0", kept(&stretch.load_average[0])),
-        ("load_average/1", kept(&stretch.load_average[1])),
-        ("load_average/2", kept(&stretch.load_average[2])),
-        ("open_files", kept(&stretch.open_files)),
-        ("open_files_percent", kept(&stretch.open_files_percent)),
-        ("cpu_celsius", kept(&stretch.cpu_celsius)),
+        ("cpu_level_ghz/0", highest_kept(&stretch.cpu_level_ghz[0])),
+        ("cpu_level_ghz/1", highest_kept(&stretch.cpu_level_ghz[1])),
+        ("load_average/0", highest_kept(&stretch.load_average[0])),
+        ("load_average/1", highest_kept(&stretch.load_average[1])),
+        ("load_average/2", highest_kept(&stretch.load_average[2])),
+        ("open_files", highest_kept(&stretch.open_files)),
+        ("open_files_percent", highest_kept(&stretch.open_files_percent)),
+        ("cpu_celsius", highest_kept(&stretch.cpu_celsius)),
     ];
     let reached = held.map(|(path, _)| {
         let reach = crate::number_reach(&point["reach"], path).unwrap().unwrap();

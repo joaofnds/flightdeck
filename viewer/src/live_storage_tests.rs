@@ -1,3 +1,4 @@
+use crate::store::tests::highest_kept;
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::ring::{IdentityPublication, SupplementalReadings};
 
@@ -220,12 +221,12 @@ fn storage_context_at(store: &crate::store::Store, second: u64) -> Arc<crate::st
 
 #[test]
 fn a_stretch_keeps_each_storage_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the highest of each operation, error and mean
-    // service time rate the Storage page draws, with the reading that read the highest, as the
-    // session's older tail keeps them for the same seconds, so a peak of the Storage charts drawn
-    // from a store is the peak the tail draws. Method: each counter of one disk rises at its own
-    // pace and jumps at its own second of the stretch of 1,030, and the stretch's summaries are
-    // set beside the reach of the tail's point.
+    // Goal: an older stretch keeps the highest of each operation, error and mean service time rate
+    // the Storage page draws, with the reading that read the highest, as the session's older tail
+    // keeps them for the same seconds, so a peak of the Storage charts drawn from a store is the
+    // peak the tail draws. Method: each counter of one disk rises at its own pace and jumps at its
+    // own second of the stretch of 1,030, and the stretch's highest readings are set beside the
+    // reach of the tail's point.
     let mut fixture = storage_fixture_with_slots(120);
     for tick in 1..=70 {
         storage_publish(&mut fixture, tick, Some(&storage_peaks(tick)));
@@ -256,12 +257,8 @@ fn a_stretch_keeps_each_storage_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
-        let reading = highest.reading.unwrap();
-        (reading.value, reading.place)
-    };
-    let held =
-        crate::store::StorageRate::ALL.map(|rate| (rate.key(), kept(stretch.storage_rate(rate))));
+    let held = crate::store::StorageRate::ALL
+        .map(|rate| (rate.key(), highest_kept(stretch.storage_rate(rate))));
     let reached = held.map(|(key, _)| {
         let path = crate::session::number_path(Some("storage"), key, None);
         let reach = crate::number_reach(&point["reach"], &path).unwrap().unwrap();

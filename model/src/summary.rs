@@ -1,7 +1,8 @@
 //! One series' readings reduced over a stretch of the clock, so a reading that lasted a second
-//! stays findable however far a chart thins the series. Each reduction keeps what a reader needs
-//! to find that reading again, and the summaries of adjacent stretches merge into exactly the
-//! summary of their readings, however the readings were cut.
+//! stays findable however far a chart thins the series. A highest keeps the highest reading and
+//! the reading it came from, which is all a chart's peak takes. A summary keeps the lowest too,
+//! and the summaries of adjacent stretches merge into exactly the summary of their readings,
+//! however the readings were cut.
 
 #[cfg(test)]
 #[path = "summary_tests.rs"]
@@ -22,12 +23,12 @@ const _: () = {
 
 /// One value of a reduction and the reading it came from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Extreme<Place> {
-    pub value: f64,
+pub struct Extreme<Value, Place> {
+    pub value: Value,
     pub place: Place,
 }
 
-impl<Place> Extreme<Place> {
+impl<Value: PartialOrd, Place> Extreme<Value, Place> {
     /// The higher of this and `found`, a reading after it. A tie keeps this one, the earlier, so a
     /// held second never moves.
     fn higher(self, found: Self) -> Self {
@@ -39,28 +40,28 @@ impl<Place> Extreme<Place> {
     }
 }
 
-/// What a reduction found of readings with values: the lowest and the highest, the earliest of
-/// any that tie, so a merge finds the one a reduction of all of them finds, and the newest.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Measured<Place> {
-    pub minimum: Extreme<Place>,
-    pub maximum: Extreme<Place>,
-    pub last: Extreme<Place>,
-    /// How many readings had values, which their mean divides by.
-    pub count: u32,
-    total: i128,
-    overflowed: bool,
-}
-
-/// Readings of a quantity at an instant, such as a temperature or the memory in use, each counting
-/// the same in a mean: the readings with values, and how many had none or did not follow the
-/// reading before them. A reading of zero is a value. A reading that did not follow marks a break
-/// in the line a reader must not draw across.
+/// What a series' readings came to: of those with values, the lowest, the highest, the newest and
+/// their mean, and how many had none or did not follow the reading before them. A reading of zero
+/// is a value. A reading that did not follow marks a break in the line a reader must not draw
+/// across.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GaugeSummary<Place> {
     pub measured: Option<Measured<Place>>,
     pub missing: u32,
     pub breaks: u32,
+}
+
+/// What a summary found of readings with values: the lowest and the highest, the earliest of any
+/// that tie, so a merge finds the one a summary of all of them finds, and the newest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured<Place> {
+    pub minimum: Extreme<f64, Place>,
+    pub maximum: Extreme<f64, Place>,
+    pub last: Extreme<f64, Place>,
+    /// How many readings had values, which their mean divides by.
+    pub count: u32,
+    total: i128,
+    overflowed: bool,
 }
 
 impl<Place: Copy> GaugeSummary<Place> {
@@ -124,64 +125,31 @@ impl<Place: Copy> GaugeSummary<Place> {
     }
 }
 
-/// One category and the reading that showed it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Mark<Category, Place> {
-    pub category: Category,
-    pub place: Place,
-}
-
-impl<Category: Ord, Place> Mark<Category, Place> {
-    /// The higher of this and `found`, a reading after it. A tie keeps this one, the earlier, so a
-    /// held second never moves.
-    fn higher(self, found: Self) -> Self {
-        if found.category > self.category {
-            found
-        } else {
-            self
-        }
-    }
-}
-
 /// The highest of a series' readings and the reading it came from, the earliest of any that tie.
 /// It keeps no mean, lowest or count, for a reader that takes only the highest reading and its
-/// place, as a chart's peak does, and a reading `fixed_from_value` refuses never becomes it, as
-/// in a summary.
+/// place, as a chart's peak does.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Highest<Place> {
-    pub reading: Option<Extreme<Place>>,
+    highest: Option<Extreme<f64, Place>>,
 }
 
 impl<Place: Copy> Highest<Place> {
-    fn push(&mut self, value: Option<f64>, place: Place) {
+    /// The highest reading taken in, or `None` before a reading with a value.
+    #[must_use]
+    pub fn highest(&self) -> Option<&Extreme<f64, Place>> {
+        self.highest.as_ref()
+    }
+
+    /// Takes in the reading after the last one. `None` is a reading the collector did not read. A
+    /// reading `fixed_from_value` refuses is no quantity the Mac reports, so, as in a summary, it
+    /// never becomes the highest.
+    pub fn push(&mut self, value: Option<f64>, place: Place) {
         let Some(value) = value.filter(|value| fixed_from_value(*value).is_some()) else {
             return;
         };
 
         let found = Extreme { value, place };
-        self.reading = Some(match self.reading {
-            Some(held) => held.higher(found),
-            None => found,
-        });
-    }
-}
-
-/// The highest of a gauge's readings, as `GaugeSummary` admits them.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct GaugeHighest<Place>(Highest<Place>);
-
-impl<Place: Copy> GaugeHighest<Place> {
-    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
-    pub fn push(&mut self, value: Option<f64>, place: Place) {
-        self.0.push(value, place);
-    }
-}
-
-impl<Place> std::ops::Deref for GaugeHighest<Place> {
-    type Target = Highest<Place>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        self.highest = Some(self.highest.map_or(found, |held| held.higher(found)));
     }
 }
 
@@ -213,21 +181,24 @@ impl<Place> std::ops::Deref for RateHighest<Place> {
 /// a reader of a state's peak takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CategoryHighest<Category, Place> {
-    pub reading: Option<Mark<Category, Place>>,
+    highest: Option<Extreme<Category, Place>>,
 }
 
 impl<Category: Copy + Ord, Place: Copy> CategoryHighest<Category, Place> {
+    /// The highest category taken in, or `None` before a reading that read one.
+    #[must_use]
+    pub fn highest(&self) -> Option<&Extreme<Category, Place>> {
+        self.highest.as_ref()
+    }
+
     /// Takes in the reading after the last one. `None` is a reading the collector did not read.
     pub fn push(&mut self, category: Option<Category>, place: Place) {
-        let Some(category) = category else {
+        let Some(value) = category else {
             return;
         };
 
-        let found = Mark { category, place };
-        self.reading = Some(match self.reading {
-            Some(held) => held.higher(found),
-            None => found,
-        });
+        let found = Extreme { value, place };
+        self.highest = Some(self.highest.map_or(found, |held| held.higher(found)));
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::store::tests::highest_kept;
 use crate::store::PointRate;
 
 /// The wall second of the first reading the fixture publishes.
@@ -1175,17 +1176,17 @@ fn a_stretch_reaches_the_same_readings_live_and_saved() {
     let saved = earlier_store_stretch(&fixture, 70, 3);
 
     assert_eq!(saved, live);
-    let fans = saved.fan_mean_rpm.reading.unwrap();
+    let fans = saved.fan_mean_rpm.highest().unwrap();
     assert_eq!(fans.place.second(), 10_039);
 }
 
 #[test]
 fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the highest of each reading the Memory page draws,
-    // with the reading that read the highest, as the session's older tail keeps them for the same
-    // seconds, so a peak of the Memory charts drawn from a store is the peak the tail draws.
-    // Method: each series rises at its own pace and reads its highest at its own second of the
-    // stretch of 10,030, and the stretch's summaries are set beside the reach of the tail's point.
+    // Goal: an older stretch keeps the highest of each reading the Memory page draws, with the
+    // reading that read the highest, as the session's older tail keeps them for the same seconds,
+    // so a peak of the Memory charts drawn from a store is the peak the tail draws. Method: each
+    // series rises at its own pace and reads its highest at its own second of the stretch of
+    // 10,030, and the stretch's highest readings are set beside the reach of the tail's point.
     let mut fixture = RingFixture::new_following();
     for tick in 1..=70 {
         let memory = earlier_memory_peaks(tick);
@@ -1207,17 +1208,13 @@ fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
-        let reading = highest.reading.unwrap();
-        (reading.value, reading.place)
-    };
     let rates = crate::store::MemoryRate::ALL;
     let held: Vec<_> = [
-        ("swap_used_bytes", kept(&stretch.swap_used_bytes)),
-        ("swap_total_bytes", kept(&stretch.swap_total_bytes)),
+        ("swap_used_bytes", highest_kept(&stretch.swap_used_bytes)),
+        ("swap_total_bytes", highest_kept(&stretch.swap_total_bytes)),
     ]
     .into_iter()
-    .chain(rates.map(|rate| (rate.key(), kept(stretch.memory_rate(rate)))))
+    .chain(rates.map(|rate| (rate.key(), highest_kept(stretch.memory_rate(rate)))))
     .collect();
     let reached: Vec<_> = held
         .iter()
@@ -1234,12 +1231,12 @@ fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
 
 #[test]
 fn a_stretch_keeps_each_network_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the highest of each packet and error rate the
-    // Network page draws, with the reading that read the highest, as the session's older tail
-    // keeps them for the same seconds, so a peak of the Network charts drawn from a store is the
-    // peak the tail draws. Method: each counter of one interface rises at its own pace and jumps
-    // at its own second of the stretch of 10,030, and the stretch's summaries are set beside the
-    // reach of the tail's point.
+    // Goal: an older stretch keeps the highest of each packet and error rate the Network page
+    // draws, with the reading that read the highest, as the session's older tail keeps them for the
+    // same seconds, so a peak of the Network charts drawn from a store is the peak the tail draws.
+    // Method: each counter of one interface rises at its own pace and jumps at its own second of
+    // the stretch of 10,030, and the stretch's highest readings are set beside the reach of the
+    // tail's point.
     let mut fixture = RingFixture::new_following();
     let memory = collector::machine::Memory {
         total_bytes: 48 * 1024 * 1024 * 1024,
@@ -1266,12 +1263,8 @@ fn a_stretch_keeps_each_network_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
-        let reading = highest.reading.unwrap();
-        (reading.value, reading.place)
-    };
-    let held =
-        crate::store::NetworkRate::ALL.map(|rate| (rate.key(), kept(stretch.network_rate(rate))));
+    let held = crate::store::NetworkRate::ALL
+        .map(|rate| (rate.key(), highest_kept(stretch.network_rate(rate))));
     let reached = held.map(|(key, _)| {
         let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
         (key, (reach.high, reach.peak))

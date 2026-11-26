@@ -1,3 +1,4 @@
+use crate::store::tests::highest_kept;
 use collector::ring::{IdentityPublication, SupplementalReadings};
 
 /// The tick of the run `gpu_publish` writes at which the GPU power, the GPU memory in use, the
@@ -9,12 +10,12 @@ const WALL_SECOND_AT_TICK_ZERO: u64 = 1000;
 
 #[test]
 fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the highest of the GPU power, the GPU memory in use
-    // and allocated, and the GPU sensor the GPU page draws, with the reading that read the
-    // highest, as the session's older tail keeps them for the same seconds, so a peak of the GPU
-    // charts drawn from a store is the peak the tail draws. Method: each reading rises at its own
-    // pace and reads its highest at its own second of the stretch of 1,030, and the stretch's
-    // summaries are set beside the reach of the tail's point.
+    // Goal: an older stretch keeps the highest of the GPU power, the GPU memory in use and
+    // allocated, and the GPU sensor the GPU page draws, with the reading that read the highest, as
+    // the session's older tail keeps them for the same seconds, so a peak of the GPU charts drawn
+    // from a store is the peak the tail draws. Method: each reading rises at its own pace and reads
+    // its highest at its own second of the stretch of 1,030, and the stretch's highest readings are
+    // set beside the reach of the tail's point.
     let mut fixture = gpu_fixture();
     for tick in 1..=70 {
         gpu_publish(&mut fixture, tick);
@@ -45,21 +46,17 @@ fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
-        let reading = highest.reading.unwrap();
-        (reading.value, reading.place)
-    };
     let held = [
-        ("gpu_watts", kept(&stretch.gpu_watts)),
+        ("gpu_watts", highest_kept(&stretch.gpu_watts)),
         (
             "gpu_memory_in_use_bytes",
-            kept(&stretch.gpu_memory_in_use_bytes),
+            highest_kept(&stretch.gpu_memory_in_use_bytes),
         ),
         (
             "gpu_memory_allocated_bytes",
-            kept(&stretch.gpu_memory_allocated_bytes),
+            highest_kept(&stretch.gpu_memory_allocated_bytes),
         ),
-        ("gpu_celsius", kept(&stretch.gpu_celsius)),
+        ("gpu_celsius", highest_kept(&stretch.gpu_celsius)),
     ];
     let reached = held.map(|(key, _)| {
         let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();

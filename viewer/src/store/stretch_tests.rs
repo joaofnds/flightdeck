@@ -612,10 +612,10 @@ fn a_started_store_hands_over_the_stretches_a_load_of_the_whole_hour_holds() {
 
 #[test]
 fn a_store_with_a_budget_hands_over_the_stretches_a_load_of_the_whole_hour_holds() {
-    // Goal: the Store the app starts gives the older tail of its charts the means, the highest
-    // readings and the Apps a load of the whole hour adds up. Method: seal a few ticks of run
-    // minutes 0, 1 and 21, start a store with a budget, and compare the first View it hands over
-    // that holds a stretch with a whole load's.
+    // Goal: the Store the app starts gives the older tail of its charts the highest readings and
+    // the Apps a load of the whole hour adds up. Method: seal a few ticks of run minutes 0, 1 and
+    // 21, start a store with a budget, and compare the first View it hands over that holds a
+    // stretch with a whole load's.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let whole = loaded(&fixture);
 
@@ -1797,11 +1797,9 @@ fn a_stretch_reads_nothing_of_the_stretches_let_go_before_it() {
     held.reset();
     take_mac_readings(&mut held, 2_000..2_021, 10.0);
 
-    let maximum = published(&mut held).stretches[0]
-        .machine
-        .cpu_percent
-        .reading
-        .unwrap();
+    let view = published(&mut held);
+
+    let maximum = view.stretches[0].machine.cpu_percent.highest().unwrap();
     assert!((maximum.value - 10.0).abs() < 0.01);
 }
 
@@ -1825,7 +1823,7 @@ fn a_stretch_that_takes_its_owed_apps_keeps_what_it_read_of_the_mac() {
 
     let view = published(&mut held);
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
-    let maximum = view.stretches[0].machine.cpu_percent.reading.unwrap();
+    let maximum = view.stretches[0].machine.cpu_percent.highest().unwrap();
     assert_eq!(first_app_amount(&shown), 1_000);
     assert!((maximum.value - 95.0).abs() < 0.01);
 }
@@ -1856,7 +1854,7 @@ fn a_closed_stretch_finds_a_second_long_peak_of_the_mac_at_every_offset() {
             second.cpu_percent = Some(if wall_second == peak { 95.0 } else { 10.0 });
         });
 
-        let maximum = stretch.machine.cpu_percent.reading.unwrap();
+        let maximum = stretch.machine.cpu_percent.highest().unwrap();
 
         assert!((maximum.value - 95.0).abs() < 0.01, "peak at {peak}");
         assert_eq!(
@@ -1897,7 +1895,7 @@ fn a_peak_keeps_its_place_on_either_side_of_the_seconds_a_store_holds_whole() {
             .iter()
             .find(|stretch| stretch.stretch == peak / 10)
             .unwrap();
-        let maximum = stretch.machine.cpu_percent.reading.unwrap();
+        let maximum = stretch.machine.cpu_percent.highest().unwrap();
         assert!((maximum.value - 95.0).abs() < 0.01, "peak at {peak}");
         assert_eq!(maximum.place.publication, peak, "peak at {peak}");
     }
@@ -1925,7 +1923,7 @@ fn a_closed_stretch_adds_up_what_the_memory_chart_stacks_at_each_reading() {
         });
     });
 
-    let used = stretch.machine.memory_used_bytes.reading.unwrap();
+    let used = stretch.machine.memory_used_bytes.highest().unwrap();
 
     assert!((used.value - 610.0).abs() < 0.01);
 }
@@ -1944,60 +1942,69 @@ fn a_stretch_after_a_peak_reaches_only_its_own_readings() {
 
     let view = published(&mut held);
 
-    let later = view.stretches[1].machine.cpu_percent.reading.unwrap();
+    let later = view.stretches[1].machine.cpu_percent.highest().unwrap();
     assert!((later.value - 10.0).abs() < 0.01);
 }
 
 #[test]
-fn a_closed_stretch_keeps_the_earliest_highest_reading_of_each_series_that_it_admits() {
-    // Goal: the peak a store stretch keeps for a gauge, a rate and a category is the reading a
-    // user picks in the Data table, the highest the stretch admits, the earliest of any that tie,
-    // so a held second never moves, and a reading the stretch refuses as no quantity the Mac
-    // reports never becomes it.
-    // Method: read a stretch where the power, the disk's reads and the thermal state each reach
-    // their highest twice, with a higher reading the stretch refuses among them, and for the
-    // disk a higher rate over no time too, or, for the state, a second with none, and read each
-    // peak's value and second.
+fn a_closed_stretch_keeps_the_earliest_highest_reading_of_a_gauge_that_it_admits() {
+    // Goal: the peak a store stretch keeps of a gauge is the reading a user picks in the Data
+    // table, the highest the stretch admits, the earliest of any that tie, so a held second never
+    // moves, and a reading the stretch refuses as no quantity the Mac reports never becomes it.
+    // Method: the power reads its highest at two seconds and then reads infinity.
     let stretch = stretch_of_mac_readings(|second, wall_second| {
-        if wall_second == 1_009 {
-            second.elapsed_ns = Some(0);
-        }
         second.power_watts = Some(match wall_second {
             1_002 | 1_005 => 50.0,
             1_007 => f32::INFINITY,
             _ => 10.0,
         });
+    });
+
+    let (power, place) = super::tests::highest_kept(&stretch.machine.power_watts);
+
+    assert_eq!((power, place.publication), (50.0, 1_002));
+}
+
+#[test]
+fn a_closed_stretch_keeps_the_earliest_highest_rate_that_it_admits() {
+    // Goal: the peak a store stretch keeps of a rate is the highest rate it admits, the earliest
+    // of any that tie, and neither a rate it refuses nor a rate over no time becomes it.
+    // Method: the disk's reads reach their highest at two seconds, then read 1e300, past any
+    // quantity the Mac reports, and then a higher rate over no time.
+    let stretch = stretch_of_mac_readings(|second, wall_second| {
+        if wall_second == 1_009 {
+            second.elapsed_ns = Some(0);
+        }
         second.disk_read_bps = Some(match wall_second {
             1_003 | 1_006 => 80.0,
             1_008 => 1e300,
             1_009 => 500.0,
             _ => 0.0,
         });
+    });
+
+    let (reads, place) = super::tests::highest_kept(&stretch.machine.disk_read_bps);
+
+    assert_eq!((reads, place.publication), (80.0, 1_003));
+}
+
+#[test]
+fn a_closed_stretch_keeps_the_earliest_highest_state_through_a_second_with_none() {
+    // Goal: the peak a store stretch keeps of a state is the highest state it read, the earliest
+    // of any that tie, and a second with no state leaves that peak as it was.
+    // Method: the thermal state reads its highest at two seconds, with a second without a state
+    // between them.
+    let stretch = stretch_of_mac_readings(|second, wall_second| {
         second.thermal_pressure = match wall_second {
-            1_001 => None,
             1_004 | 1_009 => Some(2),
+            1_006 => None,
             _ => Some(0),
         };
     });
 
-    let machine = &stretch.machine;
+    let highest = stretch.machine.thermal_pressure.highest().unwrap();
 
-    assert_eq!(highest_of(&machine.power_watts), Some((50.0, 1_002)));
-    assert_eq!(highest_of(&machine.disk_read_bps), Some((80.0, 1_003)));
-    assert_eq!(
-        machine
-            .thermal_pressure
-            .reading
-            .map(|mark| (mark.category, mark.place.publication)),
-        Some((2, 1_004))
-    );
-}
-
-/// The highest reading `series` kept and the publication it came from.
-fn highest_of(series: &super::Highest<MachinePlace>) -> Option<(f64, u64)> {
-    series
-        .reading
-        .map(|reading| (reading.value, reading.place.publication))
+    assert_eq!((highest.value, highest.place.publication), (2, 1_004));
 }
 
 #[test]

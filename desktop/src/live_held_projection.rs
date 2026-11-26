@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsStretch, Highest, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate,
+    AppsStretch, Extreme, Highest, MachinePlace, MachineSecond, MachineStretch, MemoryRate,
     NetworkRate, PointRate, Second, StorageRate, View,
 };
 
@@ -412,7 +412,7 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "load_average", Some(window)) => stretch
             .load_average
             .get(window)
-            .and_then(|average| stretch_reach_measured(average)),
+            .and_then(stretch_reach_measured),
         (None, "open_files", None) => stretch_reach_measured(&stretch.open_files),
         (None, "open_files_percent", None) => stretch_reach_measured(&stretch.open_files_percent),
         (None, "cpu_celsius", None) => stretch_reach_measured(&stretch.cpu_celsius),
@@ -458,9 +458,9 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
         (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
         (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
-        (None, "pressure", None) => stretch_reach_category(stretch.pressure.reading.as_ref()),
+        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest()),
         (None, "thermal_pressure", None) => {
-            stretch_reach_category(stretch.thermal_pressure.reading.as_ref())
+            stretch_reach_category(stretch.thermal_pressure.highest())
         }
         _ => return Err(format!("The store reduces no reading {key}")),
     };
@@ -468,18 +468,18 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
     Ok(reach)
 }
 
-fn stretch_reach_measured(highest: &Highest<MachinePlace>) -> Option<LineReach> {
-    let reading = highest.reading.as_ref()?;
+fn stretch_reach_measured(series: &Highest<MachinePlace>) -> Option<LineReach> {
+    let highest = series.highest()?;
 
     Some(LineReach {
-        high: reading.value.to_f32()?,
-        peak: reading.place,
+        high: highest.value.to_f32()?,
+        peak: highest.place,
     })
 }
 
-fn stretch_reach_category(highest: Option<&Mark<u8, MachinePlace>>) -> Option<LineReach> {
+fn stretch_reach_category(highest: Option<&Extreme<u8, MachinePlace>>) -> Option<LineReach> {
     let highest = highest?;
-    let level = f32::from(highest.category);
+    let level = f32::from(highest.value);
 
     Some(LineReach {
         high: level,

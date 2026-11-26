@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Failure, Store, View};
+use super::{Failure, Highest, MachinePlace, Store, View};
 use crate::live::identity_fixture::Fixture;
 
 const COMPLETE_CAPTURE_BYTES_MAX: usize = 64 * 1024 * 1024;
@@ -1450,6 +1450,14 @@ pub(super) fn empty_ticks_file(fixture: &Fixture, minute: u64) {
         .join(&manifest.data_directory)
         .join("ticks.parquet");
     fs::write(ticks, []).unwrap();
+}
+
+/// The highest reading `series` keeps and the reading it came from, for a test whose series read
+/// one.
+pub(crate) fn highest_kept(series: &Highest<MachinePlace>) -> (f64, MachinePlace) {
+    let highest = series.highest().unwrap();
+
+    (highest.value, highest.place)
 }
 
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.

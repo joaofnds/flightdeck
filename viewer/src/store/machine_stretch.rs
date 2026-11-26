@@ -8,7 +8,7 @@ use collector::machine::Pressure;
 use collector::ring::RunIdentity;
 use model::rates::number;
 pub use model::summary::MachinePlace;
-use model::summary::{CategoryHighest, GaugeHighest, RateHighest};
+use model::summary::{CategoryHighest, Highest, RateHighest};
 
 use super::{
     MachineSecond, MemoryRate, NetworkRate, PointRate, STRETCHES_HELD_MAX, STRETCHES_MAX,
@@ -24,7 +24,7 @@ const _: () = {
     assert!(allocated * size_of::<MachineStretch>() <= 1_131_008);
 };
 
-pub type Gauge = GaugeHighest<MachinePlace>;
+pub type Gauge = Highest<MachinePlace>;
 pub type Rate = RateHighest<MachinePlace>;
 pub type Category = CategoryHighest<u8, MachinePlace>;
 
