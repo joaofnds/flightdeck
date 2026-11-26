@@ -497,18 +497,10 @@ fn stretch_reach_power_and_cooling(
             .get(channel)
             .and_then(stretch_reach_measured),
         // The stacked power chart reaches the system power, which its GPU line names, so the
-        // remainder's own line reaches nothing of its own. The collector records no area's
-        // hottest sensor, so their chart draws none.
-        (
-            "power_remainder_watts"
-            | "soc_max_celsius"
-            | "voltage_regulator_celsius"
-            | "display_celsius"
-            | "board_celsius"
-            | "wireless_celsius"
-            | "ambient_celsius",
-            None,
-        ) => None,
+        // remainder's own line reaches nothing of its own.
+        ("power_remainder_watts", None) => None,
+        // The collector records no area's hottest sensor, so their chart reaches none.
+        (key, None) if super::area_maximum_key(key) => None,
         ("thermal_pressure", None) => stretch_reach_category(stretch.thermal_pressure.highest()),
         _ => return Err(format!("The store reduces no reading {key}")),
     };
@@ -625,15 +617,7 @@ fn second_value_power_and_cooling(
         ("thermal_pressure", None) => second.thermal_pressure.map(f32::from),
         // The collector records no area's hottest sensor, so their chart draws no reading
         // wherever it is drawn.
-        (
-            "soc_max_celsius"
-            | "voltage_regulator_celsius"
-            | "display_celsius"
-            | "board_celsius"
-            | "wireless_celsius"
-            | "ambient_celsius",
-            None,
-        ) => None,
+        (key, None) if super::area_maximum_key(key) => None,
         _ => return Err(format!("The store holds no reading {key}")),
     };
 

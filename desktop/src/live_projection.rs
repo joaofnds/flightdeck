@@ -1435,29 +1435,32 @@ fn thermal_state() -> Specification {
 
 /// The hottest sensor of each area, which the collector does not record yet.
 fn area_maxima() -> Specification {
-    let mut specification = specification(
-        AREA_MAXIMA_ID,
-        "System area maxima",
-        "°C",
-        vec![
-            reading("soc_max_celsius", "Source SoC group max", "#5794f2", 1.0),
-            reading(
-                "voltage_regulator_celsius",
-                "Voltage regulators",
-                "#ff9830",
-                1.0,
-            ),
-            reading("display_celsius", "Display", "#8ab8ff", 1.0),
-            reading("board_celsius", "Board", "#37872d", 1.0),
-            reading("wireless_celsius", "Wireless", "#ca95e5", 1.0),
-            reading("ambient_celsius", "Ambient", "#ccccdc", 1.0),
-        ],
-    );
+    let readings = AREA_MAXIMA
+        .iter()
+        .map(|&(key, name, color)| reading(key, name, color, 1.0))
+        .collect();
+    let mut specification = specification(AREA_MAXIMA_ID, "System area maxima", "°C", readings);
     specification.maximum = Some(125.0);
     specification.fill = 0.0;
     specification.help = "The hottest measured sensor in each area of the system. This \
         collector does not record them yet, so no readings are shown.";
     specification
+}
+
+/// The key, name and color of each line of the area maxima chart, one for each area's hottest
+/// sensor.
+const AREA_MAXIMA: [(&str, &str, &str); 6] = [
+    ("soc_max_celsius", "Source SoC group max", "#5794f2"),
+    ("voltage_regulator_celsius", "Voltage regulators", "#ff9830"),
+    ("display_celsius", "Display", "#8ab8ff"),
+    ("board_celsius", "Board", "#37872d"),
+    ("wireless_celsius", "Wireless", "#ca95e5"),
+    ("ambient_celsius", "Ambient", "#ccccdc"),
+];
+
+/// Whether `key` names a line of the area maxima chart.
+fn area_maximum_key(key: &str) -> bool {
+    AREA_MAXIMA.iter().any(|&(area, _name, _color)| area == key)
 }
 
 fn power_breakdown() -> Specification {
