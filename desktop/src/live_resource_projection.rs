@@ -52,14 +52,19 @@ pub(super) fn value(reading: &Reading, value: &Value) -> Result<Option<f32>, Str
         if reading.key == "charging" {
             return match value {
                 Value::Null => Ok(None),
-                Value::Bool(true) => Ok(Some(1.0)),
-                Value::Bool(false) => Ok(Some(0.0)),
+                Value::Bool(charging) => Ok(Some(f32::from(charging_level(*charging)))),
                 _ => Err("Invalid battery charging state".into()),
             };
         }
     }
 
     super::number(value)
+}
+
+/// The level a chart of the charging state draws `charging` at: 1 while charging and 0 while
+/// not, so a stretch's highest state is charging where any of its seconds charged.
+pub(super) fn charging_level(charging: bool) -> u8 {
+    u8::from(charging)
 }
 
 pub(super) fn charging_cells<O: Observations + ?Sized>(

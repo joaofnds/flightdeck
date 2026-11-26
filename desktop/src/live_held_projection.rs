@@ -1,6 +1,7 @@
 //! A route's machine charts drawn from the seconds the store holds, which the main thread reads
 //! as values rather than as trend points.
 
+use std::convert::identity;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use super::{
 
 #[cfg(test)]
 #[path = "live_held_projection_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// The machine charts of `route` drawn from `view` over the loaded hour, following its newest
 /// second, which the charts select. `levels` names the performance levels Overview's CPU chart
@@ -67,6 +68,7 @@ fn view_panels_specifications(
         "storage" => Ok(super::storage_specifications()),
         "gpu" => Ok(super::gpu_specifications()),
         "energy" => super::energy_specifications(view_panels_fan_channel_count(seconds)),
+        "battery" => Ok(super::resource_projection::battery()),
         _ => Err(format!("The store draws no charts of {route}")),
     }
 }
@@ -471,7 +473,8 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (Some("storage"), key, None) if let Some(rate) = rate_named::<StorageRate>(key) => {
             stretch_reach_measured(stretch.storage_rate(rate))
         }
-        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest()),
+        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest(), identity),
+        (Some("battery"), key, None) => return stretch_reach_battery(key, stretch),
         (None, key, channel) => return stretch_reach_power_and_cooling(key, channel, stretch),
         _ => return Err(format!("The store reduces no reading {key}")),
     };
@@ -501,8 +504,26 @@ fn stretch_reach_power_and_cooling(
         ("power_remainder_watts", None) => None,
         // The collector records no area's hottest sensor, so their chart reaches none.
         (key, None) if super::area_maximum_key(key) => None,
-        ("thermal_pressure", None) => stretch_reach_category(stretch.thermal_pressure.highest()),
+        ("thermal_pressure", None) => {
+            stretch_reach_category(stretch.thermal_pressure.highest(), identity)
+        }
         _ => return Err(format!("The store reduces no reading {key}")),
+    };
+
+    Ok(reach)
+}
+
+/// How high the Battery page's reading `key` reached over `stretch`, and an error where `key`
+/// names none of the battery's readings the store reduces.
+fn stretch_reach_battery(key: &str, stretch: &MachineStretch) -> Result<Option<LineReach>, String> {
+    let reach = match key {
+        "charge_percent" => stretch_reach_measured(&stretch.battery_charge_percent),
+        "power_watts" => stretch_reach_measured(&stretch.battery_power_watts),
+        "charging" => stretch_reach_category(
+            stretch.battery_charging.highest(),
+            super::resource_projection::charging_level,
+        ),
+        _ => return Err(format!("The store reduces no battery reading {key}")),
     };
 
     Ok(reach)
@@ -517,12 +538,15 @@ fn stretch_reach_measured(series: &Highest<MachinePlace>) -> Option<LineReach> {
     })
 }
 
-fn stretch_reach_category(highest: Option<&Extreme<u8, MachinePlace>>) -> Option<LineReach> {
+/// The highest state a series reached, as `level` numbers that state for a chart of states.
+fn stretch_reach_category<State: Copy>(
+    highest: Option<&Extreme<State, MachinePlace>>,
+    level: impl Fn(State) -> u8,
+) -> Option<LineReach> {
     let highest = highest?;
-    let level = f32::from(highest.value);
 
     Some(LineReach {
-        high: level,
+        high: f32::from(level(highest.value)),
         peak: highest.place,
     })
 }
@@ -585,6 +609,7 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
             narrow(second.storage_rate(rate))
         }
         (None, "cpu_celsius", None) => second.cpu_celsius,
+        (Some("battery"), key, None) => return second_value_battery(key, second),
         (None, key, channel) => return second_value_power_and_cooling(key, channel, second),
         _ => return Err(format!("The store holds no reading {}", reading.key)),
     };
@@ -619,6 +644,24 @@ fn second_value_power_and_cooling(
         // wherever it is drawn.
         (key, None) if super::area_maximum_key(key) => None,
         _ => return Err(format!("The store holds no reading {key}")),
+    };
+
+    Ok(value)
+}
+
+/// What the Battery page's reading `key` reads of `second`, as `second_value` reads it: the
+/// charge and power its record holds, and the charging state its complete reading holds, as 1
+/// while charging and 0 while not. An error where `key` names none of the battery's readings the
+/// store holds.
+fn second_value_battery(key: &str, second: &MachineSecond) -> Result<Option<f32>, String> {
+    let battery = second.battery.as_ref();
+    let value = match key {
+        "charge_percent" => narrow(battery.and_then(|battery| battery.charge_percent)),
+        "power_watts" => narrow(battery.and_then(|battery| battery.power_watts)),
+        "charging" => second
+            .battery_charging()
+            .map(|charging| f32::from(super::resource_projection::charging_level(charging))),
+        _ => return Err(format!("The store holds no battery reading {key}")),
     };
 
     Ok(value)

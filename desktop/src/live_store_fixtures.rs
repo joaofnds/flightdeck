@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use collector::battery::BatteryReading;
 use collector::machine::Pressure;
 use collector::recording::identity_text;
 use collector::ring::Identity;
@@ -343,6 +344,54 @@ pub fn with_energy_readings(
     second.fan_rpm = [channel(0), channel(1)];
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
     let complete = viewer::store::CompleteMachine::of_energy(&second, gpu_watts, fan_rpm, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
+/// `second` with the battery `battery_reading` gives it, in its record and in a complete reading
+/// of it, as the store holds a second it read.
+pub fn with_battery_reading(second: MachineSecond) -> MachineSecond {
+    let battery = battery_reading(&second);
+
+    with_battery_readings(second, Some(battery))
+}
+
+/// What the battery `battery_reading` gives holds when full, in the controller's units, which
+/// its charge at a second, the second's wall clock, is a share of.
+pub const BATTERY_CHARGE_MAXIMUM: u16 = 20_000;
+
+/// The battery `with_battery_reading` gives `second`, fresh at the second. Its charge and power
+/// differ from those of every other second, and it charges, drawing power in, past 9,000.
+pub fn battery_reading(second: &MachineSecond) -> BatteryReading {
+    let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+    let current_ma = i64::try_from(wall_second).unwrap() - 9_000;
+
+    BatteryReading {
+        source_continuous_ns: second.continuous_ns.unwrap(),
+        charge_current: Some(wall_second),
+        charge_maximum: Some(u64::from(BATTERY_CHARGE_MAXIMUM)),
+        full_charge_capacity: Some(4_500),
+        design_capacity: Some(5_000),
+        cycle_count: Some(321),
+        charging: Some(current_ma > 0),
+        external_power: Some(current_ma > 0),
+        voltage_mv: Some(12_000),
+        current_ma: Some(current_ma),
+        adapter_watts: Some(96),
+    }
+}
+
+/// `second` with `battery`, or no battery, in its record and in a complete reading of it, as the
+/// store holds a second it read.
+pub fn with_battery_readings(
+    mut second: MachineSecond,
+    battery: Option<BatteryReading>,
+) -> MachineSecond {
+    second.battery = battery
+        .as_ref()
+        .map(viewer::store::BatterySecond::of_fresh_reading);
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_battery(&second, battery, &budget);
     second.complete = viewer::store::CompleteMachineState::Available(complete);
     second
 }

@@ -249,6 +249,13 @@ impl CompleteMachine {
         self.point.fan_rpm.as_deref()
     }
 
+    /// Whether the battery was charging, `None` where the reading holds no battery or the
+    /// controller did not say.
+    #[must_use]
+    pub fn battery_charging(&self) -> Option<bool> {
+        self.point.battery.as_ref()?.charging()
+    }
+
     /// The unified memory the GPU driver reported in use, `None` where the reading holds no
     /// system group.
     #[must_use]
@@ -564,6 +571,33 @@ impl CompleteMachine {
             ..Point::default()
         };
         point.system.thermal_pressure = second.thermal_pressure.map(u64::from);
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// The complete reading of `second` whose battery is `battery`, a reading fresh at the
+    /// second, or none, as the second's record holds it, charged to `budget`, so a test outside
+    /// the viewer can give a second the complete reading the Battery page draws.
+    #[must_use]
+    pub fn of_battery(
+        second: &MachineSecond,
+        battery: Option<collector::battery::BatteryReading>,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        assert_eq!(
+            second.battery,
+            battery.as_ref().map(super::BatterySecond::of_fresh_reading)
+        );
+        let at = |battery| {
+            let Some(now) = second.continuous_ns else {
+                panic!("a second with a battery reading has a continuous clock");
+            };
+            crate::metrics::battery::BatteryPoint::at(battery, now)
+        };
+        let point = Point {
+            battery: battery.map(at),
+            ..Point::default()
+        };
 
         Self::of_point(second, point, budget)
     }

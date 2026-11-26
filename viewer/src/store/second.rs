@@ -2,6 +2,7 @@
 //! takes the second in from the ring or from a sealed minute, so the main thread reads values
 //! and computes no rate.
 
+use collector::battery::BatteryReading;
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::machine::Pressure;
 use collector::smc::FANS_MAX;
@@ -472,6 +473,13 @@ impl MachineSecond {
         self.complete().and_then(CompleteMachine::gpu_watts)
     }
 
+    /// Whether the battery was charging at the second, as its complete reading holds it, `None`
+    /// where the second has no complete reading or the battery's controller did not say.
+    #[must_use]
+    pub fn battery_charging(&self) -> Option<bool> {
+        self.complete().and_then(CompleteMachine::battery_charging)
+    }
+
     /// The GPU memory in use at the second, as its complete reading holds it, `None` where the
     /// second has no complete reading.
     #[must_use]
@@ -605,10 +613,24 @@ impl BatterySecond {
             return None;
         }
 
-        Some(Self {
+        Some(Self::of_reading(reading))
+    }
+
+    /// The battery as `reading` shows it, which `of` takes only once it checked the reading is
+    /// fresh.
+    fn of_reading(reading: &BatteryReading) -> Self {
+        Self {
             charge_percent: battery::charge_percent(reading),
             power_watts: battery::power_watts(reading),
-        })
+        }
+    }
+
+    /// The battery as `reading` shows it, a reading the caller holds fresh at its second, as a
+    /// test gives a second the battery the Battery page draws.
+    #[cfg(any(test, feature = "fixtures"))]
+    #[must_use]
+    pub fn of_fresh_reading(reading: &BatteryReading) -> Self {
+        Self::of_reading(reading)
     }
 }
 

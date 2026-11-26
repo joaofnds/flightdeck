@@ -31,16 +31,28 @@ pub(super) fn capture(
         return Ok(None);
     }
 
-    Ok(Some(BatteryPoint {
-        age_seconds: super::number(now - reading.source_continuous_ns) / 1_000_000_000.0,
-        charge_percent: charge_percent(&reading),
-        health_percent: ratio(reading.full_charge_capacity, reading.design_capacity),
-        power_watts: power_watts(&reading),
-        reading,
-    }))
+    Ok(Some(BatteryPoint::at(reading, now)))
 }
 
 impl BatteryPoint {
+    /// The battery as `reading` shows it at `now` on the continuous clock, a reading fresh then.
+    pub(crate) fn at(reading: BatteryReading, now: u64) -> Self {
+        assert!(reading.is_fresh_at(now));
+
+        Self {
+            age_seconds: super::number(now - reading.source_continuous_ns) / 1_000_000_000.0,
+            charge_percent: charge_percent(&reading),
+            health_percent: ratio(reading.full_charge_capacity, reading.design_capacity),
+            power_watts: power_watts(&reading),
+            reading,
+        }
+    }
+
+    /// Whether the battery was charging, `None` where the controller did not say.
+    pub(crate) fn charging(&self) -> Option<bool> {
+        self.reading.charging
+    }
+
     pub fn json(&self) -> Value {
         json!({"source_continuous_ns": self.reading.source_continuous_ns,
             "age_seconds": self.age_seconds, "charge_percent": self.charge_percent,

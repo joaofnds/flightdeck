@@ -1,3 +1,4 @@
+use std::convert::identity;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -19,9 +20,10 @@ use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::{apps_at, apps_with_disk_at, apps_with_gpu_at};
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    fan_rpm, gpu_watts, levels, levels_named, network_rates, reading_at, storage_rates,
-    store_levels_named, trend_point, view, with_energy_reading, with_gpu_reading,
-    with_memory_reading, with_network_reading, with_storage_reading,
+    battery_reading, fan_rpm, gpu_watts, levels, levels_named, network_rates, reading_at,
+    storage_rates, store_levels_named, summary_point, trend_point, view, with_battery_reading,
+    with_battery_readings, with_energy_reading, with_gpu_reading, with_memory_reading,
+    with_network_reading, with_storage_reading,
 };
 use crate::live_store_page_fixtures::{
     cpu_run, cpu_seconds, cpu_seconds_past_a_page, figure_readings, figure_second, readings,
@@ -151,6 +153,75 @@ fn a_recent_hover_finds_the_exact_sibling_instead_of_the_last_in_its_second() {
 }
 
 #[test]
+fn a_battery_hover_of_the_earlier_of_two_publications_of_a_second_shows_its_own_battery() {
+    // Goal: the View can hold two publications of one wall second, since two ticks can fall in
+    // one, and a hover over the Battery page drawn from the View whose target names the earlier
+    // shows that publication's charging state and charge, and Copy names it, not the later one,
+    // as `charging_hover_retains_an_explicitly_selected_earlier_same_second_publication` pins
+    // the reader's. Method: a followed Battery page over a View whose newest wall second holds a
+    // publication that does not charge and a later one that charges, a hover whose target names
+    // the earlier by its identity, and the battery and cards the page shows.
+    let earlier = sibling_battery(10_005, false);
+    let later = sibling_battery(10_006, true);
+    let mut dashboard = dashboard_on("battery", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let mut held = view(1, &[], &[earlier.clone(), later.clone()]);
+    let earlier_apps = apps_of(&earlier, "Earlier", 10);
+    let target = Target {
+        second: 10_005,
+        identity: Some(crate::live_rankings::stamp_identity(
+            &earlier_apps.observation.as_ref().unwrap().stamp,
+        )),
+    };
+    held.apps = [
+        Arc::new(earlier_apps),
+        Arc::new(apps_of(&later, "Later", 20)),
+    ]
+    .into_iter()
+    .collect();
+    assert!(dashboard.take_view(Arc::new(held)));
+
+    let preview = {
+        let accepted = dashboard.snapshot.as_deref().unwrap();
+        dashboard.resident_preview(accepted, target.clone(), dashboard.store_view_held(&target))
+    };
+    dashboard.preview = Some(preview);
+
+    assert_eq!(
+        dashboard.shown_summary()["battery"],
+        summary_point(&earlier)["battery"]
+    );
+    let cards = texts(&dashboard.summary_cards());
+    assert!(
+        cards
+            .iter()
+            .any(|(label, reading, ..)| label == "Charging" && reading == "No")
+    );
+    let copied = crate::native_workflows::selected_copy(
+        dashboard.reading_snapshot(),
+        dashboard.reading_request(),
+        None,
+    );
+    let copied: Value = serde_json::from_str(&copied.unwrap()).unwrap();
+    assert_eq!(copied["observation"]["publication"], 10_005);
+}
+
+/// The publication `publication` of the wall second 10,005, with a battery whose charge is its
+/// own and that charges or not as `charging` says, in its record and in a complete reading of it.
+fn sibling_battery(publication: u64, charging: bool) -> MachineSecond {
+    let first = reading_at(10_005, 0);
+    let second = MachineSecond {
+        publication,
+        wall_ns: first.wall_ns + (publication - 10_005) * 500_000_000,
+        ..first
+    };
+    let mut battery = battery_reading(&second);
+    battery.charge_current = Some(publication);
+    battery.charging = Some(charging);
+
+    with_battery_readings(second, Some(battery))
+}
+
+#[test]
 fn the_range_ends_at_the_views_newest_second() {
     // Goal: the charts drawn from the View show its newest second, which the worker's readings
     // do not hold yet. Method: a View five seconds newer than the readings.
@@ -271,6 +342,11 @@ const ENERGY: Page = Page {
     seconds: energy_seconds,
 };
 
+const BATTERY: Page = Page {
+    route: "battery",
+    seconds: battery_seconds,
+};
+
 macro_rules! newest_second_without_a_complete_reading_cases {
     ($($name:ident, $page:expr, $assert_shows_the_record:expr;)*) => {$(
         #[test]
@@ -309,6 +385,10 @@ newest_second_without_a_complete_reading_cases! {
     // and no GPU power, since the record does not hold it.
     a_rested_energy_page_shows_the_energy_of_a_newest_second_without_a_complete_reading,
         ENERGY, assert_shows_the_energy_of_the_record;
+    // Battery: the page shows the record's charge and power flow, and no charging state, since
+    // the record does not hold it.
+    a_rested_battery_page_shows_the_battery_of_a_newest_second_without_a_complete_reading,
+        BATTERY, assert_shows_the_battery_of_the_record;
 }
 
 /// Asserts that `page`, its reader resting, shows what the View's record of a newest second
@@ -319,7 +399,10 @@ fn assert_shows_the_record_of_a_newest_second_without_a_complete_reading(
 ) {
     let first = (page.seconds)(&[9_999, 10_000]);
     let mut dashboard = rested_on(page.route, &first, worker_reading(&first));
-    let newest = reading_at(10_001, 0);
+    // The newest second's record holds what the page's readings give it, as a second the page
+    // read does, while the store holds no complete reading of it.
+    let mut newest = (page.seconds)(&[10_001]).remove(0);
+    newest.complete = viewer::store::CompleteMachineState::Unread;
     let seconds = [first[0].clone(), first[1].clone(), newest.clone()];
 
     assert!(dashboard.take_view(Arc::new(view(2, &[], &seconds))));
@@ -912,6 +995,20 @@ fn assert_shows_the_energy_of_the_record(shown: &Value, second: &MachineSecond) 
     assert!(shown["gpu_watts"].is_null());
 }
 
+/// Asserts that `shown` holds the battery's charge and power flow as `second`'s record holds
+/// them, and no charging state, which the record does not hold.
+fn assert_shows_the_battery_of_the_record(shown: &Value, second: &MachineSecond) {
+    let battery = second.battery.unwrap();
+    assert!(battery.charge_percent.is_some());
+    assert!(battery.power_watts.is_some());
+    assert_eq!(
+        shown["battery"]["charge_percent"],
+        json!(battery.charge_percent)
+    );
+    assert_eq!(shown["battery"]["power_watts"], json!(battery.power_watts));
+    assert!(shown["battery"]["charging"].is_null());
+}
+
 /// Asserts that `shown` holds the bytes received and sent as `second`'s record holds them, and
 /// no packet or error rate, which the record does not hold.
 fn assert_shows_the_traffic_of_the_record(shown: &Value, second: &MachineSecond) {
@@ -1149,6 +1246,19 @@ followed_page_rests_its_reader_cases! {
     // Energy: the third fan, which the record does not hold, reads the newest second's.
     a_followed_energy_page_rests_its_reader_and_draws_each_newer_view, ENERGY,
         "/fan_rpm/2", |second| fan_rpm(second)[2];
+    // Battery: the battery's health, which the record does not hold, reads the newest second's.
+    a_followed_battery_page_rests_its_reader_and_draws_each_newer_view, BATTERY,
+        "/battery/health_percent", battery_health_percent;
+}
+
+/// The health of the battery `battery_reading` gives `second`, what it holds when full as a
+/// share of what it was designed to hold, which only the second's complete reading holds.
+fn battery_health_percent(second: &MachineSecond) -> Option<f64> {
+    let battery = battery_reading(second);
+    let full = f64::from(u32::try_from(battery.full_charge_capacity?).unwrap());
+    let design = f64::from(u32::try_from(battery.design_capacity?).unwrap());
+
+    Some(full * 100.0 / design)
 }
 
 /// Asserts that `page`, following the newest second, rests its reader after its first reading
@@ -1838,10 +1948,21 @@ mod when_the_page_is_another_page {
     #[test]
     fn the_worker_s_readings_draw_the_charts() {
         // Goal: a page the View draws neither machine charts nor charts by App for keeps the
-        // charts of its own readings. Method: the Battery page, which is such a page, then a
-        // newer View.
-        let mut dashboard = dashboard_on("battery", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        // charts of its own readings. Method: the Apps page, which is such a page, with the
+        // worker's reading of a selected App's history, then a newer View.
+        let mut dashboard = opening_on("apps");
+        dashboard.accept(apps_reading(&[reading_at(9_999, 0), reading_at(10_000, 0)]));
+        assert!(dashboard.error.is_none());
         let before = dashboard.panels.clone();
+        // The page draws the App's history, so the assertions below compare charts that hold a
+        // reading.
+        let drawn = |panel: &Rc<Panel>| {
+            panel
+                .lines
+                .iter()
+                .any(|line| line.values.iter().any(Option::is_some))
+        };
+        assert!(before.iter().any(drawn));
 
         let changed = dashboard.take_view(newer_view());
 
@@ -2207,21 +2328,22 @@ mod when_the_page_has_a_chart_by_app {
         }
 
         macro_rules! machine_charts_left_to_a_hidden_window_cases {
-            ($($name:ident, $route:expr;)*) => {$(
+            ($($name:ident, $route:expr, $with_reading:expr;)*) => {$(
                 #[test]
                 fn $name() {
                     // Goal: a reading built while the View drew the page's machine charts
                     // brings no older tail, so where the page takes it after the window hid and
                     // let go of the View, it shows the machine charts it drew from the View,
                     // which hold the View's seconds, rather than the reading's, which hold its
-                    // own seconds alone. Method: the page drawn from a View hides, then takes a
-                    // reading that left its charts to it, and the lines of its machine charts,
+                    // own seconds alone. Method: the page drawn from a View of seconds the row's
+                    // complete readings give hides, then takes a reading of the same complete
+                    // readings that left its charts to it, and the lines of its machine charts,
                     // which the page places in the window of the reading's second.
-                    let mut dashboard = drawn_from_view($route);
+                    let mut dashboard = drawn_from_view_of($route, $with_reading);
                     let drawn = machine_lines(&dashboard.panels);
                     dashboard.tick_hidden();
 
-                    dashboard.accept(left_to_the_view($route, &trends()));
+                    dashboard.accept(left_to_the_view($route, &trends().map($with_reading)));
 
                     assert_eq!(machine_lines(&dashboard.panels), drawn);
                 }
@@ -2230,19 +2352,22 @@ mod when_the_page_has_a_chart_by_app {
 
         machine_charts_left_to_a_hidden_window_cases! {
             overview_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "overview";
+                "overview", identity;
             memory_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "memory";
+                "memory", identity;
             network_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "network";
+                "network", identity;
             storage_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "storage";
+                "storage", identity;
             gpu_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "gpu";
+                "gpu", identity;
             cpu_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "cpu";
+                "cpu", identity;
             energy_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
-                "energy";
+                "energy", identity;
+            // Battery: each second holds a battery, so the lines compared hold readings.
+            battery_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
+                "battery", with_battery_reading;
         }
 
         #[test]
@@ -2693,8 +2818,17 @@ mod when_the_page_has_a_chart_by_app {
 
     /// The page `route` with the worker's readings, drawn from a `charted_view`.
     fn drawn_from_view(route: &str) -> LiveDashboard {
-        let mut dashboard = dashboard_on(route, &trends());
-        assert!(dashboard.take_view(Arc::new(charted_view())));
+        drawn_from_view_of(route, identity)
+    }
+
+    /// The page `route` with the worker's readings, drawn from a `charted_view`, each second's
+    /// complete reading the one `with_reading` gives it.
+    fn drawn_from_view_of(
+        route: &str,
+        with_reading: fn(MachineSecond) -> MachineSecond,
+    ) -> LiveDashboard {
+        let mut dashboard = dashboard_on(route, &trends().map(with_reading));
+        assert!(dashboard.take_view(Arc::new(charted_view_of(with_reading))));
         dashboard
     }
 
@@ -3276,6 +3410,20 @@ fn dashboard_on(route: &str, trends: &[MachineSecond]) -> LiveDashboard {
     dashboard
 }
 
+/// The worker's reading of `trends` on the Apps page, with the history of the App it selected
+/// at 10,000, which read its CPU.
+fn apps_reading(trends: &[MachineSecond]) -> Box<crate::live_source::Snapshot> {
+    let mut reading = readings(trends);
+    let observation = json!({"wall_ns": "10000000000000",
+        "stamp": {"run": "00000000000000010000000000000002",
+            "boot": "00000000000000030000000000000004", "publication": "2"}});
+    let point = json!({"observation": observation, "segment": "0", "cpu_percent_one_core": 50.0});
+    reading.history = Some(crate::live_source::Presentation::Legacy(
+        json!({"selected": observation, "points": [point]}),
+    ));
+    reading
+}
+
 /// An Overview newly opened, which the worker has not answered yet, as at launch.
 fn opening() -> LiveDashboard {
     opening_on("overview")
@@ -3334,7 +3482,12 @@ fn ranked_view() -> Arc<View> {
 /// The View of `newer_seconds`, in each of which one App, Brave Browser, spent 0.75 s of CPU,
 /// and whose charts by App draw it on a line of its own.
 fn charted_view() -> View {
-    let seconds = newer_seconds();
+    charted_view_of(identity)
+}
+
+/// A `charted_view` whose seconds have the complete readings `with_reading` gives them.
+fn charted_view_of(with_reading: fn(MachineSecond) -> MachineSecond) -> View {
+    let seconds = newer_seconds().map(with_reading);
     let mut view = view(1, &[], &seconds);
     view.apps_loaded = true;
     view.apps = seconds
@@ -3571,6 +3724,15 @@ fn energy_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
     wall_seconds
         .iter()
         .map(|&wall_second| with_energy_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
+/// The seconds at `wall_seconds`, each with a battery in its record and a complete reading of it
+/// that charges past 9,000, as the store holds a second it read.
+fn battery_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_battery_reading(reading_at(wall_second, 0)))
         .collect()
 }
 
@@ -4464,16 +4626,15 @@ mod when_the_store_or_the_worker_wakes_the_page {
     #[gpui::test]
     fn the_workers_wake_draws_the_view_with_the_reading(cx: &mut TestAppContext) {
         // Goal: a followed page that reads each second takes a second's View with the worker's
-        // reading of it and draws the second once, since the reading is on its way when the
-        // store wakes the page, so the store's wake leaves the View to it. Method: hold the
-        // worker of the Battery page, which reads each second, at the start of a step, publish a
-        // second, wake the page as the store does, and look at the View the page holds; then let
-        // the worker read the second, wake the page as the worker does, and look again and count
-        // the page's draws.
-        let mut followed = Followed::open(cx, "battery");
+        // reading of it, since the reading is on its way when the store wakes the page, so the
+        // store's wake leaves the View to it. Method: hold the worker of the Computer page, which
+        // reads each second, at the start of a step, publish a second, wake the page as the store
+        // does, and look at the View the page holds; then let the worker read the second, wake
+        // the page as the worker does, and look again. A page whose worker reads each second
+        // draws nothing from a View, so the test asserts the View it took rather than a draw.
+        let mut followed = Followed::open(cx, "computer");
         followed.wait_for_a_keyed_question();
         let earlier = followed.view_publication();
-        let drawn = followed.renders();
         let published = followed.publish_with_the_worker_held();
         followed.store_wakes();
         assert_eq!(followed.view_publication(), earlier);
@@ -4482,7 +4643,6 @@ mod when_the_store_or_the_worker_wakes_the_page {
         followed.worker_wakes();
 
         assert_eq!(followed.view_publication(), Some(published));
-        assert_eq!(followed.renders(), drawn + 1);
         assert_eq!(followed.reading_second(), followed.view_second());
     }
 
@@ -4506,14 +4666,14 @@ mod when_the_store_or_the_worker_wakes_the_page {
     #[gpui::test]
     fn the_workers_wake_that_runs_first_takes_the_view_with_the_reading(cx: &mut TestAppContext) {
         // Goal: the run loop may run the worker's wake before the store's, and the page still
-        // takes the second's View with its reading and draws the second once, since the
-        // worker's tick takes the View too and the store's wake after it finds nothing new.
-        // Method: hold the worker of the Battery page, which reads each second, publish a second,
-        // let the worker read it, wake the page as the worker does and then as the store does,
-        // look at the View the page holds, and count the page's draws.
-        let mut followed = Followed::open(cx, "battery");
+        // takes the second's View with its reading, since the worker's tick takes the View too
+        // and the store's wake after it finds nothing new. Method: hold the worker of the
+        // Computer page, which reads each second, publish a second, let the worker read it, wake
+        // the page as the worker does and then as the store does, and look at the View the page
+        // holds. A page whose worker reads each second draws nothing from a View, so the test
+        // asserts the View it took rather than a draw.
+        let mut followed = Followed::open(cx, "computer");
         followed.wait_for_a_keyed_question();
-        let drawn = followed.renders();
         let published = followed.publish_with_the_worker_held();
         followed.worker_reads();
 
@@ -4521,19 +4681,18 @@ mod when_the_store_or_the_worker_wakes_the_page {
         followed.store_wakes();
 
         assert_eq!(followed.view_publication(), Some(published));
-        assert_eq!(followed.renders(), drawn + 1);
         assert_eq!(followed.reading_second(), followed.view_second());
     }
 
     #[gpui::test]
     fn the_timers_tick_takes_a_view_no_reading_came_with(cx: &mut TestAppContext) {
         // Goal: a View whose reading never comes waits no longer than the page's next tick.
-        // Method: hold the worker of the Battery page, which reads each second, so that its
+        // Method: hold the worker of the Computer page, which reads each second, so that its
         // reading does not come, publish a second, wake the page as the store does, which leaves
         // the View to the reading, tick it as its timer does, and look at the View the page
-        // holds. The Battery page draws nothing from a View, so the test asserts the View it
+        // holds. The Computer page draws nothing from a View, so the test asserts the View it
         // took rather than a draw.
-        let mut followed = Followed::open(cx, "battery");
+        let mut followed = Followed::open(cx, "computer");
         followed.wait_for_a_keyed_question();
         let earlier = followed.view_publication();
         let published = followed.publish_with_the_worker_held();
@@ -4798,10 +4957,6 @@ mod when_the_store_or_the_worker_wakes_the_page {
         fn ticks_look_for_a_view(&self) -> bool {
             self.page
                 .read_with(&self.window, |page, _| page.mailbox_watch.looks())
-        }
-
-        fn renders(&self) -> u64 {
-            self.page.read_with(&self.window, |page, _| page.renders)
         }
 
         fn view_second(&self) -> Option<u64> {

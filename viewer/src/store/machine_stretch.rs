@@ -19,10 +19,10 @@ use super::{
 const _: () = {
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
-    // `MachineStretch`, so the Mac's readings cost a store about 1.3 MiB.
-    assert!(size_of::<MachineStretch>() <= 3_648);
+    // `MachineStretch`, so the Mac's readings cost a store about 1.4 MiB.
+    assert!(size_of::<MachineStretch>() <= 3_832);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 1_371_648);
+    assert!(allocated * size_of::<MachineStretch>() <= 1_440_832);
 };
 
 /// The most fan channels the collector reads, `FANS_MAX`, so a stretch keeps a series of each
@@ -38,6 +38,9 @@ const _: () = {
 pub type Gauge = Highest<MachinePlace>;
 pub type Rate = RateHighest<MachinePlace>;
 pub type Category = CategoryHighest<u8, MachinePlace>;
+/// The highest of a state that is on or off, which `bool` keeps in 8 bytes less than a category
+/// of `u8`, since its `Option` needs no tag of its own.
+pub type Flag = CategoryHighest<bool, MachinePlace>;
 
 /// Each series of the Mac's charts over one stretch. The rates are what a counter grew by over
 /// the time between readings, and the gauges what a reading saw at its instant.
@@ -92,6 +95,12 @@ pub struct MachineStretch {
     pub fan_rpm: [Gauge; FAN_CHANNELS_MAX],
     pub pressure: Category,
     pub thermal_pressure: Category,
+    // The battery's charge and power, as the second's record holds them.
+    pub battery_charge_percent: Gauge,
+    pub battery_power_watts: Gauge,
+    /// Whether the battery was charging, which only a second's complete reading holds
+    /// (`MachineSecond::battery_charging`), so it reads none at a second without one.
+    pub battery_charging: Flag,
 }
 
 impl MachineStretch {
@@ -134,6 +143,12 @@ impl MachineStretch {
             series.push(rpm, place);
         }
         self.thermal_pressure.push(second.thermal_pressure, place);
+        let battery = second.battery.as_ref();
+        self.battery_charge_percent
+            .push(battery.and_then(|battery| battery.charge_percent), place);
+        self.battery_power_watts
+            .push(battery.and_then(|battery| battery.power_watts), place);
+        self.battery_charging.push(second.battery_charging(), place);
     }
 
     /// The stretch's `rate`.

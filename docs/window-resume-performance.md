@@ -33,16 +33,16 @@ checked it, stops the launch at that minute, as a launch of one minute at a time
 minute that changes once its thread checked it fails the launch at the check of every minute
 before the launch completes.
 
-Overview waits for the Store instead of asking the legacy page reader to load the
-same period, and the live Memory, Network, Storage and GPU pages resume the same way. Initial bootstrap,
-incomplete histories and unavailable Store data retain the page-reader path, and so does
-every reading of the other pages but the chart by App the CPU and Energy
-pages draw from the View. The Store continues ingesting while other pages follow the live
-Mac, so returning to Overview finds its newest View ready. A hidden window parks it, and so
-does a saved recording shown in a live window, while a selected or held second leaves it
-taking in the live Mac. A cold
-restore validates the complete saved predecessor minute, including refused samples, but
-constructs no discarded presentation objects for its ticks.
+Overview waits for the Store instead of asking the legacy page reader to load the same period,
+and the other live pages that `store_panels_machine` (`desktop/src/live_source.rs`) names
+resume the same way, the CPU page once it has built the logical CPUs of the View it shows.
+Initial bootstrap, incomplete histories and unavailable Store data retain the page-reader path,
+and so does every reading of the other pages. The Store continues ingesting while other pages
+follow the live Mac, so returning to Overview finds its newest View ready. A hidden window
+parks it, and so does a saved recording shown in a live window, while a selected or held second
+leaves it taking in the live Mac. A cold restore validates the complete saved predecessor
+minute, including refused samples, but constructs no discarded presentation objects for its
+ticks.
 
 ## Measurements
 

@@ -1,7 +1,16 @@
+use std::sync::Arc;
+
 use gpui::{TestAppContext, px, size};
 use serde_json::{Value, json};
+use viewer::store::MachineSecond;
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
+use crate::live_store_app_fixtures::apps_at;
+use crate::live_store_fixtures::{
+    battery_reading, reading_at, summary_point, view, with_battery_readings,
+};
+use crate::live_store_page_fixtures::{readings, texts};
+use crate::live_views::summary;
 
 #[gpui::test]
 fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restores(
@@ -144,6 +153,225 @@ fn charging_hover_retains_an_explicitly_selected_earlier_same_second_publication
     assert_eq!(copied["observation"]["publication"], 4);
     assert_eq!(copied["summary"]["battery"]["charging"], false);
     harness.teardown();
+}
+
+mod when_the_page_is_drawn_from_the_view {
+    use super::*;
+
+    #[gpui::test]
+    fn the_cards_and_details_read_the_newest_seconds_battery(cx: &mut TestAppContext) {
+        // Goal: a followed Battery page drawn from the store's View shows the cards and details
+        // of the View's newest second as the reader's cards show the same complete reading, a
+        // measured "not charging" among them, as
+        // `battery_cards_preserve_signed_flow_false_and_exact_cycles` pins the reader's. Method:
+        // the page follows a View of four seconds whose newest does not charge, over the
+        // worker's readings of the first two, and its cards and the battery the details read.
+        let seconds = view_battery_seconds();
+        let mut harness = InputHarness::open_route(cx, "battery");
+        harness.driver.show_battery_view(&seconds);
+
+        let cards = harness.driver.readout_texts();
+
+        assert_eq!(cards, battery_cards_of(&seconds[3]));
+        assert!(cards.contains(&card("Charging", "No")));
+        assert_eq!(
+            harness.driver.shown_battery(),
+            summary_point(&seconds[3])["battery"]
+        );
+        harness.teardown();
+    }
+
+    #[gpui::test]
+    fn a_hover_shows_the_hovered_seconds_battery_and_copy_then_restores(cx: &mut TestAppContext) {
+        // Goal: a hover over the Battery page drawn from the View shows the hovered second's
+        // cards, details and charging state, and Copy names that second and its publication, a
+        // second the worker has not read, and the page shows the newest second's once the
+        // pointer leaves, as
+        // `battery_hover_updates_selected_details_charging_metadata_and_copy_then_restores`
+        // pins the reader's. Method: the pointer rests on 10,003, the one second that charges,
+        // then leaves the plot.
+        let seconds = view_battery_seconds();
+        let mut harness = InputHarness::open_route(cx, "battery");
+        harness.driver.show_battery_view(&seconds);
+
+        harness.driver.hover_battery_second(10_003);
+
+        assert_eq!(
+            harness.driver.readout_texts(),
+            battery_cards_of(&seconds[2])
+        );
+        assert_eq!(
+            harness.driver.shown_battery(),
+            summary_point(&seconds[2])["battery"]
+        );
+        let (second, reading) = harness
+            .driver
+            .chart_accessibility_reading("live-battery-charging");
+        assert_eq!(second, Some(10_003));
+        assert!(reading.ends_with("; Charging"), "{reading}");
+        assert!(
+            harness
+                .driver
+                .reading_is_visible("chart-caption:live-battery-charging:Charging")
+        );
+        let copied = harness.driver.activate_resource_copy();
+        assert_eq!(copied["second"], 10_003);
+        assert_eq!(copied["observation"]["publication"], 10_003);
+
+        harness
+            .driver
+            .leave_plot("live-battery-charge-plot", PlotExit::Sidebar);
+
+        assert_eq!(
+            harness.driver.readout_texts(),
+            battery_cards_of(&seconds[3])
+        );
+        assert!(
+            harness
+                .driver
+                .reading_is_visible("chart-caption:live-battery-charging:Not charging")
+        );
+        harness.teardown();
+    }
+
+    #[gpui::test]
+    fn a_hover_over_a_second_the_view_lacks_clears_the_battery_and_copy(cx: &mut TestAppContext) {
+        // Goal: a hover over a second of the Battery page drawn from the View that the View
+        // holds no reading of shows no battery, charging state or copied observation, rather
+        // than another second's, as `battery_gap_clears_selected_details_charging_and_copied_
+        // observation` pins the reader's. Method: the pointer rests on 10,003, then on 10,004,
+        // which the View lacks.
+        let seconds = view_battery_seconds();
+        let mut harness = InputHarness::open_route(cx, "battery");
+        harness.driver.show_battery_view(&seconds);
+        harness.driver.hover_battery_second(10_003);
+
+        harness.driver.hover_battery_second(10_004);
+
+        assert!(
+            harness
+                .driver
+                .reading_is_visible("summary-card:Charge:Unavailable")
+        );
+        assert!(
+            harness
+                .driver
+                .reading_is_visible("summary-card:Charging:Unavailable")
+        );
+        let (second, reading) = harness
+            .driver
+            .chart_accessibility_reading("live-battery-charging");
+        assert_eq!(second, Some(10_004));
+        assert!(reading.ends_with("Unavailable"), "{reading}");
+        let copied = harness.driver.activate_resource_copy();
+        assert_eq!(copied["second"], 10_004);
+        assert!(copied["observation"].is_null());
+        assert!(copied["summary"].is_null());
+        harness.teardown();
+    }
+
+    #[gpui::test]
+    fn the_charging_timeline_paints_a_cell_for_each_second_the_view_holds(cx: &mut TestAppContext) {
+        // Goal: the charging timeline drawn from the View paints a cell for each second it holds
+        // a charging state of and leaves every other second blank, and its caption names the
+        // newest second's state, as
+        // `charging_timeline_paints_only_observed_cells_and_names_the_selected_state` pins the
+        // reader's. Method: the View's four seconds, no two of them next to each other, drawn at
+        // twice the scale, and the state-cell quads the scene paints.
+        let seconds = view_battery_seconds();
+        let mut harness = InputHarness::open_route(cx, "battery");
+        harness.driver.show_battery_view(&seconds);
+        harness.driver.context.simulate_scale_factor_change(2.0);
+        harness.driver.context.run_until_parked();
+
+        let cells = harness
+            .driver
+            .resource_timeline_cell_count("live-battery-charging-plot");
+
+        assert_eq!(cells, seconds.len());
+        assert!(
+            harness
+                .driver
+                .reading_is_visible("chart-caption:live-battery-charging:Not charging")
+        );
+        harness.teardown();
+    }
+
+    /// The seconds 9,997, 10,000, 10,003 and 10,005, no two of them next to each other, which
+    /// the View holds and of which the worker reads the first two, each with a battery that holds
+    /// its own charge and power, and that charges at 10,003 alone.
+    fn view_battery_seconds() -> [MachineSecond; 4] {
+        [9_997, 10_000, 10_003, 10_005].map(|wall_second| {
+            let second = reading_at(wall_second, 0);
+            let mut battery = battery_reading(&second);
+            battery.charging = Some(wall_second == 10_003);
+            with_battery_readings(second, Some(battery))
+        })
+    }
+
+    /// The Battery page's cards as the reader shows them for its reading of `second`, the trend
+    /// point the viewer writes of the second's complete reading.
+    fn battery_cards_of(second: &MachineSecond) -> Vec<(String, String, String, u32)> {
+        texts(&summary::cards_of_summary(
+            "battery",
+            &summary_point(second),
+        ))
+    }
+
+    /// The card `label`, which reads `reading`, as the Battery page's cards read.
+    fn card(label: &str, reading: &str) -> (String, String, String, u32) {
+        let cards = summary::cards_of_summary(
+            "battery",
+            &json!({"battery": {"charging": reading == "Yes"}}),
+        );
+        let found = texts(&cards)
+            .into_iter()
+            .find(|(found, ..)| found == label)
+            .unwrap();
+        assert_eq!(found.1, reading);
+        found
+    }
+
+    impl InputDriver {
+        /// Shows the Battery page following the View of `seconds`, over the worker's readings of
+        /// the first two.
+        fn show_battery_view(&mut self, seconds: &[MachineSecond]) {
+            let snapshot = readings(&seconds[..2]);
+            let mut held = view(1, &[], seconds);
+            held.apps_loaded = true;
+            held.apps = seconds
+                .iter()
+                .map(|second| Arc::new(apps_at(second, &[("A", 1_000)])))
+                .collect();
+            self.view.update(&mut self.context, |dashboard, cx| {
+                dashboard.accept(snapshot);
+                assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+                assert!(dashboard.take_view(Arc::new(held)));
+                cx.notify();
+            });
+            self.context.simulate_resize(size(px(1536.0), px(3600.0)));
+            self.context.run_until_parked();
+        }
+
+        /// Rests the pointer on `second` of the charge chart, where the range shows it.
+        fn hover_battery_second(&mut self, second: u64) {
+            let window = self
+                .view
+                .read_with(&self.context, |dashboard, _| dashboard.view_window());
+            let fraction = window.unwrap().fraction_of(second).unwrap();
+            let position = self.second_position("live-battery-charge-plot", fraction);
+
+            self.hover_position(position);
+            self.context.run_until_parked();
+        }
+
+        /// The battery the page's cards and details read.
+        fn shown_battery(&self) -> Value {
+            self.view.read_with(&self.context, |dashboard, _| {
+                dashboard.shown_summary()["battery"].clone()
+            })
+        }
+    }
 }
 
 impl InputDriver {

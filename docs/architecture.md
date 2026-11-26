@@ -116,9 +116,9 @@ boundaries, recovery, diagnostic delivery and remaining resource limits in detai
 
 `viewer::store::Store` retains the live Mac's machine and App readings and publishes
 immutable `View`s. The Store owns its ingestion thread and bounded buffers. The live
-Overview, Memory, Network, Storage and GPU pages project a View into their machine charts and
-readouts, and Overview and the Memory, CPU, Energy, Storage and GPU pages draw their
-charts by App from one, without querying the recording on the UI thread.
+pages that `store_panels_machine` (`desktop/src/live_source.rs`) names project a View into
+their machine charts and readouts, and Overview and the Memory, CPU, Energy, Storage and GPU
+pages draw their charts by App from one, without querying the recording on the UI thread.
 
 The page worker wraps `viewer::LiveSession`. It handles initial snapshots, exact
 inspection, saved recordings, every other reading of the other live pages, and details
@@ -131,24 +131,23 @@ flowchart TD
     Ring[Live ring] --> Store
     Saved --> Worker[Page query worker]
     Store --> View[Immutable View]
-    View --> Machine[Machine charts and readouts of live Overview, Memory, Network, Storage and GPU]
+    View --> Machine[Machine charts and readouts of the live pages that store_panels_machine names]
     View --> AppCharts[Charts by App of Overview and the Memory, CPU, Energy, Storage and GPU pages]
     Worker --> Pages[Bootstrap, inspection and the other readings of other pages]
     Machine -->|detail absent from View| Worker
 ```
 
-Once Overview, Memory, Network, Storage or GPU has complete initial histories and follows
-a Store View, its page worker rests, and any chart by App it shows comes from that View as well.
-A hover retained in the View reads there; a missing detail can request the worker. The
-Store continues ingesting while another page follows the live Mac. Once the worker has answered
-them, the CPU and Energy pages draw their chart by App from the newest View,
-since the worker's App histories stop 960 s back and the View holds every App's ten-second
-sums for the loaded hour. A View older than a reading that brought the chart by App draws
-nothing, so the chart never holds less than the worker read. Their other readings, and
-every reading of the remaining pages, come from the worker. A hidden window parks the
-Store, and so does a saved recording shown in a live window, while a selected or held
-second leaves it taking in the live Mac. Bootstrap, incomplete histories and unavailable
-Store data retain the page-worker path.
+Once a page `store_panels_machine` names has complete initial histories and follows a Store
+View, its page worker rests, and any chart by App it shows comes from that View as well. The
+CPU page rests it only once it has built the logical CPUs of the View it shows. A hover
+retained in the View reads there; a missing detail can request the worker. The Store continues
+ingesting while another page follows the live Mac. A chart by App drawn from the View draws
+from the newest View, since the worker's App histories stop 960 s back and the View holds every
+App's ten-second sums for the loaded hour. A View older than a reading that brought the chart
+by App draws nothing, so the chart never holds less than the worker read. Every reading of the
+remaining pages comes from the worker. A hidden window parks the Store, and so does a saved
+recording shown in a live window, while a selected or held second leaves it taking in the live
+Mac. Bootstrap, incomplete histories and unavailable Store data retain the page-worker path.
 
 A held second is a second of the live Mac that the page holds after a click on a chart,
 Return on a second reached with the arrow keys, Enter on the CPU heatmap, Pause, or a
@@ -177,14 +176,14 @@ drawn again show the seconds they showed when it was held.
 
 | State before hiding or closing | Restore behavior |
 | --- | --- |
-| Live Overview, Memory, Network, Storage or GPU, five minutes selected | Keep five minutes selected, reconcile to the newest endpoint and continue live |
-| Live Overview, Memory, Network, Storage or GPU, another range selected | Preserve that range and follow the newest endpoint |
+| A live page that `store_panels_machine` names, five minutes selected | Keep five minutes selected, reconcile to the newest endpoint and continue live |
+| A live page that `store_panels_machine` names, another range selected | Preserve that range and follow the newest endpoint |
 | Held second whose reading is complete over the page's readings | Keep the held second, its window and its View without a read |
 | Held second whose reading is still being read, or whose page has no readings yet | Read the page whose context ends at the held window's last second, then the held second's own reading |
 | Complete pinned snapshot | Keep the exact observation and range without a live read |
 | Pin with incomplete histories and a running reader, or with no retained snapshot | Restore that selected observation through the page worker without ingesting new live arrivals |
 | Pin with a retained snapshot whose reader stopped | Keep the snapshot and range without a new request; canceled histories are no longer pending |
-| Another page, or one of those five with incomplete initial histories | Restore through the existing page-worker path |
+| Another page, or one of those with incomplete initial histories | Restore through the existing page-worker path |
 
 ```mermaid
 flowchart TD
@@ -193,7 +192,7 @@ flowchart TD
     Held -->|still being read| HeldRead[Read the page ending at the held window's last second, then the held second]
     Held -->|no| Pin{Complete pin?}
     Pin -->|yes| Keep[Keep snapshot and range; readers stay parked]
-    Pin -->|no| Eligible{Live Overview, Memory, Network, Storage or GPU with complete initial histories and Store?}
+    Pin -->|no| Eligible{A live page that store_panels_machine names, with complete initial histories and Store?}
     Eligible -->|no| Worker[Restore through page worker]
     Eligible -->|yes| Covered{Loaded hour held and unread publications retained?}
     Covered -->|yes| Delta[Keep cached history and predecessors; read bounded ring delta]

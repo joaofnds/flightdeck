@@ -1316,6 +1316,7 @@ pub(crate) fn store_panels_machine(route: &str) -> Option<&'static str> {
         "gpu" => Some("gpu"),
         "cpu" => Some("cpu"),
         "energy" => Some("energy"),
+        "battery" => Some("battery"),
         _ => None,
     }
 }

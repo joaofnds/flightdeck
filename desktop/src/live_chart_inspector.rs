@@ -791,10 +791,15 @@ mod tests {
 
     use crate::chart_axes::TimeWindow;
     use crate::data::{LineReach, MachinePlace};
+    use crate::live_projection::held_projection::tests::{
+        HourSecond, battery_hour_with, panel_named, view_of_hour,
+    };
+    use crate::live_projection::held_projection::view_panels;
+    use crate::live_store_fixtures::{BATTERY_CHARGE_MAXIMUM, levels};
 
     use super::{
-        SampleMaximum, SampleSummary, chart_data_cells, chart_stack_total, chart_summaries,
-        split_reading, tooltip_row,
+        SampleMaximum, SampleSummary, chart_data_cells, chart_data_highest, chart_stack_total,
+        chart_summaries, split_reading, tooltip_row,
     };
 
     struct Probe;
@@ -1280,5 +1285,47 @@ mod tests {
         );
         assert_eq!(split_reading("Unavailable"), ("Unavailable", None));
         assert_eq!(split_reading("12.5 W"), ("12.5 W", None));
+    }
+
+    #[test]
+    fn a_stretch_whose_first_second_reads_no_charge_gives_its_highest_charge_to_the_data_table() {
+        // Goal: the Data table of the charge chart drawn from the View gives an older stretch's
+        // highest charge and the reading that read it, as the glossary's Point says an older
+        // reading of the whole Mac keeps, though the stretch's first second read no charge. The
+        // reader gives none there, since its point is the first second's and its reach leaves
+        // out a charge that held over the stretch. Method: the Battery hour of the held page's
+        // tests with no charge at 7,600 and 8,000, drawn from its View, and what the Data
+        // table's own reading of a point gives for the point of the stretch from 7,600, which
+        // draws no charge of its own: the highest charge of its other nine seconds, which tie,
+        // at the earliest of them, 7,601.
+        let seconds = battery_hour_with(|battery, moment| {
+            if moment == HourSecond::AfterBreak {
+                battery.charge_current = None;
+            }
+        });
+        let view = view_of_hour(&seconds);
+
+        let drawn = view_panels("battery", &view, levels().as_ref()).unwrap();
+
+        let chart = panel_named(&drawn, "live-battery-charge");
+        let places = chart.places.as_ref().unwrap();
+        let index = places
+            .iter()
+            .position(|place| place.second() == 7_600)
+            .unwrap();
+        let line = &chart.lines[0];
+        let highest = chart_data_highest(
+            chart,
+            line.extremes.as_ref(),
+            index,
+            line.values[index],
+            chart.window,
+        )
+        .unwrap();
+        // The battery holds the charge it held at 7,600 over the stretch (`battery_hour_with`).
+        let held = 7_600.0 * 100.0 / f32::from(BATTERY_CHARGE_MAXIMUM);
+        assert_eq!(line.values[index], None);
+        assert_eq!(highest.value.to_bits(), held.to_bits());
+        assert_eq!(highest.place.unwrap().second(), 7_601);
     }
 }

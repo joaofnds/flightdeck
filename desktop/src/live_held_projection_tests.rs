@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use collector::battery::BatteryReading;
 use collector::machine::Pressure;
 use collector::recording::identity_text;
 use collector::ring::{Identity, RunIdentity};
@@ -13,12 +14,13 @@ use crate::live_projection::{
     GPU_TEMPERATURE_ID, LOAD_AVERAGE_ID, OPEN_FILES_ID, THERMAL_STATE_ID,
 };
 use crate::live_store_fixtures::{
-    cpu_readings, fan_rpm, gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates,
-    open_files_percent, overview_panels, reading_at, selection, selection_of_json, storage_rates,
-    summary_point, summary_selection, trend_point, view, with_cpu_reading, with_cpu_readings,
-    with_energy_reading, with_energy_readings, with_gpu_reading, with_gpu_readings,
-    with_memory_rates, with_memory_reading, with_network_rates, with_network_reading,
-    with_storage_rates, with_storage_reading,
+    battery_reading, cpu_readings, fan_rpm, gpu_memory_bytes, gpu_watts, levels, memory_rates,
+    network_rates, open_files_percent, overview_panels, reading_at, selection, selection_of_json,
+    storage_rates, summary_point, summary_selection, trend_point, view, with_battery_reading,
+    with_battery_readings, with_cpu_reading, with_cpu_readings, with_energy_reading,
+    with_energy_readings, with_gpu_reading, with_gpu_readings, with_memory_rates,
+    with_memory_reading, with_network_rates, with_network_reading, with_storage_rates,
+    with_storage_reading,
 };
 
 /// `place` as a trend point's reach names a reading.
@@ -143,7 +145,10 @@ fn the_cores_line_counts_the_logical_cpus_of_a_second_whose_record_names_no_leve
 }
 
 /// The panel the Overview names `id`.
-fn panel_named<'panels>(panels: &'panels [std::rc::Rc<Panel>], id: &str) -> &'panels Panel {
+pub(crate) fn panel_named<'panels>(
+    panels: &'panels [std::rc::Rc<Panel>],
+    id: &str,
+) -> &'panels Panel {
     panels.iter().find(|panel| panel.id == id).unwrap()
 }
 
@@ -198,8 +203,9 @@ struct Page {
     held_at_a_refused_second: &'static [(&'static str, usize)],
     /// The lines that only a complete reading holds, by chart and line index.
     missing_at_a_refused_second: &'static [(&'static str, usize)],
-    /// The state charts whose first line draws a state at a refused second, with that state.
-    states_at_a_refused_second: &'static [(&'static str, f32)],
+    /// The state charts whose first line draws a state at a refused second, with that state, or
+    /// none where the chart leaves the second's cell blank.
+    states_at_a_refused_second: &'static [(&'static str, Option<f32>)],
 }
 
 const MEMORY: Page = Page {
@@ -227,7 +233,7 @@ const MEMORY: Page = Page {
         ("live-paging", 1),
         ("live-paging", 2),
     ],
-    states_at_a_refused_second: &[("live-memory-pressure", 0.0)],
+    states_at_a_refused_second: &[("live-memory-pressure", Some(0.0))],
 };
 
 const NETWORK: Page = Page {
@@ -375,7 +381,20 @@ const ENERGY: Page = Page {
         (FANS_ID, 2),
     ],
     // The refused second reads level 4, Sleeping, which the thermal chart draws as Critical.
-    states_at_a_refused_second: &[(THERMAL_STATE_ID, 3.0)],
+    states_at_a_refused_second: &[(THERMAL_STATE_ID, Some(3.0))],
+};
+
+const BATTERY: Page = Page {
+    route: "battery",
+    with_reading: with_battery_reading,
+    chart_count: 3,
+    unrecorded: &[],
+    hour: battery_hour,
+    peak_lines: &[("live-battery-charge", 0), ("live-battery-flow", 0)],
+    held_at_a_refused_second: &[("live-battery-charge", 0), ("live-battery-flow", 0)],
+    missing_at_a_refused_second: &[],
+    // Only a complete reading holds the charging state, so the chart leaves the cell blank.
+    states_at_a_refused_second: &[("live-battery-charging", None)],
 };
 
 macro_rules! view_drawn_as_the_readings_draw_it_cases {
@@ -407,12 +426,26 @@ view_drawn_as_the_readings_draw_it_cases! {
     // Energy: every line draws a value, each of three fan channels too, but the six area maxima
     // recorded nowhere.
     the_energy_charts_of_the_view_draw_as_the_readings_draw_them, ENERGY;
+    // Battery: every line draws a value, the charging state too, which turns from not charging
+    // to charging past 9,000.
+    the_battery_charts_of_the_view_draw_as_the_readings_draw_them, BATTERY;
 }
 
 /// Asserts that `page` draws the same charts from a View as from the trend points of the same
 /// complete readings.
 fn assert_view_drawn_as_the_readings_draw_it(page: &Page) {
-    let read = |wall_second, segment| (page.with_reading)(reading_at(wall_second, segment));
+    assert_seconds_drawn_as_the_readings_draw_them(page, page.with_reading, page.unrecorded);
+}
+
+/// Asserts that `page` draws the same charts from a View as from the trend points of the seconds
+/// `with_reading` gives their complete readings, with every line drawing a value but the
+/// `undrawn` lines, which draw none.
+fn assert_seconds_drawn_as_the_readings_draw_them(
+    page: &Page,
+    with_reading: fn(MachineSecond) -> MachineSecond,
+    undrawn: &[(&str, &str)],
+) {
+    let read = |wall_second, segment| with_reading(reading_at(wall_second, segment));
     let earlier = [read(6_345, 0), read(7_001, 2)];
     let older = [read(9_020, 3), read(9_030, 3)];
     let detail = [
@@ -430,10 +463,84 @@ fn assert_view_drawn_as_the_readings_draw_it(page: &Page) {
 
     let drawn = view_panels(page.route, &view, levels().as_ref());
 
-    let drawn = drawn.unwrap();
-    assert_eq!(drawn, expected.unwrap());
+    let drawn = without_own_reaches(drawn.unwrap());
+    assert_eq!(drawn, without_own_reaches(expected.unwrap()));
     assert_eq!(drawn.len(), page.chart_count);
-    assert_lines_drawn(&drawn, page.unrecorded);
+    assert_lines_drawn(&drawn, undrawn);
+}
+
+macro_rules! battery_drawn_as_the_readings_draw_it_cases {
+    ($($name:ident, $with_reading:expr, $undrawn:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: the Battery page draws the same charts from the seconds the store holds as
+            // from the trend points the viewer writes of their complete readings, where the
+            // battery leaves readings out. Method: seconds whose complete readings hold the
+            // battery the case gives, across older seconds and a break, drawn both ways, with
+            // every line drawing a value but the case's undrawn lines.
+            assert_seconds_drawn_as_the_readings_draw_them(&BATTERY, $with_reading, $undrawn);
+        }
+    )*};
+}
+
+battery_drawn_as_the_readings_draw_it_cases! {
+    // No battery: a Mac without one draws no charge, power flow or charging state.
+    a_mac_without_a_battery_draws_its_battery_charts_without_a_reading_from_the_view,
+        |second| with_battery_readings(second, None),
+        &[
+            ("live-battery-charge", "Charge"),
+            ("live-battery-flow", "Into battery"),
+            ("live-battery-charging", "Charging"),
+        ];
+    // Charging unread: the controller did not say whether it charged, so the charging chart
+    // draws no cell, while the charge and power flow draw as they read.
+    a_battery_whose_charging_is_unread_draws_no_charging_state_from_the_view,
+        |second| {
+            let mut battery = battery_reading(&second);
+            battery.charging = None;
+            with_battery_readings(second, Some(battery))
+        },
+        &[("live-battery-charging", "Charging")];
+}
+
+/// `panels` with each reach that names its point's own reading, the same high at the same place,
+/// left out, so that two sources compare by what they draw. The reader's older tail leaves out
+/// the reach of a number that held one value over its stretch, while the View's stretch series
+/// keep it, and that reach draws nothing different: `chart_data_highest` takes it over the
+/// point's own reading only through `chart_data_higher`, which keeps a reach that ties, with the
+/// same value and place, and `timeline_cells` names a reach only where its state differs from
+/// the point's. A stacked line's reach is its stack's and not its own, so it stays.
+fn without_own_reaches(panels: Vec<std::rc::Rc<Panel>>) -> Vec<std::rc::Rc<Panel>> {
+    panels
+        .into_iter()
+        .map(|panel| {
+            let mut panel = std::rc::Rc::unwrap_or_clone(panel);
+            let stacked: Vec<bool> = panel
+                .lines
+                .iter()
+                .map(|line| crate::charts::stacked(&panel, line))
+                .collect();
+            let places = panel.places.clone();
+            for (line, stacked) in panel.lines.iter_mut().zip(stacked) {
+                if stacked {
+                    continue;
+                }
+                let Some(extremes) = line.extremes.as_mut() else {
+                    continue;
+                };
+                for (index, reach) in extremes.iter_mut().enumerate() {
+                    let place = places.as_ref().and_then(|places| places.get(index));
+                    let own = reach.is_some_and(|reach| {
+                        Some(reach.high) == line.values[index] && Some(&reach.peak) == place
+                    });
+                    if own {
+                        *reach = None;
+                    }
+                }
+            }
+            std::rc::Rc::new(panel)
+        })
+        .collect()
 }
 
 /// Asserts that every line of `panels` draws a value, except the `unrecorded` lines, which draw
@@ -564,13 +671,13 @@ fn the_view_refuses_a_power_remainder_that_is_not_finite() {
     assert!(drawn.unwrap_err().contains("power remainder"));
 }
 
-/// The first second a page drawn from a View whose newest second is 10,000 draws in full detail,
-/// as Memory, Network, Storage and GPU do.
+/// The first second that a page drawn from a View whose newest second is 10,000 draws in full
+/// detail.
 const HOUR_DETAIL_FIRST: u64 = 9_041;
 
 /// What a second of `hour` is, which a page's readings of it follow.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum HourSecond {
+pub(crate) enum HourSecond {
     /// A second like those beside it.
     Ordinary,
     /// One of the hour's two peaks, at 7,013 and 9,040.
@@ -756,6 +863,48 @@ fn energy_hour() -> Vec<MachineSecond> {
     })
 }
 
+/// The `hour` of the complete readings the Battery page draws.
+fn battery_hour() -> Vec<MachineSecond> {
+    battery_hour_with(|_battery, _moment| {})
+}
+
+/// The Battery page's `hour` whose controller never says whether the battery charges.
+fn battery_hour_with_charging_unread() -> Vec<MachineSecond> {
+    battery_hour_with(|battery, _moment| battery.charging = None)
+}
+
+/// The Battery page's `hour` of a Mac without a battery.
+fn battery_hour_without_a_battery() -> Vec<MachineSecond> {
+    hour(|second, _wall_second, _moment| with_battery_readings(second, None))
+}
+
+/// The `hour` of the complete readings the Battery page draws, with `change` changing the battery
+/// of each second, given what the second is.
+pub(crate) fn battery_hour_with(
+    change: impl Fn(&mut BatteryReading, HourSecond),
+) -> Vec<MachineSecond> {
+    hour(|second, wall_second, moment| {
+        let mut battery = battery_reading(&second);
+        // The collector reads the battery once a minute and every tick holds that reading, so
+        // each stretch holds one charge, power flow and charging state, which its first second
+        // reads too.
+        let held = wall_second / 10 * 10;
+        battery.charge_current = Some(held);
+        battery.current_ma = Some(i64::try_from(held).unwrap() - 9_000);
+        battery.charging = Some(held > 9_000);
+        // A peak draws power in and charges, though the battery around it drains before 9,000,
+        // so its stretch reaches the charging state at the peak's own reading.
+        if moment == HourSecond::Peak {
+            battery.charge_current = Some(19_000);
+            battery.current_ma = Some(5_000);
+            battery.charging = Some(true);
+        }
+        change(&mut battery, moment);
+
+        with_battery_readings(second, Some(battery))
+    })
+}
+
 /// `seconds` by the stretch each lies in, oldest first.
 fn seconds_by_stretch(
     seconds: &[MachineSecond],
@@ -771,7 +920,7 @@ fn seconds_by_stretch(
 /// The View of `seconds`, which end at 10,000: its seconds from 9,000 on, the seconds before
 /// them as its older tail, and the stretches the store reduced them to, up to the one
 /// `HOUR_DETAIL_FIRST` lies in.
-fn view_of_hour(seconds: &[MachineSecond]) -> View {
+pub(crate) fn view_of_hour(seconds: &[MachineSecond]) -> View {
     assert_eq!(seconds.last().unwrap().wall_ns / 1_000_000_000, 10_000);
     let stretches = seconds_by_stretch(seconds);
     let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
@@ -835,7 +984,12 @@ macro_rules! hour_drawn_as_the_readings_draw_it_cases {
             // tail written as the session writes it: the first reading of each stretch before
             // the join with the reach of the whole stretch, and the reach of the join's stretch
             // on its last point.
-            assert_hour_drawn_as_the_readings_draw_it(&$page);
+            assert_hour_drawn_as_the_readings_draw_it(
+                &$page,
+                &($page.hour)(),
+                $page.unrecorded,
+                $page.peak_lines,
+            );
         }
     )*};
 }
@@ -857,14 +1011,79 @@ hour_drawn_as_the_readings_draw_it_cases! {
     // Energy: the peaks reach the system power, GPU power and SoC sensor lines, the stacked power
     // chart's GPU line, which reaches the system power, and each of three fan channels.
     the_energy_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, ENERGY;
+    // Battery: the peaks reach the charge and power flow lines, and the charging state of the
+    // older stretch from 7,010 names the reading at 7,013, the one that charged.
+    the_battery_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, BATTERY;
 }
 
-/// Asserts that `page` draws its hour, peaks included, from a View as from the trend points
-/// and reach of the same readings.
-fn assert_hour_drawn_as_the_readings_draw_it(page: &Page) {
-    let seconds = (page.hour)();
+macro_rules! battery_hour_drawn_as_the_readings_draw_it_cases {
+    ($($name:ident, $hour:expr, $undrawn:expr, $peak_lines:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: over the loaded hour the Battery page draws the same charts from the seconds
+            // and stretches the store holds as from the trend points and reach the viewer writes
+            // of the same readings, where the battery leaves readings out of every second, so the
+            // older stretches hold none of them either. Method: the hour the case gives, drawn
+            // both ways as the hour of every page is, with every line drawing a value but the
+            // case's undrawn lines, and the hour's peaks reaching the case's lines.
+            assert_hour_drawn_as_the_readings_draw_it(&BATTERY, &$hour(), $undrawn, $peak_lines);
+        }
+    )*};
+}
+
+battery_hour_drawn_as_the_readings_draw_it_cases! {
+    // No battery: a Mac without one draws no charge, power flow or charging state, in an older
+    // stretch as at a recent second, and no peak.
+    an_hour_of_a_mac_without_a_battery_draws_no_battery_reading_from_the_view,
+        battery_hour_without_a_battery,
+        &[
+            ("live-battery-charge", "Charge"),
+            ("live-battery-flow", "Into battery"),
+            ("live-battery-charging", "Charging"),
+        ],
+        &[];
+    // Charging unread: the controller never said whether it charged, so no cell of the charging
+    // chart is drawn, while the charge and power flow draw as they read, peaks included.
+    an_hour_whose_charging_is_unread_draws_no_charging_state_from_the_view,
+        battery_hour_with_charging_unread,
+        &[("live-battery-charging", "Charging")],
+        &[("live-battery-charge", 0), ("live-battery-flow", 0)];
+}
+
+#[test]
+fn a_stretch_whose_first_second_reads_no_charging_state_draws_the_state_its_other_seconds_read() {
+    // Goal: an older stretch of the charging chart drawn from the View shows the highest state of
+    // its ten seconds, as the glossary's Point says an older cell does, though its first second
+    // read no state. The reader draws those ten cells blank, since its point is the first
+    // second's and its reach leaves out a state that held over the stretch, so the View's cell is
+    // the glossary's and the reader's is not. Method: the Battery hour with no charging state at
+    // 7,600 and 8,000, drawn from its View, and the ten cells from 7,600, whose other nine
+    // seconds read not charging.
+    let seconds = battery_hour_with(|battery, moment| {
+        if moment == HourSecond::AfterBreak {
+            battery.charging = None;
+        }
+    });
     let view = view_of_hour(&seconds);
-    let stretches = seconds_by_stretch(&seconds);
+
+    let drawn = view_panels("battery", &view, levels().as_ref()).unwrap();
+
+    let chart = panel_named(&drawn, "live-battery-charging");
+    let cell = usize::try_from(7_600 - chart.window.unwrap().first).unwrap();
+    assert_eq!(chart.lines[0].values[cell..cell + 10], [Some(0.0); 10]);
+}
+
+/// Asserts that `page` draws the hour of `seconds` from a View as from the trend points and
+/// reach of the same readings, with every line drawing a value but the `undrawn` lines, which
+/// draw none, and the hour's peaks reaching the `peak_lines`.
+fn assert_hour_drawn_as_the_readings_draw_it(
+    page: &Page,
+    seconds: &[MachineSecond],
+    undrawn: &[(&str, &str)],
+    peak_lines: &[(&str, usize)],
+) {
+    let view = view_of_hour(seconds);
+    let stretches = seconds_by_stretch(seconds);
     let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
     let mut tail: Vec<serde_json::Value> = stretches
         .range(..join)
@@ -886,10 +1105,10 @@ fn assert_hour_drawn_as_the_readings_draw_it(page: &Page) {
 
     let drawn = view_panels(page.route, &view, levels().as_ref());
 
-    let drawn = drawn.unwrap();
-    assert_eq!(drawn, expected.unwrap());
-    assert_lines_drawn(&drawn, page.unrecorded);
-    for &(id, line_index) in page.peak_lines {
+    let drawn = without_own_reaches(drawn.unwrap());
+    assert_eq!(drawn, without_own_reaches(expected.unwrap()));
+    assert_lines_drawn(&drawn, undrawn);
+    for &(id, line_index) in peak_lines {
         let extremes = panel_named(&drawn, id).lines[line_index]
             .extremes
             .clone()
@@ -945,13 +1164,18 @@ refused_second_drawn_as_it_holds_cases! {
     // the remainder and every fan channel only a complete reading holds are missing, and the
     // thermal chart draws the second's state.
     at_a_refused_second_the_energy_charts_draw_what_the_second_holds, ENERGY;
+    // Battery: the charge and power flow the second holds itself are held, and the charging
+    // state only a complete reading holds leaves the second's cell blank.
+    at_a_refused_second_the_battery_charts_draw_what_the_second_holds, BATTERY;
 }
 
 /// Asserts that at a refused second `page` draws what the second holds itself, as the worker
 /// draws it, and nothing that only a complete reading holds.
 fn assert_refused_second_drawn_as_it_holds(page: &Page) {
     let read = |wall_second| (page.with_reading)(reading_at(wall_second, 3));
-    let mut refused = reading_at(9_999, 3);
+    // The second holds in its record what the page's readings give it, as a second the page
+    // read does, while its complete reading is refused.
+    let mut refused = read(9_999);
     refused.complete = viewer::store::CompleteMachineState::Refused("fixture");
     // The store keeps the per-CPU readings of a second whose complete reading it refused.
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
@@ -984,7 +1208,7 @@ fn assert_refused_second_drawn_as_it_holds(page: &Page) {
     for &(id, state) in page.states_at_a_refused_second {
         let chart = panel_named(&drawn, id);
         let cell = usize::try_from(9_999 - chart.window.unwrap().first).unwrap();
-        assert_eq!(chart.lines[0].values[cell], Some(state), "{id}");
+        assert_eq!(chart.lines[0].values[cell], state, "{id}");
     }
 }
 
