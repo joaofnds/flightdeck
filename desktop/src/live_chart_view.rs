@@ -1390,10 +1390,13 @@ fn chart_hover_state(
 
 /// Inspects the hovered reading, else the selected second, else the newest reading.
 fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
-    let newest = panel
-        .lines
-        .first()
-        .map_or(0, |line| line.values.len().saturating_sub(1));
+    // A chart that draws no line, as the fan chart of a Mac without fans, still places its
+    // readings.
+    let readings = panel.lines.first().map_or_else(
+        || panel.positions.as_ref().map_or(0, Vec::len),
+        |line| line.values.len(),
+    );
+    let newest = readings.saturating_sub(1);
     let (lower, upper) = match &panel.positions {
         Some(positions) if panel.window.is_some() => {
             let (lower, upper) = crate::time_range::visible(positions);
@@ -1573,6 +1576,27 @@ mod tests {
         assert_eq!(
             (inspection.lower, inspection.selected, inspection.upper),
             (1, 1, 2)
+        );
+    }
+
+    #[test]
+    fn a_zoomed_chart_with_no_lines_inspects_the_readings_inside_its_view() {
+        // Goal: a zoomed chart that draws no line, as the fan chart of a Mac without fans, takes
+        // the range of readings inside its view from where its readings stand, as a chart with
+        // lines does, rather than failing. Method: place readings on both sides of the plot of a
+        // chart with no lines and read the inspected index range.
+        let panel = json!({
+            "positions": [-0.5, 0.2, 0.6, 1.2], "segments": [0, 0, 0, 0],
+            "id": "p", "title": "P", "unit": "rpm", "kind": "line", "lines": [],
+        });
+        let mut panel: Panel = serde_json::from_value(panel).unwrap();
+        panel.window = Some(crate::chart_axes::TimeWindow { first: 0, span: 60 });
+
+        let inspection = chart_inspection(&panel, None);
+
+        assert_eq!(
+            (inspection.lower, inspection.selected, inspection.upper),
+            (1, 2, 2)
         );
     }
 
