@@ -86,7 +86,7 @@ jobs:
       # from GitHub, so it changes with the version. With the hash set, the action also checks a
       # fresh download only against it, once unpacked, in place of the release's signed checksums.
       - &install-just
-        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         with:
           version: 2026.10.3
           sha256: 0999bd4943523ccdbd149b5ad4080281536801b3f6406ac4495699bd0310969c
