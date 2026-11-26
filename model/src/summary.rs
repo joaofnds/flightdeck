@@ -28,6 +28,18 @@ pub struct Extreme<Place> {
     pub place: Place,
 }
 
+impl<Place> Extreme<Place> {
+    /// The higher of this and `found`, a reading after it. A tie keeps this one, the earlier, so a
+    /// held second never moves.
+    fn higher(self, found: Self) -> Self {
+        if found.value > self.value {
+            found
+        } else {
+            self
+        }
+    }
+}
+
 /// What a reduction found of readings with values: the lowest and the highest, the earliest of
 /// any that tie, so a merge finds the one a reduction of all of them finds, and the newest.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,9 +116,7 @@ impl<Place: Copy> Reduction<Place> {
         if next.minimum.value < held.minimum.value {
             held.minimum = next.minimum;
         }
-        if next.maximum.value > held.maximum.value {
-            held.maximum = next.maximum;
-        }
+        held.maximum = held.maximum.higher(next.maximum);
         held.last = next.last;
         held.count += next.count;
         let total = held.total.checked_add(next.total);
@@ -150,8 +160,7 @@ impl<Place: Copy> RateSummary<Place> {
     /// Takes in the rate over the `elapsed_ns` after the last reading, or `None` where the two
     /// readings give no rate.
     pub fn push(&mut self, rate: Option<(f64, u64)>, follows: bool, place: Place) {
-        let elapsed_ns = rate.map_or(0, |(_rate, elapsed_ns)| elapsed_ns);
-        let value = rate.filter(|_| elapsed_ns > 0).map(|(rate, _)| rate);
+        let (value, elapsed_ns) = rate_reading(rate);
         self.0.push(value, elapsed_ns, follows, place);
     }
 
@@ -181,6 +190,18 @@ impl<Place> std::ops::Deref for RateSummary<Place> {
 pub struct Mark<Category, Place> {
     pub category: Category,
     pub place: Place,
+}
+
+impl<Category: Ord, Place> Mark<Category, Place> {
+    /// The higher of this and `found`, a reading after it. A tie keeps this one, the earlier, so a
+    /// held second never moves.
+    fn higher(self, found: Self) -> Self {
+        if found.category > self.category {
+            found
+        } else {
+            self
+        }
+    }
 }
 
 /// What readings of a category showed, which no mean describes. Keeps the changes between
@@ -267,7 +288,7 @@ where
         self.change_count += next.change_count.saturating_sub(next.kept_count());
         self.last = next.last;
         self.highest = match (self.highest, next.highest) {
-            (Some(held), Some(found)) if found.category > held.category => Some(found),
+            (Some(held), Some(found)) => Some(held.higher(found)),
             (held, _) => held,
         };
     }
@@ -289,6 +310,91 @@ where
     }
 }
 
+/// The highest of a series' readings and the reading it came from, the earliest of any that tie.
+/// It keeps no mean, lowest or count, for a reader that takes only the highest reading and its
+/// place, as a chart's peak does, and a reading `fixed_from_value` refuses never becomes it, as
+/// in a summary.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Highest<Place> {
+    pub reading: Option<Extreme<Place>>,
+}
+
+impl<Place: Copy> Highest<Place> {
+    fn push(&mut self, value: Option<f64>, place: Place) {
+        let Some(value) = value.filter(|value| fixed_from_value(*value).is_some()) else {
+            return;
+        };
+
+        let found = Extreme { value, place };
+        self.reading = Some(match self.reading {
+            Some(held) => held.higher(found),
+            None => found,
+        });
+    }
+}
+
+/// The highest of a gauge's readings, as `GaugeSummary` admits them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GaugeHighest<Place>(Highest<Place>);
+
+impl<Place: Copy> GaugeHighest<Place> {
+    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
+    pub fn push(&mut self, value: Option<f64>, place: Place) {
+        self.0.push(value, place);
+    }
+}
+
+impl<Place> std::ops::Deref for GaugeHighest<Place> {
+    type Target = Highest<Place>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The highest of a counter's rates, as `RateSummary` admits them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RateHighest<Place>(Highest<Place>);
+
+impl<Place: Copy> RateHighest<Place> {
+    /// Takes in the rate over the `elapsed_ns` after the last reading, or `None` where the two
+    /// readings give no rate.
+    pub fn push(&mut self, rate: Option<(f64, u64)>, place: Place) {
+        let (value, _elapsed_ns) = rate_reading(rate);
+        self.0.push(value, place);
+    }
+}
+
+impl<Place> std::ops::Deref for RateHighest<Place> {
+    type Target = Highest<Place>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The highest category of a series' readings and the reading that first showed it, which is all
+/// a reader of a state's peak takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CategoryHighest<Category, Place> {
+    pub reading: Option<Mark<Category, Place>>,
+}
+
+impl<Category: Copy + Ord, Place: Copy> CategoryHighest<Category, Place> {
+    /// Takes in the reading after the last one. `None` is a reading the collector did not read.
+    pub fn push(&mut self, category: Option<Category>, place: Place) {
+        let Some(category) = category else {
+            return;
+        };
+
+        let found = Mark { category, place };
+        self.reading = Some(match self.reading {
+            Some(held) => held.higher(found),
+            None => found,
+        });
+    }
+}
+
 /// The reading of the Mac a reduction found its value at, which holding it shows again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MachinePlace {
@@ -304,6 +410,14 @@ impl MachinePlace {
     pub fn second(&self) -> u64 {
         self.wall_ns / 1_000_000_000
     }
+}
+
+/// The rate of `rate` and the nanoseconds it covered. A rate over no time is no rate.
+fn rate_reading(rate: Option<(f64, u64)>) -> (Option<f64>, u64) {
+    let elapsed_ns = rate.map_or(0, |(_rate, elapsed_ns)| elapsed_ns);
+    let value = rate.filter(|_| elapsed_ns > 0).map(|(rate, _)| rate);
+
+    (value, elapsed_ns)
 }
 
 /// `value` in the total's fixed point, rounded toward zero, which keeps its grouping exact. Reads

@@ -1175,14 +1175,13 @@ fn a_stretch_reaches_the_same_readings_live_and_saved() {
     let saved = earlier_store_stretch(&fixture, 70, 3);
 
     assert_eq!(saved, live);
-    let fans = saved.fan_mean_rpm.measured.unwrap();
-    assert_eq!(fans.maximum.place.second(), 10_039);
-    assert!(fans.minimum.value < fans.maximum.value);
+    let fans = saved.fan_mean_rpm.reading.unwrap();
+    assert_eq!(fans.place.second(), 10_039);
 }
 
 #[test]
 fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the lowest and highest of each reading the Memory page draws,
+    // Goal: an older stretch keeps the highest of each reading the Memory page draws,
     // with the reading that read the highest, as the session's older tail keeps them for the same
     // seconds, so a peak of the Memory charts drawn from a store is the peak the tail draws.
     // Method: each series rises at its own pace and reads its highest at its own second of the
@@ -1208,13 +1207,9 @@ fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
-        let measured = reduction.measured.unwrap();
-        (
-            measured.minimum.value,
-            measured.maximum.value,
-            measured.maximum.place,
-        )
+    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
+        let reading = highest.reading.unwrap();
+        (reading.value, reading.place)
     };
     let rates = crate::store::MemoryRate::ALL;
     let held: Vec<_> = [
@@ -1228,18 +1223,18 @@ fn a_stretch_keeps_each_memory_reading_the_session_tail_keeps() {
         .iter()
         .map(|(key, _)| {
             let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
-            (*key, (reach.low, reach.high, reach.peak))
+            (*key, (reach.high, reach.peak))
         })
         .collect();
 
     assert_eq!(held, reached);
-    let peaks: Vec<u64> = held.iter().map(|(_, kept)| kept.2.second()).collect();
+    let peaks: Vec<u64> = held.iter().map(|(_, kept)| kept.1.second()).collect();
     assert_eq!(peaks, (EARLIER_BASE + 31..=EARLIER_BASE + 37).collect::<Vec<_>>());
 }
 
 #[test]
 fn a_stretch_keeps_each_network_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the lowest and highest of each packet and error rate the
+    // Goal: an older stretch keeps the highest of each packet and error rate the
     // Network page draws, with the reading that read the highest, as the session's older tail
     // keeps them for the same seconds, so a peak of the Network charts drawn from a store is the
     // peak the tail draws. Method: each counter of one interface rises at its own pace and jumps
@@ -1271,23 +1266,19 @@ fn a_stretch_keeps_each_network_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
-        let measured = reduction.measured.unwrap();
-        (
-            measured.minimum.value,
-            measured.maximum.value,
-            measured.maximum.place,
-        )
+    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
+        let reading = highest.reading.unwrap();
+        (reading.value, reading.place)
     };
     let held =
         crate::store::NetworkRate::ALL.map(|rate| (rate.key(), kept(stretch.network_rate(rate))));
     let reached = held.map(|(key, _)| {
         let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
-        (key, (reach.low, reach.high, reach.peak))
+        (key, (reach.high, reach.peak))
     });
 
     assert_eq!(held, reached);
-    let peaks = held.map(|(_, kept)| kept.2.second());
+    let peaks = held.map(|(_, kept)| kept.1.second());
     assert_eq!(peaks, [31, 32, 33, 34].map(|tick| EARLIER_BASE + tick));
 }
 

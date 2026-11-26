@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate, NetworkRate,
-    PointRate, Reduction, Second, StorageRate, View,
+    AppsStretch, Highest, MachinePlace, MachineSecond, MachineStretch, Mark, MemoryRate,
+    NetworkRate, PointRate, Second, StorageRate, View,
 };
 
 use super::{
@@ -458,9 +458,9 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
         (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
         (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
-        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest.as_ref()),
+        (None, "pressure", None) => stretch_reach_category(stretch.pressure.reading.as_ref()),
         (None, "thermal_pressure", None) => {
-            stretch_reach_category(stretch.thermal_pressure.highest.as_ref())
+            stretch_reach_category(stretch.thermal_pressure.reading.as_ref())
         }
         _ => return Err(format!("The store reduces no reading {key}")),
     };
@@ -468,12 +468,12 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
     Ok(reach)
 }
 
-fn stretch_reach_measured(reduction: &Reduction<MachinePlace>) -> Option<LineReach> {
-    let measured = reduction.measured.as_ref()?;
+fn stretch_reach_measured(highest: &Highest<MachinePlace>) -> Option<LineReach> {
+    let reading = highest.reading.as_ref()?;
 
     Some(LineReach {
-        high: measured.maximum.value.to_f32()?,
-        peak: measured.maximum.place,
+        high: reading.value.to_f32()?,
+        peak: reading.place,
     })
 }
 

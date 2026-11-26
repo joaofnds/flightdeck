@@ -9,7 +9,7 @@ const WALL_SECOND_AT_TICK_ZERO: u64 = 1000;
 
 #[test]
 fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the lowest and highest of the GPU power, the GPU memory in use
+    // Goal: an older stretch keeps the highest of the GPU power, the GPU memory in use
     // and allocated, and the GPU sensor the GPU page draws, with the reading that read the
     // highest, as the session's older tail keeps them for the same seconds, so a peak of the GPU
     // charts drawn from a store is the peak the tail draws. Method: each reading rises at its own
@@ -45,13 +45,9 @@ fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
-        let measured = reduction.measured.unwrap();
-        (
-            measured.minimum.value,
-            measured.maximum.value,
-            measured.maximum.place,
-        )
+    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
+        let reading = highest.reading.unwrap();
+        (reading.value, reading.place)
     };
     let held = [
         ("gpu_watts", kept(&stretch.gpu_watts)),
@@ -67,11 +63,11 @@ fn a_stretch_keeps_each_gpu_reading_the_session_tail_keeps() {
     ];
     let reached = held.map(|(key, _)| {
         let reach = crate::number_reach(&point["reach"], key).unwrap().unwrap();
-        (key, (reach.low, reach.high, reach.peak))
+        (key, (reach.high, reach.peak))
     });
 
     assert_eq!(held, reached);
-    let peaks = held.map(|(_, kept)| kept.2.second());
+    let peaks = held.map(|(_, kept)| kept.1.second());
     assert_eq!(peaks, GPU_PEAK_TICKS.map(|tick| WALL_SECOND_AT_TICK_ZERO + tick));
 }
 

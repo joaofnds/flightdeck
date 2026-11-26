@@ -220,7 +220,7 @@ fn storage_context_at(store: &crate::store::Store, second: u64) -> Arc<crate::st
 
 #[test]
 fn a_stretch_keeps_each_storage_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the lowest and highest of each operation, error and mean
+    // Goal: an older stretch keeps the highest of each operation, error and mean
     // service time rate the Storage page draws, with the reading that read the highest, as the
     // session's older tail keeps them for the same seconds, so a peak of the Storage charts drawn
     // from a store is the peak the tail draws. Method: each counter of one disk rises at its own
@@ -256,24 +256,20 @@ fn a_stretch_keeps_each_storage_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
-        let measured = reduction.measured.unwrap();
-        (
-            measured.minimum.value,
-            measured.maximum.value,
-            measured.maximum.place,
-        )
+    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
+        let reading = highest.reading.unwrap();
+        (reading.value, reading.place)
     };
     let held =
         crate::store::StorageRate::ALL.map(|rate| (rate.key(), kept(stretch.storage_rate(rate))));
     let reached = held.map(|(key, _)| {
         let path = crate::session::number_path(Some("storage"), key, None);
         let reach = crate::number_reach(&point["reach"], &path).unwrap().unwrap();
-        (key, (reach.low, reach.high, reach.peak))
+        (key, (reach.high, reach.peak))
     });
 
     assert_eq!(held, reached);
-    let peaks = held.map(|(_, kept)| kept.2.second());
+    let peaks = held.map(|(_, kept)| kept.1.second());
     assert_eq!(peaks, [1031, 1032, 1033, 1034, 1035, 1036]);
 }
 

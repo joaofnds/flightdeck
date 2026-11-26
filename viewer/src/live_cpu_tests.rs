@@ -14,7 +14,7 @@ const OPEN_FILES_LIMIT: u64 = 245_760;
 
 #[test]
 fn a_stretch_keeps_each_cpu_reading_the_session_tail_keeps() {
-    // Goal: an older stretch keeps the lowest and highest of each level's clock, each load
+    // Goal: an older stretch keeps the highest of each level's clock, each load
     // average, the open files and their share of the limit, and the CPU sensor the CPU page
     // draws, with the reading that read the highest, as the session's older tail keeps them for
     // the same seconds, so a peak of the CPU charts drawn from a store is the peak the tail
@@ -51,13 +51,9 @@ fn a_stretch_keeps_each_cpu_reading_the_session_tail_keeps() {
         })
         .unwrap();
 
-    let kept = |reduction: &model::summary::Reduction<crate::store::MachinePlace>| {
-        let measured = reduction.measured.unwrap();
-        (
-            measured.minimum.value,
-            measured.maximum.value,
-            measured.maximum.place,
-        )
+    let kept = |highest: &crate::store::Highest<crate::store::MachinePlace>| {
+        let reading = highest.reading.unwrap();
+        (reading.value, reading.place)
     };
     let held = [
         ("cpu_level_ghz/0", kept(&stretch.cpu_level_ghz[0])),
@@ -71,11 +67,11 @@ fn a_stretch_keeps_each_cpu_reading_the_session_tail_keeps() {
     ];
     let reached = held.map(|(path, _)| {
         let reach = crate::number_reach(&point["reach"], path).unwrap().unwrap();
-        (path, (reach.low, reach.high, reach.peak))
+        (path, (reach.high, reach.peak))
     });
 
     assert_eq!(held, reached);
-    let peaks = held.map(|(_, kept)| kept.2.second());
+    let peaks = held.map(|(_, kept)| kept.1.second());
     assert_eq!(peaks, CPU_PEAK_TICKS.map(|tick| WALL_SECOND_AT_TICK_ZERO + tick));
 }
 
