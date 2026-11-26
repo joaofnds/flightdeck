@@ -1,5 +1,7 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
+
+use persistence::aligned_pages::AlignedPages;
 
 #[global_allocator]
 static ALLOCATOR: Allocator = Allocator;
@@ -33,25 +35,26 @@ impl Drop for Measurement {
     }
 }
 
-// Measurements cover only the calling test thread; other tests retain the system allocator.
+// Measurements cover only the calling test thread, and every thread allocates through the
+// allocator the app declares.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        unsafe { System.alloc(layout) }
+        unsafe { AlignedPages.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { AlignedPages.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { AlignedPages.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         record(size);
-        unsafe { System.realloc(pointer, layout, size) }
+        unsafe { AlignedPages.realloc(pointer, layout, size) }
     }
 }
 

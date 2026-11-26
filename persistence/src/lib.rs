@@ -1,4 +1,5 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
+pub mod aligned_pages;
 #[cfg(test)]
 mod allocation_tests;
 pub mod app_tables;

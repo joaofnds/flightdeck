@@ -85,6 +85,12 @@ use std::process::ExitCode;
 
 use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
 
+// The tests count their allocations through `allocation_tests`'s own global allocator.
+#[cfg(not(test))]
+#[global_allocator]
+static ALLOCATOR: persistence::aligned_pages::AlignedPages =
+    persistence::aligned_pages::AlignedPages;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -139,6 +145,7 @@ fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error
         return Err(format!("unknown page: {}", options.page()).into());
     }
     if options.check() {
+        check_shared_zeros()?;
         println!(
             "Captured prototype: {} routes, {} metric families, {} samples per hour",
             catalog.navigation.len(),
@@ -153,6 +160,23 @@ fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error
         run_reference_window(capture, catalog, options, replay, cx);
     });
     Ok(())
+}
+
+/// Fails where polars' process-wide block of zeros takes resident pages before it is read,
+/// which shows the release build no longer serves that block from mapped pages, so the app's
+/// footprint carries 8 MiB of zeros again.
+fn check_shared_zeros() -> Result<(), Box<dyn std::error::Error>> {
+    let resident_page_count = persistence::aligned_pages::shared_zeros_resident_page_count()?;
+
+    if resident_page_count == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "polars' shared block of zeros has {resident_page_count} resident pages before it \
+             is read, so the global allocator no longer serves it from mapped pages"
+        )
+        .into())
+    }
 }
 
 fn run_reference_window(

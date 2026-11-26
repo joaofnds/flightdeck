@@ -1,6 +1,7 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
 
+use crate::aligned_pages::AlignedPages;
 use crate::resources::ByteBudget;
 
 struct Observer;
@@ -110,17 +111,17 @@ fn record(bytes: usize, alignment: usize, allocated: bool, allocation: *mut u8) 
 unsafe impl GlobalAlloc for Observer {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size(), layout.align(), true, std::ptr::null_mut());
-        unsafe { System.alloc(layout) }
+        unsafe { AlignedPages.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size(), layout.align(), true, std::ptr::null_mut());
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { AlignedPages.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         record(layout.size(), layout.align(), false, pointer);
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { AlignedPages.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
@@ -130,7 +131,7 @@ unsafe impl GlobalAlloc for Observer {
             }
         });
         record(bytes, layout.align(), true, std::ptr::null_mut());
-        let replacement = unsafe { System.realloc(pointer, layout, bytes) };
+        let replacement = unsafe { AlignedPages.realloc(pointer, layout, bytes) };
         if !replacement.is_null() {
             record(layout.size(), layout.align(), false, pointer);
         }

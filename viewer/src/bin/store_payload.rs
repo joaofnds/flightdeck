@@ -15,6 +15,11 @@ mod name_census;
 #[path = "store_payload/report.rs"]
 mod report;
 
+// The footprint this reports matches the app's only while it allocates as the app does.
+#[global_allocator]
+static ALLOCATOR: persistence::aligned_pages::AlignedPages =
+    persistence::aligned_pages::AlignedPages;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,

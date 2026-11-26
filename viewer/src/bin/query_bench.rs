@@ -22,6 +22,11 @@ unsafe extern "C" {
     fn clock_gettime(clock: c_int, time: *mut Timespec) -> c_int;
 }
 
+// The footprint this reports matches the app's only while it allocates as the app does.
+#[global_allocator]
+static ALLOCATOR: persistence::aligned_pages::AlignedPages =
+    persistence::aligned_pages::AlignedPages;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,

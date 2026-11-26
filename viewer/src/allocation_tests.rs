@@ -1,5 +1,7 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
+
+use persistence::aligned_pages::AlignedPages;
 
 struct Observer;
 
@@ -36,17 +38,17 @@ fn count() {
 unsafe impl GlobalAlloc for Observer {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count();
-        unsafe { System.alloc(layout) }
+        unsafe { AlignedPages.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count();
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { AlignedPages.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
         count();
-        unsafe { System.realloc(pointer, layout, bytes) }
+        unsafe { AlignedPages.realloc(pointer, layout, bytes) }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { AlignedPages.dealloc(pointer, layout) };
     }
 }

@@ -34,6 +34,7 @@ dev: bundle
 bundle: sweep
     cargo build --locked --release -p collector -p persister --bin collector --bin recorder --bin persister
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
+    target/release/persister --check
     desktop/target/release/flightdeck --check
     desktop/target/release/flightdeck --bundle
     desktop/target/Flightdeck.app/Contents/MacOS/flightdeck --bundle --check

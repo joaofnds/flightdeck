@@ -1,7 +1,8 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use persistence::aligned_pages::AlignedPages;
 use serde_json::{Value, json};
 
 use crate::data::{Line, Panel};
@@ -53,21 +54,21 @@ impl Drop for Counter {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        unsafe { System.alloc(layout) }
+        unsafe { AlignedPages.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
+        unsafe { AlignedPages.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { AlignedPages.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         record(size);
-        unsafe { System.realloc(pointer, layout, size) }
+        unsafe { AlignedPages.realloc(pointer, layout, size) }
     }
 }
 

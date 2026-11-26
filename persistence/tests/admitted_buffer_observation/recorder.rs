@@ -1,7 +1,8 @@
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use persistence::aligned_pages::AlignedPages;
 use persistence::resources::ByteBudget;
 
 pub const EVENTS_MAX: usize = 256;
@@ -205,7 +206,7 @@ fn finish(call: Option<Call>, mut event: Event) {
 unsafe impl GlobalAlloc for Observer {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let call = begin();
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { AlignedPages.alloc(layout) };
         finish(
             call,
             Event {
@@ -222,7 +223,7 @@ unsafe impl GlobalAlloc for Observer {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let call = begin();
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { AlignedPages.alloc_zeroed(layout) };
         finish(
             call,
             Event {
@@ -239,7 +240,7 @@ unsafe impl GlobalAlloc for Observer {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         let call = begin();
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { AlignedPages.dealloc(pointer, layout) };
         finish(
             call,
             Event {
@@ -254,7 +255,7 @@ unsafe impl GlobalAlloc for Observer {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
         let call = begin();
-        let replacement = unsafe { System.realloc(pointer, layout, bytes) };
+        let replacement = unsafe { AlignedPages.realloc(pointer, layout, bytes) };
         finish(
             call,
             Event {

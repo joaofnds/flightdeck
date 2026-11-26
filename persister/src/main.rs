@@ -1,6 +1,10 @@
 use std::ffi::c_int;
 use std::path::PathBuf;
 
+#[global_allocator]
+static ALLOCATOR: persistence::aligned_pages::AlignedPages =
+    persistence::aligned_pages::AlignedPages;
+
 fn main() {
     let initialized = persistence::engine::initialize_process();
     collector::diagnostics::install(collector::diagnostics::Role::Persister);
@@ -32,23 +36,26 @@ fn run() -> i32 {
     let options = collector::arguments("persister").and_then(|words| options(&words));
     let derive = persistence::sealed_apps::SealedApps::default();
     match options {
-        Ok((root, memory, authority)) => {
-            match persistence::worker::run_managed(&root, memory, &derive, authority) {
-                Ok(persistence::worker::Outcome::Complete) => 0,
-                Ok(persistence::worker::Outcome::Owned) => {
-                    collector::diagnostics::error(format_args!(
-                        "recording owned by surviving persister; CPU not measured"
-                    ));
-                    i32::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
-                }
-                Err(error) => {
-                    collector::diagnostics::error(format_args!(
-                        "persister failed; unsealed history is at risk: {error}"
-                    ));
-                    failure_status(&error)
-                }
+        Ok(Invocation::Check) => check_shared_zeros(),
+        Ok(Invocation::Persist {
+            root,
+            memory,
+            authority,
+        }) => match persistence::worker::run_managed(&root, memory, &derive, authority) {
+            Ok(persistence::worker::Outcome::Complete) => 0,
+            Ok(persistence::worker::Outcome::Owned) => {
+                collector::diagnostics::error(format_args!(
+                    "recording owned by surviving persister; CPU not measured"
+                ));
+                i32::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
             }
-        }
+            Err(error) => {
+                collector::diagnostics::error(format_args!(
+                    "persister failed; unsealed history is at risk: {error}"
+                ));
+                failure_status(&error)
+            }
+        },
         Err(error) => {
             collector::diagnostics::error(format_args!("{error}"));
             2
@@ -84,6 +91,28 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn check_alone_selects_the_release_check() {
+        // Goal: `--check` runs the release check rather than a recording. Method: the
+        // production parser given `--check` and nothing else.
+        let words = ["--check"].map(str::to_owned);
+
+        let invocation = super::options(&words);
+
+        assert!(matches!(invocation, Ok(super::Invocation::Check)));
+    }
+
+    #[test]
+    fn check_with_a_recording_is_refused() {
+        // Goal: `--check` never runs beside a recording, so a check cannot seal one. Method:
+        // the production parser given `--check` before a recording's flags.
+        let words = ["--check", "--recording", "/recording"].map(str::to_owned);
+
+        let invocation = super::options(&words);
+
+        assert!(invocation.is_err());
+    }
 }
 
 const SIGTERM: c_int = 15;
@@ -95,8 +124,44 @@ unsafe extern "C" {
     fn umask(mask: u16) -> u16;
 }
 
-fn options(words: &[String]) -> Result<(PathBuf, u64, Option<collector::ring::Identity>), String> {
-    let usage = || "usage: persister --recording PATH [--memory-bytes N]".to_owned();
+/// What the command line asks the persister to do.
+enum Invocation {
+    /// The release build's own check, which `just bundle` runs: whether polars' shared block
+    /// of zeros still comes from mapped pages.
+    Check,
+    Persist {
+        root: PathBuf,
+        memory: u64,
+        authority: Option<collector::ring::Identity>,
+    },
+}
+
+/// Fails where polars' process-wide block of zeros takes resident pages before it is read,
+/// which shows the release build no longer serves that block from mapped pages, so the
+/// persister's footprint carries 8 MiB of zeros again.
+fn check_shared_zeros() -> i32 {
+    match persistence::aligned_pages::shared_zeros_resident_page_count() {
+        Ok(0) => 0,
+        Ok(resident_page_count) => {
+            collector::diagnostics::error(format_args!(
+                "persister check: polars' shared block of zeros has {resident_page_count} \
+                 resident pages before it is read, so the global allocator no longer serves it \
+                 from mapped pages"
+            ));
+            1
+        }
+        Err(error) => {
+            collector::diagnostics::error(format_args!("persister check: {error}"));
+            1
+        }
+    }
+}
+
+fn options(words: &[String]) -> Result<Invocation, String> {
+    let usage = || "usage: persister --recording PATH [--memory-bytes N] | --check".to_owned();
+    if words == ["--check"] {
+        return Ok(Invocation::Check);
+    }
     let mut root = None;
     let mut authority = None;
     let mut memory = persistence::worker::default_memory_limit();
@@ -112,5 +177,9 @@ fn options(words: &[String]) -> Result<(PathBuf, u64, Option<collector::ring::Id
             _ => return Err(usage()),
         }
     }
-    Ok((root.ok_or_else(usage)?, memory, authority))
+    Ok(Invocation::Persist {
+        root: root.ok_or_else(usage)?,
+        memory,
+        authority,
+    })
 }

@@ -21,6 +21,11 @@ const WAIT_MAX: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_millis(1);
 const POLLS_MAX: u32 = 120_000;
 
+// The footprint this reports matches the app's only while it allocates as the app does.
+#[global_allocator]
+static ALLOCATOR: persistence::aligned_pages::AlignedPages =
+    persistence::aligned_pages::AlignedPages;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
