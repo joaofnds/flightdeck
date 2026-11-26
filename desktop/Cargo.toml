@@ -95,12 +95,15 @@ features = ["font-kit", "runtime_shaders"]
 [features]
 automation = ["gpui/test-support", "gpui_macos/test-support"]
 
+# On macOS rustc keeps a debug build's object files for their debug info, under new names at
+# every build, and deletes none, so a build with debug info grows the target without bound. A
+# panic still names its file and line. tidy holds every profile here to it.
+[profile.dev]
+debug = false
+
 # Keep the native query engine's debug unwind tables within Mach-O limits.
 [profile.dev.package."*"]
 opt-level = 1
-# Nobody steps through a dependency, and its debug info made the native engine's core
-# library ten times its release size.
-debug = false
 
 [profile.release]
 overflow-checks = true

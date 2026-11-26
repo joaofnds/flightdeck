@@ -42,10 +42,43 @@ fn release_profile_traps_overflow_and_aborts_on_a_panic() {
     // Method: read the `[profile.release]` table of the workspace manifest.
     let text = read_text(&repository_root().join("Cargo.toml"));
 
-    let settings = release_profile_settings(&text);
+    let settings = profile_settings(&text, "[profile.release]");
 
     assert!(settings.contains(&"overflow-checks = true"), "{settings:?}");
     assert!(settings.contains(&"panic = \"abort\""), "{settings:?}");
+}
+
+#[test]
+fn the_root_workspace_builds_no_debug_info() {
+    // Goal: no build of the root workspace makes debug info, since on macOS rustc keeps a
+    // build's object files for it, under new names at every build, and deletes none.
+    // Method: read every profile table of the workspace manifest.
+    let text = read_text(&repository_root().join("Cargo.toml"));
+
+    assert_builds_no_debug_info(&text);
+}
+
+#[test]
+fn the_desktop_workspace_builds_no_debug_info() {
+    // Goal: no build of the desktop workspace makes debug info, for the same reason.
+    // Method: read every profile table of its manifest.
+    let text = read_text(&repository_root().join("desktop/Cargo.toml"));
+
+    assert_builds_no_debug_info(&text);
+}
+
+#[test]
+fn a_profile_that_turns_debug_info_on_is_found() {
+    // Goal: the debug info check sees a package's override and another profile, not only dev,
+    // and passes over a setting of another name or outside the profiles.
+    // Method: read the debug settings of a manifest with each.
+    let text = "[profile.dev]\ndebug = false\ndebug-assertions = true\n\n\
+        [profile.dev.package.viewer]\ndebug = true\n\n[profile.test]\ndebug = 1\n\n\
+        [features]\ndebug = []\n";
+
+    let settings = profile_debug_settings(text);
+
+    assert_eq!(settings, ["debug = false", "debug = true", "debug = 1"]);
 }
 
 #[test]
@@ -80,15 +113,44 @@ fn dependencies_from_outside_the_workspace_have_a_recorded_case() {
 
 /// Lists the lines of the `[profile.release]` table in a manifest, trimmed, up to the next
 /// table.
-fn release_profile_settings(text: &str) -> Vec<&str> {
+fn assert_builds_no_debug_info(text: &str) {
+    let dev = profile_settings(text, "[profile.dev]");
+    let debug = profile_debug_settings(text);
+
+    assert!(dev.contains(&"debug = false"), "{dev:?}");
+    assert!(
+        debug.iter().all(|setting| *setting == "debug = false"),
+        "{debug:?}"
+    );
+}
+
+/// The lines of the table of `text` whose header is `header`.
+fn profile_settings<'text>(text: &'text str, header: &str) -> Vec<&'text str> {
     let mut settings = Vec::new();
     let mut inside = false;
     for line in text.lines() {
         let setting = line.trim();
         if setting.starts_with('[') {
-            inside = setting == "[profile.release]";
+            inside = setting == header;
         } else {
             if inside {
+                settings.push(setting);
+            }
+        }
+    }
+    settings
+}
+
+/// The `debug` settings in every profile table of `text`, a package's override included.
+fn profile_debug_settings(text: &str) -> Vec<&str> {
+    let mut settings = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let setting = line.trim();
+        if setting.starts_with('[') {
+            inside = setting.starts_with("[profile.");
+        } else {
+            if inside && setting.split('=').next().map(str::trim) == Some("debug") {
                 settings.push(setting);
             }
         }

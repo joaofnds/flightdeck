@@ -47,12 +47,15 @@ let_underscore_untyped = "warn"
 let_underscore_must_use = "warn"
 unused_result_ok = "warn"
 
+# On macOS rustc keeps a debug build's object files for their debug info, under new names at
+# every build, and deletes none, so a build with debug info grows the target without bound. A
+# panic still names its file and line. tidy holds every profile here to it.
+[profile.dev]
+debug = false
+
 # Optimized dependencies keep the native engine's debug unwind tables within Mach-O limits.
 [profile.dev.package."*"]
 opt-level = 1
-# Nobody steps through a dependency, and its debug info made the native engine's core
-# library ten times its release size.
-debug = false
 
 # Their tests run native children that write the most rows a recording retains, which unoptimized
 # took minutes of one core each on a loaded CI runner. Assertions and overflow checks stay on.
