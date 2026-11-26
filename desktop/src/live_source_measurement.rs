@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -122,7 +122,14 @@ impl Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        *self.shared.measurement_gate.lock().unwrap() = None;
+        // A wait that failed panicked while it held the gate, which poisons its lock, and that
+        // panic already fails the test. A second one here, raised as the first unwinds, would
+        // abort the whole test binary and hide every other test's result.
+        *self
+            .shared
+            .measurement_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         self.shared.measurement_wake.notify_all();
     }
 }
@@ -195,4 +202,43 @@ pub(super) fn interrupted(shared: &Shared, generation: u64, error: &persistence:
             gate.interrupted = true;
         }
     }
+}
+
+#[test]
+fn a_hold_let_go_after_its_wait_failed_clears_the_gate() {
+    // Goal: a hold whose wait failed lets go of the gate without a second panic, since that panic,
+    // raised as the first one unwinds, aborts every test of the binary rather than failing one.
+    // Method: hold a stage, fail a wait's assertion while it holds the gate, as a timed-out
+    // checkpoint does, which poisons the gate's lock, then let the hold go and read the gate.
+    let shared = Arc::new(Shared::new());
+    *shared.measurement_gate.lock().unwrap() = Some(Gate {
+        stage: Some(Stage::Reading),
+        entered: None,
+        released: false,
+        finished: false,
+        interrupted: false,
+    });
+    let hold = Hold {
+        shared: Arc::clone(&shared),
+    };
+    let failed_wait = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let gate = shared.measurement_gate.lock().unwrap();
+        assert!(
+            gate.as_ref().is_some_and(|gate| gate.finished),
+            "worker checkpoint timed out"
+        );
+    }));
+    assert!(failed_wait.is_err());
+    assert!(shared.measurement_gate.is_poisoned());
+
+    let let_go = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(hold)));
+
+    assert!(let_go.is_ok());
+    assert!(
+        shared
+            .measurement_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+    );
 }
