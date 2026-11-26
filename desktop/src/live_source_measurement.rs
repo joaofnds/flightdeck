@@ -122,14 +122,19 @@ impl Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
+        let locked = self.shared.measurement_gate.lock();
         // A wait that failed panicked while it held the gate, which poisons its lock, and that
-        // panic already fails the test. A second one here, raised as the first unwinds, would
-        // abort the whole test binary and hide every other test's result.
-        *self
-            .shared
-            .measurement_gate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
+        // panic fails the test. A second one here, raised as the first unwinds, would abort the
+        // whole test binary and hide every other test's result. Outside an unwind, a poisoned
+        // gate is the worker's checkpoint failing on its own thread, which only this panic
+        // reports to the test.
+        let mut slot = if std::thread::panicking() {
+            locked.unwrap_or_else(PoisonError::into_inner)
+        } else {
+            locked.expect("a panic poisoned the measurement gate")
+        };
+
+        *slot = None;
         self.shared.measurement_wake.notify_all();
     }
 }
@@ -205,11 +210,46 @@ pub(super) fn interrupted(shared: &Shared, generation: u64, error: &persistence:
 }
 
 #[test]
-fn a_hold_let_go_after_its_wait_failed_clears_the_gate() {
-    // Goal: a hold whose wait failed lets go of the gate without a second panic, since that panic,
-    // raised as the first one unwinds, aborts every test of the binary rather than failing one.
-    // Method: hold a stage, fail a wait's assertion while it holds the gate, as a timed-out
-    // checkpoint does, which poisons the gate's lock, then let the hold go and read the gate.
+fn a_hold_let_go_as_its_test_panics_clears_the_gate() {
+    // Goal: a hold let go as its test's panic unwinds clears the gate without a second panic,
+    // since that panic, raised as the first one unwinds, aborts every test of the binary rather
+    // than failing one.
+    // Method: let a hold over a gate a panic poisoned go as a second panic unwinds, as a failed
+    // wait's does, then read the gate.
+    let hold = poisoned_hold();
+    let shared = Arc::clone(&hold.shared);
+
+    let failed_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _hold = hold;
+        panic!("worker checkpoint timed out");
+    }));
+
+    assert!(failed_test.is_err());
+    assert!(
+        shared
+            .measurement_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_hold_let_go_outside_a_panic_fails_over_a_poisoned_gate() {
+    // Goal: a hold let go outside a panic, over a gate a panic poisoned, panics in turn, since a
+    // worker's checkpoint that was never released fails only on the worker's thread, and the
+    // hold's panic is what fails the test that held it.
+    // Method: let a hold over a gate a panic poisoned go while nothing panics.
+    let hold = poisoned_hold();
+
+    let let_go = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(hold)));
+
+    assert!(let_go.is_err());
+}
+
+/// A hold of the reading stage over a gate whose lock a panic poisoned while it held the gate,
+/// as a failed wait or a checkpoint never released leaves it.
+fn poisoned_hold() -> Hold {
     let shared = Arc::new(Shared::new());
     *shared.measurement_gate.lock().unwrap() = Some(Gate {
         stage: Some(Stage::Reading),
@@ -218,27 +258,12 @@ fn a_hold_let_go_after_its_wait_failed_clears_the_gate() {
         finished: false,
         interrupted: false,
     });
-    let hold = Hold {
-        shared: Arc::clone(&shared),
-    };
-    let failed_wait = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let gate = shared.measurement_gate.lock().unwrap();
-        assert!(
-            gate.as_ref().is_some_and(|gate| gate.finished),
-            "worker checkpoint timed out"
-        );
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _gate = shared.measurement_gate.lock().unwrap();
+        panic!("the gate's holder failed");
     }));
-    assert!(failed_wait.is_err());
+    assert!(poisoned.is_err());
     assert!(shared.measurement_gate.is_poisoned());
 
-    let let_go = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(hold)));
-
-    assert!(let_go.is_ok());
-    assert!(
-        shared
-            .measurement_gate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_none()
-    );
+    Hold { shared }
 }
