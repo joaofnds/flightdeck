@@ -374,9 +374,10 @@ struct Reader {
     /// Since when nothing reads the older tail: since the reader's rest, until a reading that
     /// reads the tail. A hover, a reading that left the tail to the View and a read that skips
     /// it read none of it, so each leaves this as it found it. The session lets go of the tail
-    /// `EARLIER_TAIL_KEEP_INTERVAL` later, which clears this. It keys on the rest and not on the
-    /// Store's answer, since a page the Store goes on answering reads the tail every reading,
-    /// and letting go of it then would read it again cold once an interval.
+    /// `EARLIER_TAIL_KEEP_INTERVAL` later, once no reading of a page is on its way, which clears
+    /// this. It keys on the rest and not on the Store's answer, since a page the Store goes on
+    /// answering reads the tail every reading, and letting go of it then would read it again cold
+    /// once an interval.
     earlier_tail_unread_since: Option<Instant>,
     retry_after: Instant,
 }
@@ -990,7 +991,7 @@ fn worker_step(
     }
     worker_step_list(reader);
     worker_step_forget(reader, now);
-    worker_step_forget_earlier_tail(reader, now);
+    worker_step_forget_earlier_tail(reader, command.as_ref(), now);
 
     if let Some(pause) = read_pause {
         pause
@@ -1089,12 +1090,17 @@ fn worker_step_forget(reader: &mut Reader, now: Instant) {
 /// Lets go of the older tail once nothing has read it for `EARLIER_TAIL_KEEP_INTERVAL` at
 /// `now`. Left to stay, it would last as long as the app runs, in a shown window whose page the
 /// store's View draws and in a closed one alike. A return within the interval draws the tail the
-/// session kept, and a later one reads it again as the first read did.
-fn worker_step_forget_earlier_tail(reader: &mut Reader, now: Instant) {
+/// session kept, and a later one reads it again as the first read did. A request taken within
+/// the interval is such a return, so the tail stays while the reader has yet to publish all the
+/// reading `command` asks for, however long the Store takes to answer it.
+fn worker_step_forget_earlier_tail(reader: &mut Reader, command: Option<&Command>, now: Instant) {
     let Some(due) = reader_earlier_tail_due(reader) else {
         return;
     };
     if now < due {
+        return;
+    }
+    if command.is_some_and(|command| !reader_published(reader, command.generation)) {
         return;
     }
 
@@ -1775,8 +1781,9 @@ fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result
 /// a longer range draw, and returns whether the page still waits for them. A step with
 /// `tail_at_once` takes only a tail its session keeps or reads in one batch of saved minutes,
 /// and leaves a longer read to a later step. A failed read leaves the charts at their full-detail
-/// context and says why beside it. A read of the tail clears `earlier_tail_unread_since`, and
-/// nothing else does, so the stamp says since when no reading has read the tail.
+/// context and says why beside it. A reading that reads the tail clears
+/// `earlier_tail_unread_since` before it reads, so a read that fails or leaves the tail to a later
+/// step counts as a read. Otherwise only letting go of the tail clears it.
 fn reader_earlier(
     session: &mut LiveSession,
     earlier_tail_unread_since: &mut Option<Instant>,
