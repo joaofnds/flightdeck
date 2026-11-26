@@ -791,8 +791,9 @@ mod tests {
 
     use crate::chart_axes::TimeWindow;
     use crate::data::{LineReach, MachinePlace};
+    use crate::live_projection::LOAD_AVERAGE_ID;
     use crate::live_projection::held_projection::tests::{
-        HourSecond, battery_hour_with, panel_named, view_of_hour,
+        HourSecond, battery_hour_with, cpu_hour, hour_read, panel_named, view_of_hour,
     };
     use crate::live_projection::held_projection::view_panels;
     use crate::live_store_fixtures::{BATTERY_CHARGE_MAXIMUM, levels};
@@ -1289,15 +1290,14 @@ mod tests {
 
     #[test]
     fn a_stretch_whose_first_second_reads_no_charge_gives_its_highest_charge_to_the_data_table() {
-        // Goal: the Data table of the charge chart drawn from the View gives an older stretch's
-        // highest charge and the reading that read it, as the glossary's Point says an older
-        // reading of the whole Mac keeps, though the stretch's first second read no charge. The
-        // reader gives none there, since its point is the first second's and its reach leaves
-        // out a charge that held over the stretch. Method: the Battery hour of the held page's
-        // tests with no charge at 7,600 and 8,000, drawn from its View, and what the Data
-        // table's own reading of a point gives for the point of the stretch from 7,600, which
-        // draws no charge of its own: the highest charge of its other nine seconds, which tie,
-        // at the earliest of them, 7,601.
+        // Goal: the Data table of the charge chart gives an older stretch's highest charge and the
+        // reading that read it, as the glossary's Point says an older reading of the whole Mac
+        // keeps, though the stretch's first second, which the reader's point stands at, read no
+        // charge, and the View and the reader give it alike. Method: the Battery hour of the held
+        // page's tests with no charge at 7,600 and 8,000, drawn from its View and from the
+        // reader's tail, and what the Data table's own reading of a point gives on each for the
+        // point of the stretch from 7,600, which draws no charge of its own: the highest charge
+        // of its other nine seconds, which tie, at the earliest of them, 7,601.
         let seconds = battery_hour_with(|battery, moment| {
             if moment == HourSecond::AfterBreak {
                 battery.charge_current = None;
@@ -1306,14 +1306,63 @@ mod tests {
         let view = view_of_hour(&seconds);
 
         let drawn = view_panels("battery", &view, levels().as_ref()).unwrap();
+        let read = hour_read("battery", &seconds);
 
-        let chart = panel_named(&drawn, "live-battery-charge");
+        let (drawn_value, drawn_highest) = highest_at_7_600(&drawn, "live-battery-charge", 0);
+        let (read_value, read_highest) = highest_at_7_600(&read, "live-battery-charge", 0);
+        // The battery holds the charge it held at 7,600 over the stretch (`battery_hour_with`).
+        let held = 7_600.0 * 100.0 / f32::from(BATTERY_CHARGE_MAXIMUM);
+        assert_eq!(drawn_value, None);
+        assert_eq!(drawn_highest.value.to_bits(), held.to_bits());
+        assert_eq!(drawn_highest.place.unwrap().second(), 7_601);
+        assert_eq!(read_value, None);
+        assert_eq!(read_highest, drawn_highest);
+    }
+
+    #[test]
+    fn a_stretch_whose_first_second_reads_no_cpu_counters_gives_the_core_count_to_the_data_table() {
+        // Goal: the Data table of the load average chart gives an older stretch's core count and
+        // the reading that read it, as the glossary's Point says an older reading of the whole Mac
+        // keeps, though the stretch's first second, which the reader's point stands at, read no
+        // CPU counters, and the View and the reader give it alike. Method: the CPU hour of the
+        // held page's tests whose second at 7,600 has no complete reading and no refused CPU
+        // reading, drawn from its View and from the reader's tail, and what the Data table's own
+        // reading of a point gives on each for the Cores line at the point of the stretch from
+        // 7,600: the 18 logical CPUs of its other nine seconds, which tie, at the earliest, 7,601.
+        let mut seconds = cpu_hour();
+        let first = seconds
+            .iter_mut()
+            .find(|second| second.wall_ns / 1_000_000_000 == 7_600)
+            .unwrap();
+        first.complete = viewer::store::CompleteMachineState::Unread;
+        let view = view_of_hour(&seconds);
+
+        let drawn = view_panels("cpu", &view, levels().as_ref()).unwrap();
+        let read = hour_read("cpu", &seconds);
+
+        let (drawn_value, drawn_highest) = highest_at_7_600(&drawn, LOAD_AVERAGE_ID, 3);
+        let (read_value, read_highest) = highest_at_7_600(&read, LOAD_AVERAGE_ID, 3);
+        assert_eq!(drawn_value, None);
+        assert_eq!(drawn_highest.value.to_bits(), 18.0_f32.to_bits());
+        assert_eq!(drawn_highest.place.unwrap().second(), 7_601);
+        assert_eq!(read_value, None);
+        assert_eq!(read_highest, drawn_highest);
+    }
+
+    /// What the line at `line_index` of the chart `id` of `panels` draws at the point of 7,600
+    /// and what its Data table gives as the highest there.
+    fn highest_at_7_600(
+        panels: &[std::rc::Rc<crate::data::Panel>],
+        id: &str,
+        line_index: usize,
+    ) -> (Option<f32>, SampleMaximum) {
+        let chart = panel_named(panels, id);
         let places = chart.places.as_ref().unwrap();
         let index = places
             .iter()
             .position(|place| place.second() == 7_600)
             .unwrap();
-        let line = &chart.lines[0];
+        let line = &chart.lines[line_index];
         let highest = chart_data_highest(
             chart,
             line.extremes.as_ref(),
@@ -1322,10 +1371,7 @@ mod tests {
             chart.window,
         )
         .unwrap();
-        // The battery holds the charge it held at 7,600 over the stretch (`battery_hour_with`).
-        let held = 7_600.0 * 100.0 / f32::from(BATTERY_CHARGE_MAXIMUM);
-        assert_eq!(line.values[index], None);
-        assert_eq!(highest.value.to_bits(), held.to_bits());
-        assert_eq!(highest.place.unwrap().second(), 7_601);
+
+        (line.values[index], highest)
     }
 }

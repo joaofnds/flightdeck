@@ -505,8 +505,9 @@ battery_drawn_as_the_readings_draw_it_cases! {
 
 /// `panels` with each reach that names its point's own reading, the same high at the same place,
 /// left out, so that two sources compare by what they draw. The reader's older tail leaves out
-/// the reach of a number that held one value over its stretch, while the View's stretch series
-/// keep it, and that reach draws nothing different: `chart_data_highest` takes it over the
+/// the reach of a number that held one value over its stretch where the stretch's point reads
+/// that value, as the Battery hours' charge does, while the View's stretch series keep it, and
+/// that reach draws nothing different: `chart_data_highest` takes it over the
 /// point's own reading only through `chart_data_higher`, which keeps a reach that ties, with the
 /// same value and place, and `timeline_cells` names a reach only where its state differs from
 /// the point's. A stacked line's reach is its stack's and not its own, so it stays.
@@ -806,7 +807,7 @@ fn gpu_hour() -> Vec<MachineSecond> {
 }
 
 /// The `hour` of the complete readings the CPU page draws.
-fn cpu_hour() -> Vec<MachineSecond> {
+pub(crate) fn cpu_hour() -> Vec<MachineSecond> {
     hour(|mut second, wall_second, moment| {
         // Every reading moves over each stretch, so the reach of each names it.
         let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
@@ -955,8 +956,18 @@ fn reduced_stretch(stretch: u64, seconds: &[&MachineSecond]) -> Arc<AppsStretch>
     Arc::new(held)
 }
 
-/// The reach the older tail writes for `seconds`, the readings of one stretch.
-fn older_tail_reach(seconds: &[&MachineSecond]) -> serde_json::Value {
+/// The trend point the older tail writes of `second`: from its complete reading, or from its own
+/// record where the second has none.
+fn older_tail_point(second: &MachineSecond) -> serde_json::Value {
+    if second.complete().is_some() {
+        summary_point(second)
+    } else {
+        trend_point(second)
+    }
+}
+
+/// The reach the older tail writes for `seconds`, the readings of one stretch, on `point`.
+fn older_tail_reach(seconds: &[&MachineSecond], point: viewer::ReachPoint) -> serde_json::Value {
     let readings: Vec<_> = seconds
         .iter()
         .map(|second| {
@@ -966,11 +977,11 @@ fn older_tail_reach(seconds: &[&MachineSecond]) -> serde_json::Value {
                 publication: second.publication,
                 wall_ns: second.wall_ns,
             };
-            (summary_point(second), place)
+            (older_tail_point(second), place)
         })
         .collect();
 
-    viewer::reach_of_readings(&readings)
+    viewer::reach_of_readings(&readings, point)
 }
 
 macro_rules! hour_drawn_as_the_readings_draw_it_cases {
@@ -1052,13 +1063,12 @@ battery_hour_drawn_as_the_readings_draw_it_cases! {
 
 #[test]
 fn a_stretch_whose_first_second_reads_no_charging_state_draws_the_state_its_other_seconds_read() {
-    // Goal: an older stretch of the charging chart drawn from the View shows the highest state of
-    // its ten seconds, as the glossary's Point says an older cell does, though its first second
-    // read no state. The reader draws those ten cells blank, since its point is the first
-    // second's and its reach leaves out a state that held over the stretch, so the View's cell is
-    // the glossary's and the reader's is not. Method: the Battery hour with no charging state at
-    // 7,600 and 8,000, drawn from its View, and the ten cells from 7,600, whose other nine
-    // seconds read not charging.
+    // Goal: an older stretch of the charging chart shows the highest state of its ten seconds, as
+    // the glossary's Point says an older cell does, though its first second, which the reader's
+    // point stands at, read no state, and the View and the reader draw it alike. Method: the
+    // Battery hour with no charging state at 7,600 and 8,000, drawn from its View and from the
+    // reader's tail, and the ten cells from 7,600 on each, whose other nine seconds read not
+    // charging.
     let seconds = battery_hour_with(|battery, moment| {
         if moment == HourSecond::AfterBreak {
             battery.charging = None;
@@ -1067,10 +1077,14 @@ fn a_stretch_whose_first_second_reads_no_charging_state_draws_the_state_its_othe
     let view = view_of_hour(&seconds);
 
     let drawn = view_panels("battery", &view, levels().as_ref()).unwrap();
+    let read = hour_read("battery", &seconds);
 
-    let chart = panel_named(&drawn, "live-battery-charging");
-    let cell = usize::try_from(7_600 - chart.window.unwrap().first).unwrap();
-    assert_eq!(chart.lines[0].values[cell..cell + 10], [Some(0.0); 10]);
+    let drawn = panel_named(&drawn, "live-battery-charging");
+    let read = panel_named(&read, "live-battery-charging");
+    let cell = usize::try_from(7_600 - drawn.window.unwrap().first).unwrap();
+    assert_eq!(drawn.lines[0].values[cell..cell + 10], [Some(0.0); 10]);
+    assert_eq!(read.lines[0].values, drawn.lines[0].values);
+    assert_eq!(read.lines[0].extremes, drawn.lines[0].extremes);
 }
 
 /// Asserts that `page` draws the hour of `seconds` from a View as from the trend points and
@@ -1083,30 +1097,14 @@ fn assert_hour_drawn_as_the_readings_draw_it(
     peak_lines: &[(&str, usize)],
 ) {
     let view = view_of_hour(seconds);
-    let stretches = seconds_by_stretch(seconds);
-    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
-    let mut tail: Vec<serde_json::Value> = stretches
-        .range(..join)
-        .map(|(_, held)| {
-            let mut point = summary_point(held[0]);
-            point["reach"] = older_tail_reach(held);
-            point
-        })
-        .collect();
-    tail.last_mut().unwrap()["reach_after"] = older_tail_reach(&stretches[&join]);
-    let detail: Vec<MachineSecond> = seconds
-        .iter()
-        .filter(|second| second.wall_ns / 1_000_000_000 >= HOUR_DETAIL_FIRST)
-        .cloned()
-        .collect();
-    let mut selected = summary_selection(&[], &detail);
-    selected["earlier_trends"] = serde_json::json!(tail);
-    let expected = panels(page.route, &selection_of_json(&selected), None);
+    let tail = hour_tail(seconds);
+    let older = tail.len();
+    let expected = hour_read_of_tail(page.route, &tail, seconds);
 
     let drawn = view_panels(page.route, &view, levels().as_ref());
 
     let drawn = without_own_reaches(drawn.unwrap());
-    assert_eq!(drawn, without_own_reaches(expected.unwrap()));
+    assert_eq!(drawn, without_own_reaches(expected));
     assert_lines_drawn(&drawn, undrawn);
     for &(id, line_index) in peak_lines {
         let extremes = panel_named(&drawn, id).lines[line_index]
@@ -1121,11 +1119,56 @@ fn assert_hour_drawn_as_the_readings_draw_it(
             .collect();
         assert_eq!(peaks, [7_013, 9_040], "{id} {line_index}");
         assert_eq!(
-            extremes[tail.len()].unwrap().peak.second(),
+            extremes[older].unwrap().peak.second(),
             9_040,
             "{id} {line_index}"
         );
     }
+}
+
+/// The charts of `route` the reader draws of the hour of `seconds`, from the older tail the
+/// viewer writes of them and the full-detail seconds after it.
+pub(crate) fn hour_read(route: &str, seconds: &[MachineSecond]) -> Vec<std::rc::Rc<Panel>> {
+    hour_read_of_tail(route, &hour_tail(seconds), seconds)
+}
+
+/// The older tail the viewer writes of the hour of `seconds`: the first reading of each stretch
+/// before the join with the reach of the whole stretch, and the reach of the join's stretch on
+/// its last point.
+fn hour_tail(seconds: &[MachineSecond]) -> Vec<serde_json::Value> {
+    let stretches = seconds_by_stretch(seconds);
+    let join = HOUR_DETAIL_FIRST / viewer::EARLIER_STRIDE_SECONDS;
+    let mut tail: Vec<serde_json::Value> = stretches
+        .range(..join)
+        .map(|(_, held)| {
+            let mut point = older_tail_point(held[0]);
+            point["reach"] = older_tail_reach(held, viewer::ReachPoint::TailPoint(&point));
+            point
+        })
+        .collect();
+    // The point after the join, which this reach stands for, lies outside the tail.
+    tail.last_mut().unwrap()["reach_after"] =
+        older_tail_reach(&stretches[&join], viewer::ReachPoint::AfterJoin);
+
+    tail
+}
+
+/// The charts of `route` the reader draws of `tail`, the older tail of the hour of `seconds`, and
+/// of the full-detail seconds after it.
+fn hour_read_of_tail(
+    route: &str,
+    tail: &[serde_json::Value],
+    seconds: &[MachineSecond],
+) -> Vec<std::rc::Rc<Panel>> {
+    let detail: Vec<MachineSecond> = seconds
+        .iter()
+        .filter(|second| second.wall_ns / 1_000_000_000 >= HOUR_DETAIL_FIRST)
+        .cloned()
+        .collect();
+    let mut selected = summary_selection(&[], &detail);
+    selected["earlier_trends"] = serde_json::json!(tail);
+
+    panels(route, &selection_of_json(&selected), None).unwrap()
 }
 
 macro_rules! refused_second_drawn_as_it_holds_cases {

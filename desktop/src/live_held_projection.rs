@@ -431,6 +431,7 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
             .load_average
             .get(window)
             .and_then(stretch_reach_measured),
+        (None, "logical_cpu_count", None) => stretch_reach_measured(&stretch.logical_cpu_count),
         (None, "open_files", None) => stretch_reach_measured(&stretch.open_files),
         (None, "open_files_percent", None) => stretch_reach_measured(&stretch.open_files_percent),
         (None, "cpu_celsius", None) => stretch_reach_measured(&stretch.cpu_celsius),
@@ -443,10 +444,8 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
             stretch_reach_measured(&stretch.gpu_memory_allocated_bytes)
         }
         (None, "gpu_celsius", None) => stretch_reach_measured(&stretch.gpu_celsius),
-        // No reading records the GPU's frequency, so its chart draws none. The count of cores
-        // is fixed for the machine, so it never moves over a stretch, and the older tail keeps
-        // no reach for a number that did not move.
-        (None, "gpu_frequency_ghz" | "logical_cpu_count", None) => None,
+        // No reading records the GPU's frequency, so its chart draws none.
+        (None, "gpu_frequency_ghz", None) => None,
         (None, "memory_app_bytes", None) => stretch_reach_measured(&stretch.memory_app_bytes),
         (None, "memory_wired_bytes", None) => stretch_reach_measured(&stretch.memory_wired_bytes),
         (None, "memory_compressed_bytes", None) => {

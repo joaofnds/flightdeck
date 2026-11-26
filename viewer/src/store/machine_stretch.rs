@@ -20,9 +20,9 @@ const _: () = {
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
     // `MachineStretch`, so the Mac's readings cost a store about 1.4 MiB.
-    assert!(size_of::<MachineStretch>() <= 3_832);
+    assert!(size_of::<MachineStretch>() <= 3_896);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 1_440_832);
+    assert!(allocated * size_of::<MachineStretch>() <= 1_464_896);
 };
 
 /// The most fan channels the collector reads, `FANS_MAX`, so a stretch keeps a series of each
@@ -85,6 +85,10 @@ pub struct MachineStretch {
     /// holds the load averages and the open files (`MachineSecond::load_average`), so each of
     /// these and the two open files gauges reads none at a second without one.
     pub load_average: [Gauge; 3],
+    /// The count of logical CPUs, the per-CPU readings a second holds whether its complete
+    /// reading was taken or refused (`MachineSecond::cpu_counters`), as the load average chart
+    /// counts its cores, so it reads none at a second with neither.
+    pub logical_cpu_count: Gauge,
     pub open_files: Gauge,
     pub open_files_percent: Gauge,
     pub fan_mean_rpm: Gauge,
@@ -128,6 +132,10 @@ impl MachineStretch {
             let value = load_average.and_then(|load| load.get(window).copied());
             average.push(value, place);
         }
+        let cores = second.cpu_counters().map(|counters| {
+            number(u64::try_from(counters.len()).unwrap_or_else(|_| unreachable!()))
+        });
+        self.logical_cpu_count.push(cores, place);
         self.open_files.push(second.open_files().map(number), place);
         self.open_files_percent
             .push(second.open_files_percent(), place);

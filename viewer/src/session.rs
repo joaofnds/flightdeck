@@ -1274,9 +1274,9 @@ mod committed_apps;
 mod context_tests;
 mod earlier;
 mod earlier_reach;
-#[cfg(any(test, feature = "fixtures"))]
-pub use earlier_reach::reach_of_readings;
 pub use earlier_reach::{NumberReach, number_path, number_reach};
+#[cfg(any(test, feature = "fixtures"))]
+pub use earlier_reach::{ReachPoint, reach_of_readings};
 pub(crate) mod registered;
 #[cfg(test)]
 mod registered_tests;

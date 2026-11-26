@@ -826,6 +826,104 @@ fn the_last_point_says_what_the_seconds_at_the_join_reached() {
 }
 
 #[test]
+fn an_older_point_that_reads_no_cpu_rate_reaches_what_the_rest_of_its_stretch_read() {
+    // Goal: an older point that stands for ten seconds gives the highest reading of the ten, as
+    // the glossary's Point says, though its own reading lacks a number the other nine read the
+    // same. Method: a run whose first reading, which has no CPU rate, falls on a stretch's first
+    // second, and the reach of that stretch's point for the CPU, which the other nine read at 50%.
+    let tail = earlier_tail_of_a_run_from_a_stretchs_first_second();
+
+    let point = &tail["earlier_trends"][0];
+
+    assert_eq!(point["wall_ns"], json!(EARLIER_BASE * NANOSECONDS_PER_SECOND));
+    assert_eq!(point["cpu_percent"], Value::Null);
+    assert_eq!(
+        crate::number_reach(&point["reach"], "cpu_percent").unwrap(),
+        Some(crate::NumberReach {
+            low: 50.0,
+            high: 50.0,
+            peak: earlier_place_after(point, 1),
+        })
+    );
+}
+
+#[test]
+fn an_older_point_names_no_reach_for_a_number_it_reads_as_its_stretch_does() {
+    // Goal: a number the older point reads at the value every reading of its stretch read says
+    // nothing the point does not, so its reach leaves it out, which it would not if the tail made
+    // its points' reach as it makes the reach after the join. Method: a run whose first reading
+    // falls on a stretch's first second, and the reach of that stretch's point for the total
+    // memory, which all ten read alike.
+    let tail = earlier_tail_of_a_run_from_a_stretchs_first_second();
+
+    let point = &tail["earlier_trends"][0];
+
+    assert_eq!(
+        crate::number_reach(&point["reach"], "memory_total_bytes").unwrap(),
+        None
+    );
+}
+
+/// The older tail of a run of two sealed minutes whose first reading falls on the first second of
+/// a stretch.
+fn earlier_tail_of_a_run_from_a_stretchs_first_second() -> EarlierTail {
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..2, |tick| EARLIER_BASE + tick - 1);
+    fixture.seal_held();
+
+    LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(earlier_context_last(EARLIER_BASE + 60))
+        .unwrap()
+}
+
+/// The place of the reading `readings` ticks after the one `point` stands for, in its run, one
+/// second apart.
+fn earlier_place_after(point: &Value, readings: u64) -> crate::store::MachinePlace {
+    let identity = |name: &str| {
+        collector::recording::parse_identity(point[name].as_str().unwrap())
+            .unwrap()
+            .0
+    };
+
+    crate::store::MachinePlace {
+        run: identity("run"),
+        boot: identity("boot"),
+        publication: point["publication"].as_u64().unwrap() + readings,
+        wall_ns: point["wall_ns"].as_u64().unwrap() + readings * NANOSECONDS_PER_SECOND,
+    }
+}
+
+#[test]
+fn the_last_point_keeps_what_the_seconds_at_the_join_read_alike() {
+    // Goal: the reach of the seconds at the join stands for a point that lies outside the tail,
+    // the first full-detail point after it, so it keeps even a number that did not move, which
+    // that point may not read. Method: a context whose first charted second lies inside a
+    // stretch, and what the tail's last point says of the total memory, which every reading
+    // reads alike, at the join stretch's first second.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..2, |tick| EARLIER_BASE + tick);
+    let limit = EARLIER_BASE + 60;
+    fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+
+    let tail = session
+        .earlier_context(earlier_context_last(limit + 4))
+        .unwrap();
+
+    let last = tail["earlier_trends"].as_array().unwrap().last().unwrap();
+    let total_bytes = 48.0 * 1024.0 * 1024.0 * 1024.0;
+    assert_eq!(
+        crate::number_reach(&last["reach_after"], "memory_total_bytes").unwrap(),
+        Some(crate::NumberReach {
+            low: total_bytes,
+            high: total_bytes,
+            peak: earlier_place_after(last, 10),
+        })
+    );
+}
+
+#[test]
 fn makes_each_point_from_the_reading_before_it_in_its_own_run() {
     // Goal: where a recording continues across a collector restart, the point of a minute's
     // first reading takes the reading before it from its own run, though the other run also

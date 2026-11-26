@@ -47,7 +47,7 @@ pub fn number_path(resource: Option<&str>, key: &str, channel: Option<usize>) ->
 }
 
 /// How far the number at `path` of the trend point's `reach` went, or `None` where the number did
-/// not move over its stretch, whose readings then all read what the point itself reads.
+/// not move over its stretch and the point the reach rides on reads it at that value.
 ///
 /// # Errors
 ///
@@ -82,16 +82,28 @@ fn number_reach_identity(text: &Value) -> Result<[u64; 2]> {
 }
 
 /// The reach the older tail writes for a stretch of `readings`, each a trend point with the
-/// reading it was taken at, so a test outside the viewer can write the points the tail writes.
+/// reading it was taken at, on the point `point`, so a test outside the viewer can write the
+/// points the tail writes.
 #[cfg(any(test, feature = "fixtures"))]
 #[must_use]
-pub fn reach_of_readings(readings: &[(Value, MachinePlace)]) -> Value {
+pub fn reach_of_readings(readings: &[(Value, MachinePlace)], point: ReachPoint) -> Value {
     let mut reach = Reach::default();
-    for (point, place) in readings {
-        reach.add(point, place);
+    for (reading, place) in readings {
+        reach.add(reading, place);
     }
 
-    reach.json()
+    reach.json(point)
+}
+
+/// The point a reach rides on, which says what a number that did not move over the stretch reads
+/// there, so the reach can leave that number out.
+#[derive(Clone, Copy, Debug)]
+pub enum ReachPoint<'point> {
+    /// A point of the older tail, before its reach is attached.
+    TailPoint(&'point Value),
+    /// The first full-detail point after the join, which lies outside the older tail, so the reach
+    /// cannot know its readings and keeps every number.
+    AfterJoin,
 }
 
 /// The readings of each number, by its path through the point.
@@ -180,18 +192,25 @@ impl Reach {
         }
     }
 
-    /// The reach as a trend point carries it: each number that moved, naming its lowest and
-    /// highest reading and which of the places read that highest. A number that did not move
-    /// reads what the point reads, so it stays out and so does a reading no number peaked at.
-    pub(super) fn json(&self) -> Value {
+    /// The reach as `point` carries it: each number, naming its lowest and highest reading and
+    /// which of the places read that highest. A number that did not move and that `point` reads
+    /// at the same value says nothing the point does not, so it stays out, and so does a reading
+    /// no number peaked at.
+    pub(super) fn json(&self, point: ReachPoint) -> Value {
+        let point_reading = Self::json_point_reading(point);
+
         let mut leaves = Map::new();
         let mut places: Vec<MachinePlace> = Vec::new();
         for (path, summary) in &self.leaves {
-            let moved = summary
-                .measured
+            let Some(measured) = summary.measured.as_ref() else {
+                continue;
+            };
+
+            let moved = measured.minimum.value < measured.maximum.value;
+            let read_there = point_reading
                 .as_ref()
-                .filter(|measured| measured.minimum.value < measured.maximum.value);
-            if let Some(measured) = moved {
+                .is_some_and(|reading| reading.json_reads(path, measured.maximum.value));
+            if moved || !read_there {
                 let peak = measured.maximum.place;
                 let at = places.iter().position(|place| *place == peak);
                 let at = at.unwrap_or(places.len());
@@ -202,6 +221,7 @@ impl Reach {
                 leaves.insert(path.clone(), json!([low, high, at]));
             }
         }
+
         let places: Vec<Value> = places
             .iter()
             .map(|place| {
@@ -215,6 +235,39 @@ impl Reach {
             .collect();
 
         json!({"leaves": leaves, "places": places})
+    }
+
+    /// What `point` itself reads, its derived numbers included, as the reach of that one reading,
+    /// and `None` after the join, where the reach cannot know the point's readings.
+    fn json_point_reading(point: ReachPoint) -> Option<Self> {
+        match point {
+            ReachPoint::TailPoint(point) => {
+                // A reach walked with the point would grow the walk toward `NODES_MAX`, whose
+                // panic aborts a release build.
+                assert!(point.get("reach").is_none());
+                assert!(point.get("reach_after").is_none());
+                let mut reading = Self::default();
+                reading.add(point, &MachinePlace::default());
+
+                Some(reading)
+            }
+            ReachPoint::AfterJoin => None,
+        }
+    }
+
+    /// Whether the one reading this reach took in read exactly `value` at `path`.
+    fn json_reads(&self, path: &str, value: f64) -> bool {
+        let read = self
+            .leaves
+            .get(path)
+            .and_then(|summary| summary.measured.as_ref());
+        let Some(read) = read else {
+            return false;
+        };
+
+        assert_eq!(read.count, 1);
+
+        read.maximum.value.to_bits() == value.to_bits()
     }
 }
 
@@ -241,7 +294,7 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{MachinePlace, NumberReach, Reach, number_path, number_reach};
+    use super::{MachinePlace, NumberReach, Reach, ReachPoint, number_path, number_reach};
 
     /// The place of the reading at `index` of a test's readings.
     fn place_of(index: usize) -> MachinePlace {
@@ -251,13 +304,15 @@ mod tests {
         }
     }
 
+    /// The reach of `points`, a stretch whose first reading is its point, as the older tail
+    /// writes it.
     fn reach_of(points: &[Value]) -> Value {
         let mut reach = Reach::default();
         for (index, point) in points.iter().enumerate() {
             reach.add(point, &place_of(index));
         }
 
-        reach.json()
+        reach.json(ReachPoint::TailPoint(&points[0]))
     }
 
     /// The low, the high and the index of the reading that read the high of the number at `path`.
@@ -282,7 +337,9 @@ mod tests {
         assert_eq!(read(&reach, "cpu_percent"), (10.0, 95.0, 1));
         assert_eq!(read(&reach, "storage/read_bps"), (2.0, 5.0, 0));
         assert_eq!(read(&reach, "cpu_level_percent/0"), (1.0, 3.0, 1));
-        assert_eq!(reach["leaves"].as_object().unwrap().len(), 3);
+        let leaves = reach["leaves"].as_object().unwrap();
+        assert_eq!(leaves.get("wall_ns"), None);
+        assert_eq!(leaves.get("publication"), None);
     }
 
     #[test]
@@ -299,6 +356,54 @@ mod tests {
 
         assert_eq!(unmoved, None);
         assert_eq!(read(&reach, "gpu_active_percent"), (5.0, 6.0, 1));
+    }
+
+    #[test]
+    fn a_number_its_point_does_not_read_names_its_reach_though_it_did_not_move() {
+        // Goal: a number the point leaves out says nothing the point says, though the other
+        // readings of its stretch agree on it, so the reach names it at the earliest reading
+        // that read it, as the glossary's Point keeps an older reading's highest. Method: a
+        // stretch whose first reading, its point, reads no GPU activity, which the other two
+        // read the same.
+        let reach = reach_of(&[
+            json!({"cpu_percent": 10.0}),
+            json!({"cpu_percent": 12.0, "gpu_active_percent": 5.0}),
+            json!({"cpu_percent": 11.0, "gpu_active_percent": 5.0}),
+        ]);
+
+        let unread = number_reach(&reach, "gpu_active_percent").unwrap();
+
+        assert_eq!(
+            unread,
+            Some(NumberReach {
+                low: 5.0,
+                high: 5.0,
+                peak: place_of(1),
+            })
+        );
+    }
+
+    #[test]
+    fn a_number_its_point_reads_at_another_value_names_its_reach_though_it_did_not_move() {
+        // Goal: a number the point reads at a value its stretch's readings did not read says
+        // nothing the point says, so the reach names it though those readings agree on it.
+        // Method: a reach of two readings that both read GPU activity at 5%, made on a point
+        // that reads 6%.
+        let mut reach = Reach::default();
+        reach.add(&json!({"gpu_active_percent": 5.0}), &place_of(0));
+        reach.add(&json!({"gpu_active_percent": 5.0}), &place_of(1));
+        let point = json!({"gpu_active_percent": 6.0});
+
+        let reach = reach.json(ReachPoint::TailPoint(&point));
+
+        assert_eq!(
+            number_reach(&reach, "gpu_active_percent").unwrap(),
+            Some(NumberReach {
+                low: 5.0,
+                high: 5.0,
+                peak: place_of(0),
+            })
+        );
     }
 
     #[test]
@@ -330,17 +435,15 @@ mod tests {
             wall_ns: 9,
         };
         let mut reach = Reach::default();
-        reach.add(
-            &json!({"cpu_percent": 1.0, "cpu_level_percent": [2.0],
-                "storage": {"read_bps": 3.0, "queue": [4.0, 5.0]}}),
-            &MachinePlace::default(),
-        );
+        let point = json!({"cpu_percent": 1.0, "cpu_level_percent": [2.0],
+            "storage": {"read_bps": 3.0, "queue": [4.0, 5.0]}});
+        reach.add(&point, &MachinePlace::default());
         reach.add(
             &json!({"cpu_percent": 11.0, "cpu_level_percent": [12.0],
                 "storage": {"read_bps": 13.0, "queue": [14.0, 15.0]}}),
             &peak,
         );
-        let reach = reach.json();
+        let reach = reach.json(ReachPoint::TailPoint(&point));
         let number = |path: String| number_reach(&reach, &path).unwrap();
         let reached = |low, high| Some(NumberReach { low, high, peak });
 
@@ -410,6 +513,36 @@ mod tests {
     }
 
     #[test]
+    fn a_derived_number_that_did_not_move_names_a_reach_only_where_its_point_lacks_it() {
+        // Goal: a number the charts derive follows the rule its parts do, so a flat one the point
+        // reads stays out and a flat one the point cannot derive names its reach. Method: two
+        // stretches whose app memory reads 10 at every reading whose parts it can be derived
+        // from, though anonymous and purgeable memory move, one whose point reads purgeable
+        // memory and one whose point does not.
+        let read_at_its_point = reach_of(&[
+            json!({"memory_anonymous_bytes": 12, "memory_purgeable_bytes": 2}),
+            json!({"memory_anonymous_bytes": 13, "memory_purgeable_bytes": 3}),
+        ]);
+        let unread_at_its_point = reach_of(&[
+            json!({"memory_anonymous_bytes": 12}),
+            json!({"memory_anonymous_bytes": 13, "memory_purgeable_bytes": 3}),
+        ]);
+
+        let read = number_reach(&read_at_its_point, "memory_app_bytes").unwrap();
+        let unread = number_reach(&unread_at_its_point, "memory_app_bytes").unwrap();
+
+        assert_eq!(read, None);
+        assert_eq!(
+            unread,
+            Some(NumberReach {
+                low: 10.0,
+                high: 10.0,
+                peak: place_of(1),
+            })
+        );
+    }
+
+    #[test]
     fn merging_reaches_cut_anywhere_equals_taking_in_their_readings() {
         // Goal: a stretch that two minutes share reaches what it would in one minute.
         // Method: three readings cut each way, against all three taken in at once.
@@ -430,7 +563,8 @@ mod tests {
 
             left.merge(&right);
 
-            assert_eq!(left.json(), reach_of(&points), "cut {cut}");
+            let merged = left.json(ReachPoint::TailPoint(&points[0]));
+            assert_eq!(merged, reach_of(&points), "cut {cut}");
         }
     }
 }

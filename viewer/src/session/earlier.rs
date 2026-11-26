@@ -10,7 +10,7 @@ use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds};
 use serde_json::Value;
 
-use super::earlier_reach::Reach;
+use super::earlier_reach::{Reach, ReachPoint};
 use super::{CONTEXT_READERS, NS, OBSERVATIONS_MAX, Observation, Session};
 use crate::metric_view::Sources;
 use crate::metrics;
@@ -576,7 +576,7 @@ impl KeptTail {
             let mut point = point.clone();
             point["segment"] = (SEGMENT_BASE + segments[index]).into();
             if let Some(reach) = reaches.get(&stretch_of_wall_second(observation.wall / NS)) {
-                point["reach"] = reach.json();
+                point["reach"] = reach.json(ReachPoint::TailPoint(&point));
             }
             points.push(point);
         }
@@ -595,10 +595,11 @@ impl KeptTail {
         }
         super::context_points_order(&mut points);
         // The seconds between the tail's limit and the first full-detail second lie in no point,
-        // so the point after the join takes what their stretch reached.
+        // so the point after the join takes what their stretch reached. That point lies outside
+        // the tail, so the reach keeps even a number that did not move.
         let joined = reaches.get(&stretch_of_wall_second(range.limit_second));
         if let Some((last, reach)) = points.last_mut().zip(joined) {
-            last["reach_after"] = reach.json();
+            last["reach_after"] = reach.json(ReachPoint::AfterJoin);
         }
 
         Ok(points)

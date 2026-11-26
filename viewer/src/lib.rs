@@ -39,9 +39,9 @@ pub use live::window::{ObservationKey, Window};
 pub use live_app_history::BYTES_MAX as APP_HISTORY_BYTES_MAX;
 pub(crate) use selection::ChartPoint;
 pub use selection::{EarlierTail, Selection, SelectionFields, TrendPoint, Trends};
-#[cfg(any(test, feature = "fixtures"))]
-pub use session::reach_of_readings;
 pub use session::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS,
     LOADED_SECONDS, NumberReach, Session, number_path, number_reach,
 };
+#[cfg(any(test, feature = "fixtures"))]
+pub use session::{ReachPoint, reach_of_readings};
