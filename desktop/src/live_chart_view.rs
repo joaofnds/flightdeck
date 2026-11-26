@@ -638,8 +638,9 @@ impl LiveDashboard {
                 .or(context.selection["second"].as_u64()),
             newest,
         };
-        // A reading that left its points to the View has no stretches of its own to step across.
-        let next = if self.points_left_to_view() {
+        // A reading that left its older seconds to the View has no stretches of its own to step
+        // across.
+        let next = if self.older_seconds_left_to_view() {
             keyboard_second_stepped(&selection, context, |second| {
                 self.chart_step_view_second(second, delta)
             })

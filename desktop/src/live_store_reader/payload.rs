@@ -50,25 +50,14 @@ pub(super) fn snapshot(
     let mut snapshot =
         crate::live_source::reader_snapshot_owned(command.generation, context.catalog(), selection);
     snapshot.histories_pending = context.readiness() == QueryReadiness::Primary;
+    // What the page shared as it asked decides what the reading leaves to the Store's View, of
+    // its App histories and of its older tail, at every readiness, so the two never disagree.
+    let source = shared.app_chart_source();
+    if crate::live_source::earlier_left_to_view(&command.request, source) {
+        snapshot.points_keeping = crate::live_source::PointsKeeping::TailLeftToView;
+    }
     if crate::live_source::route_ranks_apps(&command.request.route) {
-        let ranks = context
-            .selected_rank_status_for(&observation)
-            .map_err(|error| error.to_string())?;
-        let ranks = ranks.try_map(|ranks| match ranks {
-            Ok(ranks) => Ok(crate::live_rankings::Rankings::Ready(Box::new(
-                crate::live_rankings::from_ranks(&ranks),
-            ))),
-            Err(viewer::store::Missing::Refused(reason)) => Ok(
-                crate::live_rankings::Rankings::Unavailable(crate::bounded::bounded(&reason, 512)),
-            ),
-            Err(viewer::store::Missing::TooMany) => {
-                Ok(crate::live_rankings::Rankings::Unavailable(String::from(
-                    "This observation has too many Apps",
-                )))
-            }
-            Err(error) => Err(error.to_string()),
-        })?;
-        snapshot.rankings = Some(Arc::new(Presentation::Canonical(ranks)));
+        rankings(context, &observation, &mut snapshot)?;
     }
     if command.request.route == "cpu" {
         cpu(context, &observation, command, shared, &mut snapshot)?;
@@ -78,11 +67,44 @@ pub(super) fn snapshot(
     }
     if command.context != Context::Keep {
         if context.readiness() == QueryReadiness::Complete {
-            histories(context, command, shared, &mut snapshot, &mut reused.ranked)?;
+            histories(
+                context,
+                command,
+                shared,
+                source,
+                &mut snapshot,
+                &mut reused.ranked,
+            )?;
         }
     }
 
     Ok(snapshot)
+}
+
+/// Gives `snapshot` the top Apps of `observation`, or why it has none.
+fn rankings(
+    context: &Arc<QueryContext>,
+    observation: &Observation,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    let ranks = context
+        .selected_rank_status_for(observation)
+        .map_err(|error| error.to_string())?;
+    let ranks = ranks.try_map(|ranks| match ranks {
+        Ok(ranks) => Ok(crate::live_rankings::Rankings::Ready(Box::new(
+            crate::live_rankings::from_ranks(&ranks),
+        ))),
+        Err(viewer::store::Missing::Refused(reason)) => Ok(
+            crate::live_rankings::Rankings::Unavailable(crate::bounded::bounded(&reason, 512)),
+        ),
+        Err(viewer::store::Missing::TooMany) => Ok(crate::live_rankings::Rankings::Unavailable(
+            String::from("This observation has too many Apps"),
+        )),
+        Err(error) => Err(error.to_string()),
+    })?;
+    snapshot.rankings = Some(Arc::new(Presentation::Canonical(ranks)));
+
+    Ok(())
 }
 
 fn cpu(
@@ -192,6 +214,7 @@ fn histories(
     context: &Arc<QueryContext>,
     command: &Command,
     shared: &Shared,
+    source: AppChartSource,
     snapshot: &mut Snapshot,
     ranked: &mut RankedSeconds,
 ) -> Result<(), String> {
@@ -199,13 +222,7 @@ fn histories(
     // A chart the window draws from the Store's View would replace this reading's history of
     // it, so the reading builds none, and says so, since the window may have stopped drawing
     // from the View by the time it takes the reading. The top Apps of each second stay, since a
-    // hover reads them. Overview's readings bring its charts by App whatever the window said, so
-    // a reading that says it left them to the View is never Overview's.
-    let source = if request.route == "overview" {
-        AppChartSource::Reading
-    } else {
-        shared.app_chart_source()
-    };
+    // hover reads them.
     snapshot.app_chart_source = source;
     if request.load_resident_history {
         if source == AppChartSource::Reading {

@@ -1171,6 +1171,112 @@ fn a_window_closed_after_the_store_answered_keeps_its_older_tail_an_interval_fro
     );
 }
 
+mod when_the_view_draws_the_page_whole {
+    use super::*;
+    use crate::live_source::AppChartSource;
+
+    #[test]
+    fn a_reading_reads_no_older_tail_and_keeps_none() {
+        // Goal: a reading of a page whose charts the View draws whole, built while the window
+        // says so, reads none of the older tail, keeps none of it in its session, and leaves
+        // nothing pending, so the page rests its reader at once. Method: say the View draws the
+        // Network page, open it on a Store over more minutes sealed before its full detail than
+        // its session reads at once, then read its reading, what its session keeps and the pause.
+        let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+        adapter
+            .shared
+            .app_chart_from_view
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let Update::Ready(page) = adapter.update_within(Duration::from_secs(10)) else {
+            panic!("the page failed");
+        };
+
+        assert_eq!(page.app_chart_source, AppChartSource::View);
+        assert!(page.selection.get("earlier_trends").is_none());
+        assert!(!page.histories_pending);
+        assert!(adapter.reader.session.is_none());
+        let pause = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+        assert_eq!(pause, crate::live_source::POLL_INTERVAL);
+    }
+
+    #[test]
+    fn a_tail_left_pending_is_not_read_once_the_view_draws_the_page() {
+        // Goal: an older tail the page's first part left to a later step goes unread once the
+        // window says the View draws the page, and nothing stays pending for it, so the reader
+        // neither reads on nor builds the page again for a tail nobody will draw. Method: open
+        // the Network page on a Store over more minutes sealed before its full detail than its
+        // session reads at once, read its first part, say the View draws the page, read the next
+        // step, then the pause and a step after it while the page has not taken the reading.
+        let (_recording, _store, mut adapter) = network_page_over_a_long_older_tail();
+        let first = adapter.update_within(Duration::from_secs(10));
+        adapter.shared.mailbox.lock().unwrap().output = Some(first);
+        adapter
+            .shared
+            .app_chart_from_view
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let rest = adapter.read();
+
+        let Some(Update::Ready(rest)) = rest else {
+            panic!("the step read nothing");
+        };
+        assert!(rest.selection.get("earlier_trends").is_none());
+        assert!(!rest.histories_pending);
+        let pause = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+        assert_eq!(pause, crate::live_source::POLL_INTERVAL);
+        adapter.shared.mailbox.lock().unwrap().output = Some(Update::Ready(rest));
+        assert!(adapter.read().is_none());
+    }
+
+    #[test]
+    fn a_first_part_built_while_the_view_draws_the_page_leaves_its_older_tail_to_the_view() {
+        // Goal: a reading the Store answers before it has the page's histories, built while the
+        // window says the View draws the page whole, leaves the older tail to the View as the
+        // whole reading does, so the rule holds at every readiness. Method: say the View draws
+        // the Memory page, ask for it with its tail while the Store is denied the room for its
+        // histories, and read the first part it answers.
+        let (mut harness, budget, _lease) = Harness::denied_history();
+        harness.worker.set_app_chart_source(AppChartSource::View);
+        let mut selected = request("memory");
+        selected.load_resident_history = true;
+        selected.earlier = crate::live_source::Earlier::Load;
+        harness.worker.request(selected).unwrap();
+
+        let primary = harness.ready_primary(&budget);
+
+        assert_eq!(
+            primary.points_keeping,
+            crate::live_source::PointsKeeping::TailLeftToView
+        );
+        assert!(primary.selection.get("earlier_trends").is_none());
+    }
+
+    #[test]
+    fn the_energy_page_reads_its_older_tail_while_the_view_draws_its_chart_by_app() {
+        // Goal: the Energy page, whose chart by App alone the View draws, draws its machine
+        // charts from its reading, so its reading reads the older tail they draw although the
+        // window says the View draws its chart. Method: say the View draws the chart, open the
+        // Energy page on a Store over more minutes sealed before its full detail than its
+        // session reads at once, and read it to the end.
+        let recording = crate::live_source::tests::SealedRecording::with_a_long_older_kept_tail();
+        let (_store, mut adapter) = complete_store_page(&recording, "energy");
+        adapter.command.request.earlier = crate::live_source::Earlier::Load;
+        adapter
+            .shared
+            .app_chart_from_view
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let page = adapter.finished_within(Duration::from_secs(10));
+
+        assert_eq!(page.app_chart_source, AppChartSource::View);
+        assert_eq!(
+            page.selection["earlier_trends"].as_array().unwrap().len(),
+            8
+        );
+    }
+}
+
 #[test]
 fn a_newly_opened_page_shows_before_the_step_that_read_it_lists_the_saved_minutes() {
     // Goal: a newly opened page the Store answers shows without the listing of the saved minutes

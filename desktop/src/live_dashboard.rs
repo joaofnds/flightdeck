@@ -460,7 +460,7 @@ impl LiveDashboard {
         let snapshot = self.snapshot.take();
         let panels = if snapshot
             .as_ref()
-            .is_some_and(|snapshot| snapshot.points_keeping != PointsKeeping::Kept)
+            .is_some_and(|snapshot| !snapshot.keeps_recent_points())
         {
             std::mem::take(&mut self.panels)
         } else {
@@ -491,7 +491,7 @@ impl LiveDashboard {
         dashboard.store_panels = state.store_panels;
         if let Some(snapshot) = state.snapshot {
             dashboard.generation = snapshot.generation;
-            if snapshot.points_keeping == PointsKeeping::Kept {
+            if snapshot.keeps_recent_points() {
                 dashboard.accept(snapshot);
             } else {
                 dashboard.restore_drawn(snapshot, state.panels);
@@ -552,7 +552,7 @@ impl LiveDashboard {
     }
 
     fn uses_live_store(&self) -> bool {
-        if !store_view::store_view_draws_machine(&self.request.route) {
+        if !crate::live_source::store_view_draws_machine(&self.request.route) {
             return false;
         }
 
@@ -792,7 +792,7 @@ impl LiveDashboard {
 
     fn tick_store_pending(&mut self, cx: &Context<Self>) {
         self.store_pending = false;
-        if !store_view::store_view_draws_machine(&self.request.route) {
+        if !crate::live_source::store_view_draws_machine(&self.request.route) {
             return;
         }
 
@@ -955,6 +955,14 @@ impl LiveDashboard {
         self.snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.points_keeping == PointsKeeping::LeftToView)
+    }
+
+    /// Whether the page's reading left the older seconds its charts draw to the store's View,
+    /// with or without its newest points, so the View names each older second the charts draw.
+    pub(crate) fn older_seconds_left_to_view(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.older_seconds_left_to_view())
     }
 
     /// Draws the page shown again from the store's newest View, released while the window hid,
@@ -1392,11 +1400,20 @@ impl LiveDashboard {
         self.inspect_target(target, cx);
     }
 
+    /// Whether the page's reading names `second` itself: it keeps the points of its newest
+    /// seconds, and they reach `second`.
+    fn reading_holds_second(&self, second: u64) -> bool {
+        self.context_snapshot().is_some_and(|snapshot| {
+            snapshot.keeps_recent_points()
+                && crate::live_projection::holds_second(&snapshot.selection, second)
+        })
+    }
+
     /// The reading of `second` the page's readings name, or the second alone where they name
-    /// none of it. Where the readings left their points to the store's View, the View names it,
-    /// as it names a hover's.
+    /// none of it. Where the readings left the older seconds to the store's View and hold no
+    /// point of `second`, the View names it, as it names a hover's.
     fn inspection_target(&self, second: u64) -> crate::live_hover::Target {
-        if self.points_left_to_view() {
+        if self.older_seconds_left_to_view() && !self.reading_holds_second(second) {
             let second = self.store_view_point_second(second).unwrap_or(second);
             return self
                 .store_view_target(second)
@@ -1790,8 +1807,6 @@ pub(crate) use store_view::set_store_active;
 #[cfg(feature = "automation")]
 pub(crate) use store_view::store_activity;
 pub(crate) use store_view::store_query_handle;
-#[cfg(feature = "automation")]
-pub(crate) use store_view::store_view_draws_machine;
 #[cfg(all(test, feature = "automation"))]
 pub(crate) use store_view::uninstall_store;
 #[cfg(test)]

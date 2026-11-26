@@ -1662,6 +1662,10 @@ fn a_sealed_recording_leaves_a_missing_second_empty() {
     assert!(snapshot.selection["summary"].is_null());
 }
 
+/// The run of the first minute `seal_minutes_into` saves, each later minute of the run after the
+/// one before, past the runs of the minutes the recordings here hold otherwise.
+const SEALED_RUN_FIRST: u64 = 20;
+
 pub(crate) struct SealedRecording {
     pub(crate) root: std::path::PathBuf,
 }
@@ -1791,20 +1795,8 @@ impl SealedRecording {
     /// Saves seven minutes to the recording of `with_an_older_minute`, each of a run of its own,
     /// whose one reading lies 20 seconds after the one before, from second 1100.
     fn seal_older_minutes(&self, derive: &dyn persistence::worker::Derive) {
-        let store = persistence::Store::open(&self.root).unwrap();
-        for run in 0..7 {
-            let identity = persistence::WindowIdentity {
-                run: collector::ring::RunIdentity {
-                    recording: store.recording(),
-                    run: collector::ring::Identity([7 + run, 8]),
-                    boot: collector::ring::Identity([3, 4]),
-                },
-                window: 0,
-            };
-            let mut window = Self::window(identity);
-            Self::append(&mut window, 1, 1100 + 20 * run);
-            Self::commit_derived(&self.root, &window, derive);
-        }
+        let seconds: [u64; 7] = std::array::from_fn(|run| 1100 + 20 * u64::try_from(run).unwrap());
+        Self::seal_minutes_into(&self.root, &seconds, derive);
     }
 
     /// Saves a minute of another run to the recording of `with_an_older_minute`, whose one
@@ -1822,6 +1814,30 @@ impl SealedRecording {
         let mut window = Self::window(identity);
         Self::append(&mut window, 1, second);
         Self::commit_derived(&self.root, &window, &Underived);
+    }
+
+    /// Saves to the recording at `root` one minute of a run of its own for each of `seconds`,
+    /// whose one reading lies at that second, with what `derive` derives of it, so a recording
+    /// gains an older tail.
+    pub(crate) fn seal_minutes_into(
+        root: &std::path::Path,
+        seconds: &[u64],
+        derive: &dyn persistence::worker::Derive,
+    ) {
+        let store = persistence::Store::open(root).unwrap();
+        for (run, second) in (SEALED_RUN_FIRST..).zip(seconds) {
+            let identity = persistence::WindowIdentity {
+                run: collector::ring::RunIdentity {
+                    recording: store.recording(),
+                    run: collector::ring::Identity([run, 8]),
+                    boot: collector::ring::Identity([3, 4]),
+                },
+                window: 0,
+            };
+            let mut window = Self::window(identity);
+            Self::append(&mut window, 1, *second);
+            Self::commit_derived(root, &window, derive);
+        }
     }
 
     fn window(identity: persistence::WindowIdentity) -> persistence::Window {

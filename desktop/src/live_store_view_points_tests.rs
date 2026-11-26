@@ -12,7 +12,7 @@ use super::super::super::{LiveDashboard, Presence};
 use super::{followed_page_settled, memory_seconds, opening_on, rested_on, worker_reading};
 use crate::live_hover::{Origin, Target};
 use crate::live_source::tests::rankings::kept_window_ranks;
-use crate::live_source::{PointsKeeping, Update, identity_signature};
+use crate::live_source::{PointsKeeping, Snapshot, Update, identity_signature};
 use crate::live_store_app_fixtures::{HOUR_NEWEST, apps_at, hour};
 use crate::live_store_fixtures::{reading_at, trend_point, view};
 
@@ -81,6 +81,55 @@ macro_rules! on_each_drawn_page {
             fn gpu(cx: &mut gpui::TestAppContext) {
                 super::$name(cx, "gpu");
             }
+        }
+    };
+}
+
+/// Runs the test `$name`, which takes the route of the page, on each page listed, as a test of
+/// its own each.
+macro_rules! on_pages {
+    ($name:ident, plain on $($page:ident)+) => {
+        mod $name {
+            $(
+                #[test]
+                fn $page() {
+                    super::$name(stringify!($page));
+                }
+            )+
+        }
+    };
+    ($name:ident on $($page:ident)+) => {
+        mod $name {
+            $(
+                #[gpui::test]
+                fn $page(cx: &mut gpui::TestAppContext) {
+                    super::$name(cx, stringify!($page));
+                }
+            )+
+        }
+    };
+}
+
+/// Runs the test `$name`, which takes the route of the page, the direction of an arrow step
+/// from inside the older tail's second stretch and the second it should show, on each page
+/// listed and in each direction, as a test of its own each.
+macro_rules! each_step_way {
+    ($name:ident on $($page:ident)+) => {
+        mod $name {
+            $(
+                mod $page {
+                    #[gpui::test]
+                    fn to_the_right(cx: &mut gpui::TestAppContext) {
+                        let expected = super::super::OLDER + 2 * viewer::EARLIER_STRIDE_SECONDS;
+                        super::super::$name(cx, stringify!($page), 1, expected);
+                    }
+
+                    #[gpui::test]
+                    fn to_the_left(cx: &mut gpui::TestAppContext) {
+                        super::super::$name(cx, stringify!($page), -1, super::super::OLDER);
+                    }
+                }
+            )+
         }
     };
 }
@@ -217,31 +266,192 @@ fn a_window_closed_before_its_reader_rested_keeps_no_chart_points_and_draws_them
     cx.update(|cx| assert_eq!(drawn_panels(reopened.read(cx)), drawn));
 }
 
-on_each_drawn_page!(
-    a_step_across_the_older_tail_of_a_rested_page_moves_one_stretch,
-    gpui
+each_step_way!(
+    a_step_across_the_older_tail_of_a_rested_page_moves_one_stretch
+    on overview memory network storage gpu
 );
 fn a_step_across_the_older_tail_of_a_rested_page_moves_one_stretch(
     cx: &mut TestAppContext,
     route: &str,
+    delta: i64,
+    expected: u64,
 ) {
     // Goal: an arrow step on the older tail of a page whose reader rests moves to the next
     // stretch the charts draw in either direction, as it does while the page holds the points
     // of its charts, rather than back to the stretch it shows. Method: a page over the hour
     // rests its reader and steps from the newest second to a second inside the older tail's
-    // second stretch, then a step right, and on another such page a step left.
+    // second stretch, then one step.
+    let page = cx.new(|_| rested_over_the_hour(route));
+
+    let stepped = step_twice_from_inside_the_second_stretch(cx, &page, delta);
+
+    assert_eq!(
+        stepped,
+        [Some(OLDER + viewer::EARLIER_STRIDE_SECONDS), Some(expected)]
+    );
+}
+
+each_step_way!(
+    a_step_across_the_older_tail_a_reading_left_to_the_view_moves_one_stretch
+    on overview memory network storage gpu cpu
+);
+fn a_step_across_the_older_tail_a_reading_left_to_the_view_moves_one_stretch(
+    cx: &mut TestAppContext,
+    route: &str,
+    delta: i64,
+    expected: u64,
+) {
+    // Goal: an arrow step on the older tail of a page whose reading left that tail to the store's
+    // View, since the View draws the page whole, moves to the next stretch the charts draw in
+    // either direction, as it does over a reading that read the tail. Method: a page over the
+    // hour takes a reading with no older tail, steps from the newest second to a second inside
+    // the older tail's second stretch, then one step.
+    let page = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+
+    let stepped = step_twice_from_inside_the_second_stretch(cx, &page, delta);
+
+    assert_eq!(
+        stepped,
+        [Some(OLDER + viewer::EARLIER_STRIDE_SECONDS), Some(expected)]
+    );
+}
+
+on_pages!(
+    a_click_on_the_older_tail_a_reading_left_to_the_view_holds_what_a_reading_of_it_holds
+    on overview memory network storage gpu cpu
+);
+fn a_click_on_the_older_tail_a_reading_left_to_the_view_holds_what_a_reading_of_it_holds(
+    cx: &mut TestAppContext,
+    route: &str,
+) {
+    // Goal: a click with no hover on the older tail of a page whose reading left that tail to the
+    // store's View holds the reading a page whose reading read the tail holds. Method: a page
+    // over the hour that took a reading with no older tail and one whose reading holds the tail,
+    // then a click with no hover shown on a second inside an older stretch other than its first,
+    // then the readings the two holds name.
+    let second = OLDER + 3;
+    let left = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+    let read = cx.new(|_| over_the_hour(route));
+
+    left.update(cx, |page, cx| page.pin_second(second, cx));
+    read.update(cx, |page, cx| page.pin_second(second, cx));
+
+    cx.update(|cx| assert_eq!(held_target(left.read(cx)), held_target(read.read(cx))));
+}
+
+on_pages!(
+    a_window_shown_again_over_a_reading_left_to_the_view_shows_the_points_it_showed
+    on overview memory network storage gpu cpu
+);
+fn a_window_shown_again_over_a_reading_left_to_the_view_shows_the_points_it_showed(
+    cx: &mut TestAppContext,
+    route: &str,
+) {
+    // Goal: a window that hid and let go of the View, then took a reading that left its older
+    // tail to the View, still draws the View's charts, and reads each at the point of the
+    // hovered second rather than at that point shifted by the older tail the reading lacks.
+    // Method: a page over the hour whose reading left its tail to the View, the point each
+    // chart shows while a second of the live span is hovered, then the window hides with no
+    // hover, takes the next such reading and shows the same hover.
+    let page = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+    let target = cx.update(|cx| page.read(cx).store_view_target(LIVE).unwrap());
+    let source: gpui::SharedString = "live-cpu-plot".into();
+    let hover = |cx: &mut TestAppContext| {
+        page.update(cx, |page, cx| {
+            page.set_reading_target(source.clone(), target.clone(), Origin::Pointer, cx);
+        });
+    };
+    hover(cx);
+    let shown = cx.update(|cx| shown_points(page.read(cx)));
+    page.update(cx, |page, cx| page.clear_reading_target(&source, cx));
+    page.update(cx, |page, _| page.tick_hidden());
+    page.update(cx, |page, _| {
+        let reading = reading_left_to_the_view(page);
+        assert!(page.receive(Update::Ready(reading)));
+    });
+
+    hover(cx);
+
+    cx.update(|cx| assert_eq!(shown_points(page.read(cx)), shown));
+}
+
+on_pages!(
+    a_clock_time_typed_over_a_reading_left_to_the_view_shows_the_points_of_its_second
+    on overview memory network storage gpu cpu
+);
+fn a_clock_time_typed_over_a_reading_left_to_the_view_shows_the_points_of_its_second(
+    cx: &mut TestAppContext,
+    route: &str,
+) {
+    // Goal: a clock time typed on a page whose reading left its older tail to the View reads the
+    // View's charts, which stay drawn until the reply, at the typed second's point, as a page
+    // whose reading read the tail does. Method: a page over the hour whose reading left its tail
+    // to the View and one whose reading holds the tail each take a typed second of the live
+    // span and a tick, then the point each machine chart shows, since the second page's
+    // reading brings no chart by App.
+    let left = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+    let read = cx.new(|_| over_the_hour(route));
+
+    left.update(cx, |page, cx| page.inspect(LIVE, cx));
+    read.update(cx, |page, cx| page.inspect(LIVE, cx));
+    left.update(cx, LiveDashboard::tick);
+    read.update(cx, LiveDashboard::tick);
+
+    let machine = |page: &gpui::Entity<LiveDashboard>| {
+        let shown = cx.update(|cx| shown_points(page.read(cx)));
+        shown
+            .into_iter()
+            .filter(|(id, _)| !super::super::store_view_draws_app_chart(route, id))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(machine(&left), machine(&read));
+}
+
+on_pages!(
+    a_step_across_the_older_tail_after_choosing_the_page_shown_moves_one_stretch
+    on overview memory network storage gpu cpu
+);
+fn a_step_across_the_older_tail_after_choosing_the_page_shown_moves_one_stretch(
+    cx: &mut TestAppContext,
+    route: &str,
+) {
+    // Goal: choosing the page already shown keeps the record that its reading left the older
+    // tail to the store's View, so an arrow step across that tail still moves one stretch.
+    // Method: a page over the hour whose reading left its tail to the View is chosen again
+    // from the sidebar, which keeps the page and shows the kept reading at once, then a step
+    // from the newest second to a second inside the older tail's second stretch and one step
+    // to the right.
     let stride = viewer::EARLIER_STRIDE_SECONDS;
-    let inside = OLDER + stride + 5;
-    let to_inside = -i64::try_from(HOUR_NEWEST - inside).unwrap();
-    for (delta, expected) in [(1, OLDER + 2 * stride), (-1, OLDER)] {
-        let page = cx.new(|_| rested_over_the_hour(route));
-        page.update(cx, |page, cx| page.chart_step(to_inside, cx));
-        assert_eq!(stepped(cx, &page), Some(OLDER + stride));
+    let page = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+    page.update(cx, |page, _| page.switch_route(route));
 
-        page.update(cx, |page, cx| page.chart_step(delta, cx));
+    let stepped = step_twice_from_inside_the_second_stretch(cx, &page, 1);
 
-        assert_eq!(stepped(cx, &page), Some(expected));
-    }
+    assert_eq!(stepped, [Some(OLDER + stride), Some(OLDER + 2 * stride)]);
+}
+
+on_pages!(
+    a_click_on_the_older_tail_after_choosing_the_page_shown_holds_what_a_reading_of_it_holds
+    on overview memory network storage gpu cpu
+);
+fn a_click_on_the_older_tail_after_choosing_the_page_shown_holds_what_a_reading_of_it_holds(
+    cx: &mut TestAppContext,
+    route: &str,
+) {
+    // Goal: choosing the page already shown keeps the record that its reading left the older
+    // tail to the store's View, so a click with no hover on that tail holds what a page whose
+    // reading read the tail holds. Method: a page over the hour whose reading left its tail to
+    // the View is chosen again from the sidebar, and a page whose reading holds the tail is not,
+    // then a click with no hover on a second inside an older stretch other than its first.
+    let second = OLDER + 3;
+    let left = cx.new(|_| over_the_hour_with_its_tail_left_to_the_view(route));
+    let read = cx.new(|_| over_the_hour(route));
+    left.update(cx, |page, _| page.switch_route(route));
+
+    left.update(cx, |page, cx| page.pin_second(second, cx));
+    read.update(cx, |page, cx| page.pin_second(second, cx));
+
+    cx.update(|cx| assert_eq!(held_target(left.read(cx)), held_target(read.read(cx))));
 }
 
 on_each_drawn_page!(
@@ -406,6 +616,26 @@ fn a_rested_page_whose_view_cannot_be_drawn_asks_its_reader_for_the_page(route: 
     // it waits on a reply.
     let seconds = memory_seconds(&[9_999, 10_000]);
     let mut dashboard = rested_on(route, &seconds, worker_reading(&seconds));
+
+    dashboard.draw_store_view_failed("The View could not be drawn".to_owned());
+
+    assert!(dashboard.reply_pending);
+}
+
+on_pages!(
+    a_page_whose_reading_left_its_tail_to_a_view_it_cannot_draw_asks_its_reader_for_the_page, plain
+    on overview memory network storage gpu cpu
+);
+fn a_page_whose_reading_left_its_tail_to_a_view_it_cannot_draw_asks_its_reader_for_the_page(
+    route: &str,
+) {
+    // Goal: a page whose reading left its older tail to the View asks its reader for the page
+    // once it lets go of a View it could not draw, since its reading holds none of the older
+    // seconds the View drew. Method: a page over the hour whose reading left its tail to the
+    // View and whose reader is not rested, then the page lets go of the View as a failed draw
+    // does, then whether it waits on a reply.
+    let mut dashboard = over_the_hour_with_its_tail_left_to_the_view(route);
+    assert!(!dashboard.reply_pending);
 
     dashboard.draw_store_view_failed("The View could not be drawn".to_owned());
 
@@ -624,12 +854,67 @@ fn over_the_hour(route: &str) -> LiveDashboard {
     dashboard
 }
 
+/// A page on `route` that draws from the View of `hour()` and then took the reader's next
+/// reading, which left the older tail to the View since the View draws the page whole, and so
+/// holds the seconds of its full detail alone.
+fn over_the_hour_with_its_tail_left_to_the_view(route: &str) -> LiveDashboard {
+    let mut dashboard = over_the_hour(route);
+
+    assert!(dashboard.receive(Update::Ready(reading_left_to_the_view(&dashboard))));
+
+    assert!(dashboard.older_seconds_left_to_view());
+    assert!(!dashboard.points_left_to_view());
+    dashboard
+}
+
+/// The reader's next reading of `hour()` for `dashboard`, which left the older tail to the View
+/// since the View draws the page whole, and so holds the seconds of its full detail alone.
+fn reading_left_to_the_view(dashboard: &LiveDashboard) -> Box<Snapshot> {
+    let (view, _) = hour();
+    let detail_first = HOUR_NEWEST - (viewer::CHARTED_SECONDS - 1);
+    let live: Vec<MachineSecond> = view
+        .seconds
+        .iter()
+        .filter(|second| second.wall_ns / 1_000_000_000 >= detail_first)
+        .map(|second| (**second).clone())
+        .collect();
+    let mut reading = worker_reading(&live);
+    crate::live_store_page_fixtures::left_tail_to_view(&mut reading);
+    reading.generation = dashboard.generation;
+    reading
+}
+
+/// The point each chart the page draws shows, by the chart's name.
+fn shown_points(page: &LiveDashboard) -> Vec<(String, Option<usize>)> {
+    page.panels
+        .iter()
+        .map(|panel| (panel.id.clone(), page.chart_look(panel).index))
+        .collect()
+}
+
 /// The second the page's hold names and the run, boot and publication of its reading.
 fn held_target(page: &LiveDashboard) -> (u64, (String, String, u64)) {
     let target = &page.hold.as_ref().unwrap().reading.target;
     let identity = target.identity.as_ref().unwrap();
 
     (target.second, identity_signature(identity).unwrap())
+}
+
+/// Steps `page` from the newest second to a second inside the older tail's second stretch, then
+/// once more by `delta`, and gives the second each step shows.
+fn step_twice_from_inside_the_second_stretch(
+    cx: &mut TestAppContext,
+    page: &gpui::Entity<LiveDashboard>,
+    delta: i64,
+) -> [Option<u64>; 2] {
+    let inside = OLDER + viewer::EARLIER_STRIDE_SECONDS + 5;
+    page.update(cx, |page, cx| {
+        page.chart_step(-i64::try_from(HOUR_NEWEST - inside).unwrap(), cx);
+    });
+    let first = stepped(cx, page);
+    page.update(cx, |page, cx| page.chart_step(delta, cx));
+
+    [first, stepped(cx, page)]
 }
 
 /// The second the page's arrow step shows.

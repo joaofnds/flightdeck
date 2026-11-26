@@ -212,6 +212,123 @@ fn a_refused_older_sample_keeps_its_reading_and_reports_unavailable_apps(cx: &mu
 }
 
 #[gpui::test]
+fn a_hover_and_a_hold_of_the_older_tail_on_overview_show_the_held_second_s_readings(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a reading of Overview that left its older tail to the store's View, since the View
+    // draws its charts, shows a hover of a second of that tail and the second held there as a
+    // reading with the tail shows them: the readouts of that second, the second and its identity
+    // named, and no hover read. Method: Overview over a View whose older tail holds the tick of
+    // 8,200 with its Apps, a hover there, a click there and the hold's step, once over the
+    // worker's readings with 8,200 in their older tail and once over readings that left their
+    // older tail to the View, then what each shows against the readouts of 8,200.
+    let read = hover_and_hold_the_older_tail(cx, OlderTail::Read);
+
+    let left = hover_and_hold_the_older_tail(cx, OlderTail::LeftToTheView);
+
+    let older = reading_at(8_200, 0);
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&older)),
+    );
+    assert_eq!(read.hovered, texts(&expected));
+    assert_eq!(read.named.0, Some(8_200));
+    assert!(read.named.1.is_some());
+    assert_eq!(read.hover_reads, 0);
+    assert_eq!(left, read);
+}
+
+#[gpui::test]
+fn a_hold_on_overview_of_an_older_second_whose_apps_are_not_loaded_names_the_second_alone(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Overview whose reading left its older tail to the store's View shows a second of
+    // that tail whose Apps the store has not loaded with the View's readouts of it, and a click
+    // there holds the second alone, since nothing names its identity. Method: Overview over a
+    // View whose older tail holds the tick of 8,200 without its Apps, over the worker's readings
+    // that left their older tail to the View, a click on 8,200 and the hold's step, then the
+    // readouts and the second and identity the request names.
+    let older = reading_at(8_200, 0);
+    let mut harness = InputHarness::open_route(cx, "overview");
+    let held = held_view(1, std::slice::from_ref(&older), &held_seconds());
+    harness
+        .driver
+        .show_view_over_older_tail(held, &older, OlderTail::LeftToTheView);
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.click_held_second(8_200);
+
+    let expected = summary::cards(
+        "overview",
+        &crate::live_store_fixtures::selection_of_json(&summary_selection(&older)),
+    );
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    let named = harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |page, _| {
+            (page.request.second, page.request.identity.clone())
+        });
+    assert_eq!(named, (Some(8_200), None));
+    harness.teardown();
+}
+
+/// Who holds the older tail of the worker's readings.
+#[derive(Clone, Copy)]
+enum OlderTail {
+    Read,
+    LeftToTheView,
+}
+
+/// What a page shows of a hover and then a hold of one second.
+#[derive(Debug, PartialEq)]
+struct HoverAndHold {
+    /// The readouts after the hover.
+    hovered: Vec<(String, String, String, u32)>,
+    /// The readouts after the click.
+    held: Vec<(String, String, String, u32)>,
+    /// The second the page shows.
+    shown: Option<u64>,
+    /// The second and identity the page's request names.
+    named: (Option<u64>, Option<serde_json::Value>),
+    /// The reads of a hovered second the page sent the worker.
+    hover_reads: u64,
+}
+
+/// What Overview over the View of `held_seconds` with the sampled tick of 8,200 in its older
+/// tail shows of a hover and a hold of 8,200, over the worker's readings whose older tail `tail`
+/// holds.
+fn hover_and_hold_the_older_tail(cx: &mut TestAppContext, tail: OlderTail) -> HoverAndHold {
+    let older = reading_at(8_200, 0);
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_sampled_tail(&older, tail);
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.hover_held_second(8_200);
+    harness.driver.tick_hover();
+    let hovered = harness.driver.readout_texts();
+
+    harness.driver.click_held_second(8_200);
+
+    let held = harness.driver.readout_texts();
+    let (shown, named) = harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |page, _| {
+            let shown = page.reading_target().map(|target| target.second);
+            (shown, (page.request.second, page.request.identity.clone()))
+        });
+    let hover_reads = harness.driver.hover_reads();
+    harness.teardown();
+    HoverAndHold {
+        hovered,
+        held,
+        shown,
+        named,
+        hover_reads,
+    }
+}
+
+#[gpui::test]
 fn hovering_the_older_tail_reads_its_top_apps(cx: &mut TestAppContext) {
     // Goal: a hover over the older tail, whose Apps the store's View does not hold, has the
     // worker read the hovered second's top Apps. Method: the View and the worker's readings both
@@ -659,6 +776,65 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    /// Shows Overview drawn from the `held_view` of `held_seconds` whose older tail holds the
+    /// sampled tick of `older` with its Apps, over the worker's readings of 9,999 and 10,000,
+    /// whose older tail `tail` holds: `older`, or nothing, since they left it to the View.
+    fn show_view_over_sampled_tail(&mut self, older: &MachineSecond, tail: OlderTail) {
+        let budget = Arc::new(ByteBudget::new(1_048_576));
+        let sample = SampledSecond::from_second(older, &held_apps(older), &budget);
+        let mut held = held_view(1, std::slice::from_ref(older), &held_seconds());
+        Arc::get_mut(&mut held)
+            .unwrap()
+            .sampled
+            .push(Arc::new(sample));
+        self.show_view_over_older_tail(held, older, tail);
+    }
+
+    /// Shows Overview drawn from `held` over the worker's readings of 9,999 and 10,000, whose
+    /// older tail `tail` holds: `older`, or nothing, since they left it to the View.
+    fn show_view_over_older_tail(
+        &mut self,
+        held: Arc<View>,
+        older: &MachineSecond,
+        tail: OlderTail,
+    ) {
+        let mut snapshot = readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        match tail {
+            OlderTail::Read => {
+                let selection = snapshot.selection.legacy_mut().unwrap();
+                selection["earlier_trends"] = vec![trend_point(older)].into();
+            }
+            OlderTail::LeftToTheView => {
+                crate::live_store_page_fixtures::left_tail_to_view(&mut snapshot);
+            }
+        }
+        // The page draws from a View before its reading leaves its tail to one, so it takes the
+        // View first, as Overview does at launch.
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_view(held));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+        self.context.run_until_parked();
+    }
+
+    /// Clicks `second` of the CPU chart where the range shows it, as a person holds a second,
+    /// then runs the hold's step.
+    fn click_held_second(&mut self, second: u64) {
+        let window = self
+            .view
+            .read_with(&self.context, |dashboard, _| dashboard.view_window());
+        let fraction = window.unwrap().fraction_of(second).unwrap();
+        let position = self.second_position("live-cpu-plot", fraction);
+        self.context.simulate_click(position, Modifiers::none());
+        self.context.run_until_parked();
+        self.view
+            .update(&mut self.context, |dashboard, _| dashboard.hold_tick());
     }
 
     /// Shows Overview drawn from the `held_view` of `seconds` over the worker's readings of

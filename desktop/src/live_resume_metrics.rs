@@ -240,7 +240,7 @@ impl LiveDashboard {
         if self.request.second.is_none() {
             // A CPU page whose View holds no logical CPUs of its newest second draws them from
             // its reader, so its frame is fresh once the reader's reply is drawn.
-            if crate::live_dashboard::store_view_draws_machine(&self.request.route)
+            if crate::live_source::store_view_draws_machine(&self.request.route)
                 && self.store_view_draws_whole_page()
             {
                 let Some(version) = self.resume_store_version() else {

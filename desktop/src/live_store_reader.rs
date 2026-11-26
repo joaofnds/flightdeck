@@ -18,7 +18,7 @@ use viewer::store::{
     QueryRequest, QuerySelection, QueryToken, QueryUnavailable, RankedSeconds,
 };
 
-use super::{Command, Context, Histories, Reader, Shared, Snapshot, Update};
+use super::{Command, Context, Histories, PointsKeeping, Reader, Shared, Snapshot, Update};
 
 /// Steps of the worker, ten seconds of them at its pace, a page waits for the Store to answer it.
 /// Past them the saved minutes answer, or the limit on contexts says so, since a Store that cannot
@@ -765,7 +765,30 @@ fn read_earlier(
         return false;
     }
     // A page's first step takes the older tail where its session reads it at once, and its next
-    // step reads the rest.
+    // step reads the rest. A reading that left the tail to the View, which draws every chart of
+    // the page over the seconds the store holds, reads none of it and leaves none to a later
+    // step.
+    let pending = if snapshot.points_keeping == PointsKeeping::TailLeftToView {
+        false
+    } else {
+        read_earlier_tail(reader, root, command, shared, snapshot)
+    };
+    if let Some(store) = &mut reader.store {
+        store.tail_pending = pending;
+    }
+
+    pending
+}
+
+/// Reads what `read_earlier` takes of the older tail into `snapshot`, and returns whether the
+/// page still waits for the rest of it.
+fn read_earlier_tail(
+    reader: &mut Reader,
+    root: &std::path::Path,
+    command: &Command,
+    shared: &Shared,
+    snapshot: &mut Snapshot,
+) -> bool {
     let tail_pending = reader
         .store
         .as_ref()
@@ -776,9 +799,6 @@ fn read_earlier(
     snapshot.selection.edit(|selection| {
         pending = read_earlier_selection(reader, root, command, shared, tail_at_once, selection);
     });
-    if let Some(store) = &mut reader.store {
-        store.tail_pending = pending;
-    }
 
     pending
 }

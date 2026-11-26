@@ -42,6 +42,18 @@ pub fn readings(trends: &[MachineSecond]) -> Box<Snapshot> {
     })
 }
 
+/// Makes `snapshot` a reading the reader built while the page shared that the store's View draws
+/// its charts, on a page whose machine charts the View draws: it brings no App history and no
+/// older tail, not even an empty one, and keeps the points of its newest seconds.
+pub fn left_tail_to_view(snapshot: &mut Snapshot) {
+    let selection = snapshot.selection.legacy_mut().unwrap();
+    selection.take_earlier_trends().unwrap();
+    let mut fields = selection.fields_mut().unwrap();
+    fields.remove("earlier_stride_seconds").unwrap();
+    snapshot.app_chart_source = crate::live_source::AppChartSource::View;
+    snapshot.points_keeping = crate::live_source::PointsKeeping::TailLeftToView;
+}
+
 /// The second at `wall_second` whose hardware figure shows CPU and GPU dies at 61.5 and 52.25 °C,
 /// fans at 1,200 and 1,500 rpm, the CPU 25% and the GPU 12.5% busy, 12 of 32 GiB in use, the
 /// battery 75% charged and giving 6.5 W, and moderate thermal pressure.

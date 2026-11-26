@@ -307,9 +307,12 @@ fn resident_complete(
     if matched {
         return true;
     }
-    // The summary of every second but the selected one went with the points of the charts.
-    if points_keeping != PointsKeeping::Kept {
-        return false;
+    // The summary of every second but the selected one went with the points of the charts. A
+    // reading that left only its older seconds to the View, which draws the page, keeps those of
+    // its newest seconds.
+    match points_keeping {
+        PointsKeeping::Kept | PointsKeeping::TailLeftToView => {}
+        PointsKeeping::Dropped | PointsKeeping::LeftToView => return false,
     }
 
     if crate::live_source::route_ranks_apps(route) {

@@ -524,17 +524,20 @@ mod when_the_view_draws_the_app_chart {
     }
 
     #[test]
-    fn an_overview_reading_builds_its_histories_all_the_same() {
-        // Goal: Overview's readings always bring its charts by App, so a request for Overview
-        // sent with nothing said since a page the View drew still carries them, and never says
-        // it left them to the View. Method: say the View draws the chart, then ask for Overview.
+    fn an_overview_reading_builds_no_app_history_and_still_ranks_the_apps() {
+        // Goal: as on the other pages the View draws, Overview whose charts by App the View
+        // draws gets a reading with none of their histories, which says it left them to the
+        // View, and the top Apps of each second a hover reads. Method: say the View draws the
+        // charts, then ask for Overview with its App histories as the page asks.
         let mut harness = Harness::new();
         harness.worker.set_app_chart_source(AppChartSource::View);
 
         let snapshot = harness.read_with_histories("overview");
 
-        assert!(snapshot.resident_history.is_some());
-        assert_eq!(snapshot.app_chart_source, AppChartSource::Reading);
+        assert!(snapshot.resident_history.is_none());
+        assert!(snapshot.overview_app_histories.is_none());
+        assert!(snapshot.app_ranks.is_some());
+        assert_eq!(snapshot.app_chart_source, AppChartSource::View);
         harness.assert_source_free();
     }
 }

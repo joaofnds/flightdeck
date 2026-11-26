@@ -177,11 +177,29 @@ impl Snapshot {
     /// the reading that brings them, so it stays as it is.
     pub fn leave_points_to_view(&mut self) {
         match self.points_keeping {
-            PointsKeeping::Kept => {
+            PointsKeeping::Kept | PointsKeeping::TailLeftToView => {
                 self.remove_points();
                 self.points_keeping = PointsKeeping::LeftToView;
             }
             PointsKeeping::Dropped | PointsKeeping::LeftToView => {}
+        }
+    }
+
+    /// Whether the reading left the older seconds its charts draw to the store's View, which
+    /// then names each of them, so the reading answers for none of them.
+    pub fn older_seconds_left_to_view(&self) -> bool {
+        match self.points_keeping {
+            PointsKeeping::TailLeftToView | PointsKeeping::LeftToView => true,
+            PointsKeeping::Kept | PointsKeeping::Dropped => false,
+        }
+    }
+
+    /// Whether the reading holds the points of its charts' newest seconds, so its page draws
+    /// them from the reading again.
+    pub fn keeps_recent_points(&self) -> bool {
+        match self.points_keeping {
+            PointsKeeping::Kept | PointsKeeping::TailLeftToView => true,
+            PointsKeeping::Dropped | PointsKeeping::LeftToView => false,
         }
     }
 
@@ -198,6 +216,10 @@ impl Snapshot {
 pub enum PointsKeeping {
     /// Kept in the reading, as every reading arrives.
     Kept,
+    /// Kept for the newest seconds, the charts' full detail, while the older tail was left to
+    /// the store's View, which draws every chart of the page. The reader leaves it so where the
+    /// page shared that the View draws its charts as the reading was built.
+    TailLeftToView,
     /// Dropped as the user left the reading's page, whose next reading brings them again.
     Dropped,
     /// Left to the store's View, which draws every point of the page's charts while the page
@@ -570,6 +592,17 @@ impl Worker {
             return None;
         };
         snapshot.selection["second"].as_u64()
+    }
+
+    /// What `read` reads of the reading the reader left for the window and the window has not
+    /// taken.
+    #[cfg(test)]
+    pub(crate) fn output_read<T>(&self, read: impl FnOnce(&Snapshot) -> T) -> Option<T> {
+        let mailbox = self.mailbox().unwrap();
+        let Some(Update::Ready(snapshot)) = &mailbox.output else {
+            return None;
+        };
+        Some(read(snapshot))
     }
 
     /// What the window had said draws the page's chart by App when it sent its last command.
@@ -1253,6 +1286,45 @@ fn route_shows_no_reading(route: &str) -> bool {
 /// of the points the charts of the other pages draw.
 fn route_draws_no_chart(route: &str) -> bool {
     route == "computer"
+}
+
+/// Whether a reading of the page `request` asks for, built while the page shared that `source`
+/// draws its chart by App, leaves its older tail to the Store's View: where the View draws the
+/// page's machine charts, it draws every chart the tail would draw.
+pub(crate) fn earlier_left_to_view(request: &Request, source: AppChartSource) -> bool {
+    if source == AppChartSource::Reading {
+        return false;
+    }
+    if reader_earlier_skips(request) {
+        return false;
+    }
+
+    store_view_draws_machine(&request.route)
+}
+
+/// Whether the page `route` draws its machine charts and readouts from the store's View, and its
+/// top Apps where it shows any, while it follows the live Mac's newest second, so its reader
+/// rests. Overview, Memory, Network, Storage, GPU and CPU do. Every gate that lets a page draw from
+/// the View, rest its reader on it and resume from it asks this, so a page joins them by being
+/// named here. Resting the reader and resuming also ask `store_view_draws_whole_page`, since
+/// the CPU page reads its logical CPUs where the View could not build them.
+pub(crate) fn store_view_draws_machine(route: &str) -> bool {
+    store_panels_machine(route).is_some()
+}
+
+/// The page whose machine charts the charts drawn for the page `route` are, which is `route`
+/// where it draws machine charts from the store's View, and none where it draws only charts by
+/// App from it. This is the one list of the pages drawn from the View.
+pub(crate) fn store_panels_machine(route: &str) -> Option<&'static str> {
+    match route {
+        "overview" => Some("overview"),
+        "memory" => Some("memory"),
+        "network" => Some("network"),
+        "storage" => Some("storage"),
+        "gpu" => Some("gpu"),
+        "cpu" => Some("cpu"),
+        _ => None,
+    }
 }
 
 /// Whether the read goes without the older tail of a page's selection, which only a chart reads.

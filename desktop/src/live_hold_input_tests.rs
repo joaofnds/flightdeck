@@ -1546,16 +1546,17 @@ fn a_hover_after_letting_go_on_overview_leaves_the_readouts_to_the_reader(cx: &m
 }
 
 #[gpui::test]
-fn a_view_behind_the_reader_after_letting_go_draws_overview_from_the_reader(
+fn a_view_behind_the_reader_after_letting_go_draws_overview_whose_reading_left_it_the_older_tail(
     cx: &mut TestAppContext,
 ) {
-    // Goal: the store's next View after letting go of a second held on Overview takes the place
-    // of what the page kept of the View the hold kept even where it falls behind the reader, so
-    // the page draws the reader's readings, as it does over any View behind them. Method:
-    // Overview over the View of an hour in whose two oldest stretches D led, at the last 60
-    // minutes, Pause, a tick of the page, Pause again, the reader's answer with the readings of
-    // the 50 seconds since, then the View of the hour to 40 seconds since, which the page does not
-    // draw from, and the page's window.
+    // Goal: after letting go of a second held on Overview the page shares that the store's View
+    // draws its charts, as the other pages the View draws do, so the reader's next reading
+    // leaves its older tail to the View, and the store's next View draws the page even where it
+    // falls behind that reading, since the reading holds less than the View. Method: Overview
+    // over the View of an hour in whose two oldest stretches D led, at the last 60 minutes,
+    // Pause, a tick of the page, Pause again, the reader's answer with the readings of the 50
+    // seconds since, built as the reader builds them under what the page shared, then the View
+    // of the hour to 40 seconds since, and the page's window.
     let mut harness = InputHarness::open_route(cx, "overview");
     harness.driver.show_range(Range::History);
     harness
@@ -1565,17 +1566,19 @@ fn a_view_behind_the_reader_after_letting_go_draws_overview_from_the_reader(
     harness.driver.pause();
     harness.driver.tick_page();
     harness.driver.pause();
-    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+    harness
+        .driver
+        .answer_newest_command_as_the_reader_builds_it_up_to(HOUR_NEWEST + 50);
     let (mut next, _) = hour_until(HOUR_NEWEST + 40);
     next.version = 2;
 
     let drawn = harness.driver.offer_next_view(next);
 
-    assert!(!drawn);
+    assert!(drawn);
     assert_eq!(
         harness.driver.view_window(),
         Some(TimeWindow {
-            first: HOUR_NEWEST + 50 - 3_599,
+            first: HOUR_NEWEST + 40 - 3_599,
             span: 3_600
         })
     );
@@ -4003,6 +4006,24 @@ impl InputDriver {
         let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
         reply.generation = self.reader_commands();
         self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_update(Update::Ready(reply)));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Hands the page the reader's answer to its newest command, the live readings of the two
+    /// seconds up to `newest`, built as the reader builds them under the source of the charts
+    /// the page shared as it asked, which the page takes.
+    fn answer_newest_command_as_the_reader_builds_it_up_to(&mut self, newest: u64) {
+        let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
+        reply.generation = self.reader_commands();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let shared = dashboard.worker.sent_app_chart_source().unwrap();
+            if crate::live_source::earlier_left_to_view(&dashboard.request, shared) {
+                crate::live_store_page_fixtures::left_tail_to_view(&mut reply);
+            }
             assert!(dashboard.take_update(Update::Ready(reply)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
