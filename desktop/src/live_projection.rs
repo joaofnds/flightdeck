@@ -1007,20 +1007,25 @@ fn panel_maximum(specification: &Specification, lines: &[Line]) -> Option<f32> {
     )
 }
 
+/// The power of the system past the GPU's, the system's power `system` less the GPU's `gpu`,
+/// which the reader and the store's View both derive by this one rule: `None` unless both are
+/// read, and an error where the difference is no finite number.
+fn power_remainder_watts(system: Option<f32>, gpu: Option<f32>) -> Result<Option<f32>, String> {
+    let Some((system, gpu)) = system.zip(gpu) else {
+        return Ok(None);
+    };
+
+    let remainder = system - gpu;
+    if !remainder.is_finite() {
+        return Err("Nonfinite derived power remainder".into());
+    }
+
+    Ok(Some(remainder))
+}
+
 fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
     if reading.key == "power_remainder_watts" {
-        let system = number(&point["power_watts"])?;
-        let gpu = number(&point["gpu_watts"])?;
-        let Some((system, gpu)) = system.zip(gpu) else {
-            return Ok(None);
-        };
-
-        let remainder = system - gpu;
-        if !remainder.is_finite() {
-            return Err("Nonfinite derived power remainder".into());
-        }
-
-        return Ok(Some(remainder));
+        return power_remainder_watts(number(&point["power_watts"])?, number(&point["gpu_watts"])?);
     }
 
     if reading.key == FAN_MEAN_KEY {
@@ -1386,12 +1391,17 @@ fn specifications(route: &str, points: &JoinedPoints<'_>) -> Result<Vec<Specific
 }
 
 fn energy(points: &JoinedPoints<'_>) -> Result<Vec<Specification>, String> {
+    energy_specifications(fan_channel_count(points)?)
+}
+
+/// The Energy page's charts, its fan chart drawing `fan_channel_count` channels.
+fn energy_specifications(fan_channel_count: usize) -> Result<Vec<Specification>, String> {
     Ok(vec![
         system_power("live-energy"),
         gpu_power(),
         power_breakdown(),
         soc_temperature(),
-        fan_specification(points)?,
+        fan_specification(fan_channel_count)?,
         thermal_state(),
         area_maxima(),
     ])
@@ -1477,8 +1487,24 @@ fn power_breakdown() -> Specification {
     specification
 }
 
-fn fan_specification(points: &JoinedPoints<'_>) -> Result<Specification, String> {
-    const CHANNELS: [(&str, &str); 10] = [
+/// How many fan channels the fan chart of `points` draws: as many as the longest fan reading
+/// among them holds.
+fn fan_channel_count(points: &JoinedPoints<'_>) -> Result<usize, String> {
+    let mut count = 0;
+    for point in points.iter() {
+        if !point["fan_rpm"].is_null() {
+            let values = point["fan_rpm"]
+                .as_array()
+                .ok_or("Invalid fan channel array")?;
+            count = count.max(values.len());
+        }
+    }
+
+    Ok(count)
+}
+
+fn fan_specification(channel_count: usize) -> Result<Specification, String> {
+    const CHANNELS: [(&str, &str); FAN_CHANNELS_MAX] = [
         ("Fan 0", "#73bf69"),
         ("Fan 1", "#f2cc0c"),
         ("Fan 2", "#5794f2"),
@@ -1490,23 +1516,12 @@ fn fan_specification(points: &JoinedPoints<'_>) -> Result<Specification, String>
         ("Fan 8", "#1f60c4"),
         ("Fan 9", "#c15c17"),
     ];
-    let mut channels = 0;
-
-    for point in points.iter() {
-        if !point["fan_rpm"].is_null() {
-            let values = point["fan_rpm"]
-                .as_array()
-                .ok_or("Invalid fan channel array")?;
-            if values.len() > CHANNELS.len() {
-                return Err("Fan history exceeds ten channels".into());
-            }
-
-            channels = channels.max(values.len());
-        }
+    if channel_count > CHANNELS.len() {
+        return Err("Fan history exceeds ten channels".into());
     }
 
-    let mut lines = Vec::with_capacity(channels);
-    for (channel, (name, color)) in CHANNELS.into_iter().take(channels).enumerate() {
+    let mut lines = Vec::with_capacity(channel_count);
+    for (channel, (name, color)) in CHANNELS.into_iter().take(channel_count).enumerate() {
         let mut line = reading("fan_rpm", name, color, 1.0);
         line.channel = Some(channel);
         lines.push(line);
@@ -1695,7 +1710,7 @@ fn correlation() -> Specification {
 }
 
 const FAN_MEAN_KEY: &str = "fan_mean_rpm";
-const FAN_CHANNELS_MAX: usize = 10;
+use viewer::store::FAN_CHANNELS_MAX;
 
 /// The mean speed of the fan channels measured at one reading, or none when no channel was.
 fn fan_mean(channels: &Value) -> Result<Option<f32>, String> {

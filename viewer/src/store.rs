@@ -78,7 +78,9 @@ pub(in crate::store) use block::BlockSeconds;
 pub use block::{AppAt, AppsCursor, AppsSpan, Processes, Second, Seconds};
 pub use buffers::{Buffers, Mailbox, Span, Waker};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
-pub use machine_stretch::{Category, Gauge, MachinePlace, MachineStretch, Rate, pressure_level};
+pub use machine_stretch::{
+    Category, FAN_CHANNELS_MAX, Gauge, MachinePlace, MachineStretch, Rate, pressure_level,
+};
 pub use model::summary::{Extreme, Highest};
 pub use native::AppMetadata;
 pub use payload::packed::KeptPlain;

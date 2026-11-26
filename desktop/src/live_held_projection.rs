@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsStretch, Extreme, Highest, MachinePlace, MachineSecond, MachineStretch, MemoryRate,
-    NetworkRate, PointRate, Second, StorageRate, View,
+    AppsStretch, CompleteMachine, Extreme, Highest, MachinePlace, MachineSecond, MachineStretch,
+    MemoryRate, NetworkRate, PointRate, Second, StorageRate, View,
 };
 
 use super::{
@@ -27,13 +27,15 @@ pub fn view_panels(
     view: &View,
     levels: Option<&[PerformanceLevel; 2]>,
 ) -> Result<Vec<Rc<Panel>>, String> {
-    let specifications = view_panels_specifications(route, levels)?;
     let Some(newest) = view.seconds.last() else {
+        // A route the store draws no charts of fails here too.
+        view_panels_specifications(route, levels, &[])?;
         return super::empty_panels(route);
     };
 
     let domain = view_panels_domain(newest)?;
     let seconds = view_panels_points(view, &domain);
+    let specifications = view_panels_specifications(route, levels, &seconds)?;
     let coordinates = view_panels_coordinates(&seconds, &domain)?;
     let stretches = view_panels_stretches(view, &seconds, &domain);
     let points = ViewPanelsPoints {
@@ -50,10 +52,12 @@ pub fn view_panels(
     Ok(result)
 }
 
-/// The charts of `route` the store draws, which are the charts the trend points draw of it.
+/// The charts of `route` the store draws of `seconds`, which are the charts the trend points of
+/// those seconds draw of it.
 fn view_panels_specifications(
     route: &str,
     levels: Option<&[PerformanceLevel; 2]>,
+    seconds: &[&MachineSecond],
 ) -> Result<Vec<Specification>, String> {
     match route {
         "overview" => Ok(super::overview(levels)),
@@ -62,8 +66,20 @@ fn view_panels_specifications(
         "network" => Ok(super::network()),
         "storage" => Ok(super::storage_specifications()),
         "gpu" => Ok(super::gpu_specifications()),
+        "energy" => super::energy_specifications(view_panels_fan_channel_count(seconds)),
         _ => Err(format!("The store draws no charts of {route}")),
     }
+}
+
+/// How many fan channels the fan chart of `seconds` draws: as many as the longest complete
+/// reading of their fans holds, as the trend points of those seconds count them.
+fn view_panels_fan_channel_count(seconds: &[&MachineSecond]) -> usize {
+    seconds
+        .iter()
+        .filter_map(|second| second.complete().and_then(CompleteMachine::fan_rpm))
+        .map(<[_]>::len)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The wall second of each point the Overview's machine charts of `view` draw, in the order of
@@ -455,13 +471,45 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (Some("storage"), key, None) if let Some(rate) = rate_named::<StorageRate>(key) => {
             stretch_reach_measured(stretch.storage_rate(rate))
         }
-        (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
-        (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
-        (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
         (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest()),
-        (None, "thermal_pressure", None) => {
-            stretch_reach_category(stretch.thermal_pressure.highest())
-        }
+        (None, key, channel) => return stretch_reach_power_and_cooling(key, channel, stretch),
+        _ => return Err(format!("The store reduces no reading {key}")),
+    };
+
+    Ok(reach)
+}
+
+/// How high the power and cooling reading `key`, on `channel`, reached over `stretch`. The
+/// Energy page's charts read these, and so do Overview's power, thermal state and correlation
+/// charts. `stretch_reach` sends here every key no other arm names, so this is also where a key
+/// naming none of the readings the store reduces gets its error.
+fn stretch_reach_power_and_cooling(
+    key: &str,
+    channel: Option<usize>,
+    stretch: &MachineStretch,
+) -> Result<Option<LineReach>, String> {
+    let reach = match (key, channel) {
+        ("power_watts", None) => stretch_reach_measured(&stretch.power_watts),
+        ("soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
+        (FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
+        ("fan_rpm", Some(channel)) => stretch
+            .fan_rpm
+            .get(channel)
+            .and_then(stretch_reach_measured),
+        // The stacked power chart reaches the system power, which its GPU line names, so the
+        // remainder's own line reaches nothing of its own. The collector records no area's
+        // hottest sensor, so their chart draws none.
+        (
+            "power_remainder_watts"
+            | "soc_max_celsius"
+            | "voltage_regulator_celsius"
+            | "display_celsius"
+            | "board_celsius"
+            | "wireless_celsius"
+            | "ambient_celsius",
+            None,
+        ) => None,
+        ("thermal_pressure", None) => stretch_reach_category(stretch.thermal_pressure.highest()),
         _ => return Err(format!("The store reduces no reading {key}")),
     };
 
@@ -544,12 +592,49 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
         (Some("storage"), key, None) if let Some(rate) = rate_named::<StorageRate>(key) => {
             narrow(second.storage_rate(rate))
         }
-        (None, "power_watts", None) => second.power_watts,
-        (None, "soc_celsius", None) => second.soc_celsius,
         (None, "cpu_celsius", None) => second.cpu_celsius,
-        (None, FAN_MEAN_KEY, None) => second.fan_mean_rpm,
-        (None, "thermal_pressure", None) => second.thermal_pressure.map(f32::from),
+        (None, key, channel) => return second_value_power_and_cooling(key, channel, second),
         _ => return Err(format!("The store holds no reading {}", reading.key)),
+    };
+
+    Ok(value)
+}
+
+/// What the power and cooling reading `key`, on `channel`, reads of `second`, as `second_value`
+/// reads it. The Energy page's charts read these, and so do Overview's power, thermal state and
+/// correlation charts. `second_value` sends here every key no other arm names, so this is also
+/// where a key naming none of the readings the store holds gets its error.
+fn second_value_power_and_cooling(
+    key: &str,
+    channel: Option<usize>,
+    second: &MachineSecond,
+) -> Result<Option<f32>, String> {
+    let value = match (key, channel) {
+        ("power_watts", None) => second.power_watts,
+        ("power_remainder_watts", None) => {
+            super::power_remainder_watts(second.power_watts, narrow(second.gpu_watts()))?
+        }
+        ("soc_celsius", None) => second.soc_celsius,
+        (FAN_MEAN_KEY, None) => second.fan_mean_rpm,
+        ("fan_rpm", Some(channel)) => narrow(
+            second
+                .complete()
+                .and_then(CompleteMachine::fan_rpm)
+                .and_then(|fans| fans.get(channel).copied().flatten()),
+        ),
+        ("thermal_pressure", None) => second.thermal_pressure.map(f32::from),
+        // The collector records no area's hottest sensor, so their chart draws no reading
+        // wherever it is drawn.
+        (
+            "soc_max_celsius"
+            | "voltage_regulator_celsius"
+            | "display_celsius"
+            | "board_celsius"
+            | "wireless_celsius"
+            | "ambient_celsius",
+            None,
+        ) => None,
+        _ => return Err(format!("The store holds no reading {key}")),
     };
 
     Ok(value)

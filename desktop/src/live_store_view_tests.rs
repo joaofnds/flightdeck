@@ -19,9 +19,9 @@ use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::{apps_at, apps_with_disk_at, apps_with_gpu_at};
 use crate::live_store_fixtures::overview_panels;
 use crate::live_store_fixtures::{
-    gpu_watts, levels, levels_named, network_rates, reading_at, storage_rates, store_levels_named,
-    trend_point, view, with_gpu_reading, with_memory_reading, with_network_reading,
-    with_storage_reading,
+    fan_rpm, gpu_watts, levels, levels_named, network_rates, reading_at, storage_rates,
+    store_levels_named, trend_point, view, with_energy_reading, with_gpu_reading,
+    with_memory_reading, with_network_reading, with_storage_reading,
 };
 use crate::live_store_page_fixtures::{
     cpu_run, cpu_seconds, cpu_seconds_past_a_page, figure_readings, figure_second, readings,
@@ -266,6 +266,11 @@ const GPU: Page = Page {
     seconds: gpu_seconds,
 };
 
+const ENERGY: Page = Page {
+    route: "energy",
+    seconds: energy_seconds,
+};
+
 macro_rules! newest_second_without_a_complete_reading_cases {
     ($($name:ident, $page:expr, $assert_shows_the_record:expr;)*) => {$(
         #[test]
@@ -300,6 +305,10 @@ newest_second_without_a_complete_reading_cases! {
     // record does not hold them.
     a_rested_gpu_page_shows_the_gpu_of_a_newest_second_without_a_complete_reading, GPU,
         assert_shows_the_gpu_of_the_record;
+    // Energy: the page shows the record's power, SoC sensor, thermal state and first two fans,
+    // and no GPU power, since the record does not hold it.
+    a_rested_energy_page_shows_the_energy_of_a_newest_second_without_a_complete_reading,
+        ENERGY, assert_shows_the_energy_of_the_record;
 }
 
 /// Asserts that `page`, its reader resting, shows what the View's record of a newest second
@@ -359,6 +368,22 @@ fn every_page_drawn_from_the_view_draws_its_machine_charts_from_it() {
 
         let drawn = panels.is_ok_and(|panels| !panels.is_empty());
         assert_eq!(drawn, super::store_view_draws_machine(route), "{route}");
+    }
+}
+
+#[test]
+fn every_page_given_a_chart_by_app_from_the_view_draws_its_machine_charts_from_it() {
+    // Goal: every page that shows a chart by App drawn from the store's View draws its machine
+    // charts from the View too, since a page given a chart by App from the View without its
+    // machine charts would draw that chart from the worker's reading alone. Method: each route
+    // that shows any chart by App, against whether the page draws its machine charts from the
+    // View.
+    let given_apps = crate::live_dashboard::ROUTES
+        .iter()
+        .filter(|(route, _)| super::AppCharts::of(route).any());
+
+    for (route, _) in given_apps {
+        assert!(super::store_view_draws_machine(route), "{route}");
     }
 }
 
@@ -874,6 +899,19 @@ fn assert_shows_the_gpu_of_the_record(shown: &Value, second: &MachineSecond) {
     }
 }
 
+/// Asserts that `shown` holds the power, `soc_celsius`, the thermal state and the first two fans
+/// as `second`'s record holds them, and no GPU power, which the record does not hold.
+fn assert_shows_the_energy_of_the_record(shown: &Value, second: &MachineSecond) {
+    assert!(second.power_watts.is_some());
+    assert!(second.soc_celsius.is_some());
+    assert!(second.thermal_pressure.is_some());
+    assert_eq!(shown["power_watts"], json!(second.power_watts));
+    assert_eq!(shown["soc_celsius"], json!(second.soc_celsius));
+    assert_eq!(shown["thermal_pressure"], json!(second.thermal_pressure));
+    assert_eq!(shown["fan_rpm"], json!(second.fan_rpm));
+    assert!(shown["gpu_watts"].is_null());
+}
+
 /// Asserts that `shown` holds the bytes received and sent as `second`'s record holds them, and
 /// no packet or error rate, which the record does not hold.
 fn assert_shows_the_traffic_of_the_record(shown: &Value, second: &MachineSecond) {
@@ -1108,6 +1146,9 @@ followed_page_rests_its_reader_cases! {
     // GPU: the GPU power reads the newest second's.
     a_followed_gpu_page_rests_its_reader_and_draws_each_newer_view, GPU,
         "/gpu_watts", |second| Some(gpu_watts(second));
+    // Energy: the third fan, which the record does not hold, reads the newest second's.
+    a_followed_energy_page_rests_its_reader_and_draws_each_newer_view, ENERGY,
+        "/fan_rpm/2", |second| fan_rpm(second)[2];
 }
 
 /// Asserts that `page`, following the newest second, rests its reader after its first reading
@@ -1891,8 +1932,8 @@ mod when_the_page_has_a_chart_by_app {
     fn an_energy_page_opened_from_the_cpu_page_draws_its_chart_by_app_from_the_same_view() {
         // Goal: the Energy page opened from the CPU page before the store hands over a newer
         // View draws its own chart by App from the View the CPU page drew, and neither the CPU
-        // page's chart nor none, though the two pages draw no machine chart. Method: the CPU
-        // page takes a View, then the Energy page opens and the worker reads it.
+        // page's chart nor none. Method: the CPU page takes a View, then the Energy page opens
+        // and the worker reads it.
         let view = Arc::new(charted_view());
 
         let drawn = drawn_after_switch("cpu", "energy", &view);
@@ -1952,7 +1993,7 @@ mod when_the_page_has_a_chart_by_app {
     fn an_energy_page_hovered_after_the_cpu_page_draws_the_chart_its_reading_brings() {
         // Goal: the Energy page opened from the CPU page, which the worker answers under a
         // hover, draws the chart by App its reading brings and reads that very history, never
-        // the charts the CPU page drew from the View, though neither page draws a machine chart.
+        // the charts the CPU page drew from the View.
         // Method: the CPU page takes a View, the Energy page opens, a hover of the worker's
         // readings begins, and the worker answers with the history of power by App.
         let view = Arc::new(charted_view());
@@ -2200,6 +2241,8 @@ mod when_the_page_has_a_chart_by_app {
                 "gpu";
             cpu_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
                 "cpu";
+            energy_draws_the_machine_charts_of_the_view_for_a_reading_left_to_a_hidden_window,
+                "energy";
         }
 
         #[test]
@@ -2286,23 +2329,6 @@ mod when_the_page_has_a_chart_by_app {
             dashboard.take_view(Arc::new(charted_view()));
 
             assert_eq!(dashboard.app_chart_source(), AppChartSource::Reading);
-        }
-
-        #[test]
-        fn a_hover_reads_the_chart_drawn_from_the_view() {
-            // Goal: a hover on a page that draws only its chart by App from the View, and whose
-            // reading left that chart to it, reads the chart the View drew, and the worker goes
-            // on building none. Method: the Energy page drawn from a View takes a reading that
-            // left the chart to it, then a hover of the worker's readings begins.
-            let mut dashboard = drawn_from_view("energy");
-            dashboard.accept(left_to_the_view("energy", &trends()));
-            let drawn = std::ptr::from_ref(dashboard.attribution_history(Metric::Power).unwrap());
-
-            dashboard.preview = Some(preview(&dashboard));
-
-            let hovered = dashboard.attribution_history(Metric::Power).unwrap();
-            assert!(std::ptr::eq(hovered, drawn));
-            assert_eq!(dashboard.app_chart_source(), AppChartSource::View);
         }
 
         #[test]
@@ -3539,6 +3565,15 @@ fn gpu_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
         .collect()
 }
 
+/// The seconds at `wall_seconds`, each with a complete reading of the power, sensor and thermal
+/// state it holds and of the GPU power and three fans, as the store holds a second it read.
+fn energy_seconds(wall_seconds: &[u64]) -> Vec<MachineSecond> {
+    wall_seconds
+        .iter()
+        .map(|&wall_second| with_energy_reading(reading_at(wall_second, 0)))
+        .collect()
+}
+
 /// The seconds 9,999, 10,000 and 10,005, five seconds newer than the worker's readings.
 fn newer_seconds() -> [MachineSecond; 3] {
     [
@@ -3709,26 +3744,6 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn a_followed_energy_page_drawn_from_the_view_reads_no_app_history(cx: &mut gpui::TestAppContext) {
-    // Goal: while the Energy page draws its chart by App from the store's View, the worker's
-    // reading of each new second builds no App history of it and still ranks the Apps a hover
-    // reads, and the page reads the chart the View drew. Method: the Energy page over a real store
-    // and reader settles on the View, then the recording publishes a second and the page takes
-    // the worker's reading of it.
-    let (recording, page) = followed_page_read_again(cx, "energy");
-
-    cx.update(|cx| {
-        let page = page.read(cx);
-        let snapshot = page.snapshot.as_ref().unwrap();
-        assert!(snapshot.app_attribution_history.is_none());
-        assert!(snapshot.app_ranks.is_some());
-        assert!(page.attribution_history(Metric::Power).is_some());
-    });
-    drop(recording);
-    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
-}
-
-#[gpui::test]
 fn a_followed_memory_page_reads_no_resident_history_past_its_first_reading(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -3818,43 +3833,6 @@ fn tick_until_drawn(
 }
 
 #[gpui::test]
-fn an_energy_page_hidden_with_a_reading_on_its_way_keeps_its_chart_by_app(
-    cx: &mut gpui::TestAppContext,
-) {
-    // Goal: a reading the worker built while the View drew the chart, which the page takes
-    // after macOS hid the window and the page let go of the View, shows the chart drawn from
-    // the View with its history, and so does the window shown again before the store's next
-    // View. Method: the Energy page over a real store and reader settles on the View, the
-    // recording publishes a second, the worker reads it, macOS hides the window, and the page
-    // ticks, then macOS shows the window and the page ticks again.
-    let (mut recording, page) = followed_page_read_again(cx, "energy");
-    recording.publish_resources();
-    let second = recording.last_second();
-    wait_for_worker_reading(cx, &page, second);
-
-    page.update(cx, |page, cx| page.observe_visibility_callback(false, cx));
-    page.update(cx, LiveDashboard::tick);
-
-    cx.update(|cx| {
-        let page = page.read(cx);
-        let snapshot = page.snapshot.as_ref().unwrap();
-        assert_eq!(snapshot.selection["second"].as_u64(), Some(second));
-        assert!(page.store_view.is_none());
-        assert!(by_app_holds(&page.panels, Metric::Power.panel_id()));
-        assert!(page.attribution_history(Metric::Power).is_some());
-    });
-    page.update(cx, |page, cx| page.observe_visibility_callback(true, cx));
-    page.update(cx, LiveDashboard::tick);
-    cx.update(|cx| {
-        let page = page.read(cx);
-        assert!(by_app_holds(&page.panels, Metric::Power.panel_id()));
-        assert!(page.attribution_history(Metric::Power).is_some());
-    });
-    drop(recording);
-    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
-}
-
-#[gpui::test]
 fn a_second_inspected_on_an_energy_page_drawn_from_the_view_reads_its_chart_until_the_reply(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -3863,7 +3841,7 @@ fn a_second_inspected_on_an_energy_page_drawn_from_the_view_reads_its_chart_unti
     // drew until the reading of that second replaces them. Method: the Energy page over a real
     // store and reader settles on the View and the worker's reading, then inspects the second
     // before the newest.
-    let (recording, page) = followed_page_read_again(cx, "energy");
+    let (recording, page) = followed_page_settled(cx, "energy");
     let second = recording.last_second() - 1;
 
     page.update(cx, |page, cx| page.inspect(second, cx));
@@ -3876,48 +3854,6 @@ fn a_second_inspected_on_an_energy_page_drawn_from_the_view_reads_its_chart_unti
     });
     drop(recording);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
-}
-
-/// Waits, without ticking `page`, until its worker holds a reading of `second` for the page.
-fn wait_for_worker_reading(
-    cx: &mut gpui::TestAppContext,
-    page: &gpui::Entity<LiveDashboard>,
-    second: u64,
-) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(4);
-    for _ in 0..4_000 {
-        let read = cx.update(|cx| page.read(cx).worker.output_second());
-        if read == Some(second) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the worker never read {second}: {read:?}"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    panic!("the worker never read {second}");
-}
-
-/// Whether `panels` hold the chart by App of id `id`.
-fn by_app_holds(panels: &[Rc<Panel>], id: &str) -> bool {
-    by_app(panels).iter().any(|(drawn, _, _)| drawn == id)
-}
-
-/// The page `route` over a real store and reader following a live recording, settled on the
-/// store's View of its second publication and then on the worker's reading of a third.
-fn followed_page_read_again(
-    cx: &mut gpui::TestAppContext,
-    route: &str,
-) -> (
-    crate::live_dashboard::input_tests::source_mode::LiveRecording,
-    gpui::Entity<LiveDashboard>,
-) {
-    let (mut recording, page) = followed_page_settled(cx, route);
-
-    recording.publish_resources();
-    tick_until_read(cx, &page, recording.last_second());
-    (recording, page)
 }
 
 mod when_the_view_draws_the_page_whole {
@@ -4197,37 +4133,6 @@ fn followed_page_settled(
 
     tick_until_settled(cx, &page, 2);
     (recording, page)
-}
-
-/// Ticks `page` until it shows the worker's reading of `second` with nothing more to come and
-/// draws from the store's View of that second.
-fn tick_until_read(cx: &mut gpui::TestAppContext, page: &gpui::Entity<LiveDashboard>, second: u64) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(4);
-    for _ in 0..4_000 {
-        page.update(cx, LiveDashboard::tick);
-        let (read, drawn, awaiting) = cx.update(|cx| {
-            let page = page.read(cx);
-            let read = page
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.selection["second"].as_u64());
-            let drawn = page
-                .store_view
-                .as_ref()
-                .and_then(|view| view.seconds.last())
-                .map(|newest| newest.wall_ns / super::NANOSECONDS_PER_SECOND);
-            (read, drawn, page.awaiting_reply())
-        });
-        if read == Some(second) && drawn == Some(second) && !awaiting {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the page never read {second}: {read:?}, {drawn:?}"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    panic!("the page never read {second}");
 }
 
 #[gpui::test]
@@ -4558,20 +4463,25 @@ mod when_the_store_or_the_worker_wakes_the_page {
 
     #[gpui::test]
     fn the_workers_wake_draws_the_view_with_the_reading(cx: &mut TestAppContext) {
-        // Goal: a followed page draws a second once, with the store's View and the worker's
-        // reading of it together, since the reading is on its way when the store wakes the page.
-        // Method: hold the worker at the start of a step, publish a second, wake the page as the
-        // store does, let the worker read the second, wake the page as the worker does, and count
+        // Goal: a followed page that reads each second takes a second's View with the worker's
+        // reading of it and draws the second once, since the reading is on its way when the
+        // store wakes the page, so the store's wake leaves the View to it. Method: hold the
+        // worker of the Battery page, which reads each second, at the start of a step, publish a
+        // second, wake the page as the store does, and look at the View the page holds; then let
+        // the worker read the second, wake the page as the worker does, and look again and count
         // the page's draws.
-        let mut followed = Followed::open(cx, "energy");
+        let mut followed = Followed::open(cx, "battery");
         followed.wait_for_a_keyed_question();
+        let earlier = followed.view_publication();
         let drawn = followed.renders();
-        followed.publish_with_the_worker_held();
-
+        let published = followed.publish_with_the_worker_held();
         followed.store_wakes();
+        assert_eq!(followed.view_publication(), earlier);
+
         followed.worker_reads();
         followed.worker_wakes();
 
+        assert_eq!(followed.view_publication(), Some(published));
         assert_eq!(followed.renders(), drawn + 1);
         assert_eq!(followed.reading_second(), followed.view_second());
     }
@@ -4596,19 +4506,21 @@ mod when_the_store_or_the_worker_wakes_the_page {
     #[gpui::test]
     fn the_workers_wake_that_runs_first_takes_the_view_with_the_reading(cx: &mut TestAppContext) {
         // Goal: the run loop may run the worker's wake before the store's, and the page still
-        // draws the second once, since the worker's tick takes the View too and the store's wake
-        // after it finds nothing new. Method: hold the worker, publish a second, let the worker
-        // read it, wake the page as the worker does and then as the store does, and count the
-        // page's draws.
-        let mut followed = Followed::open(cx, "energy");
+        // takes the second's View with its reading and draws the second once, since the
+        // worker's tick takes the View too and the store's wake after it finds nothing new.
+        // Method: hold the worker of the Battery page, which reads each second, publish a second,
+        // let the worker read it, wake the page as the worker does and then as the store does,
+        // look at the View the page holds, and count the page's draws.
+        let mut followed = Followed::open(cx, "battery");
         followed.wait_for_a_keyed_question();
         let drawn = followed.renders();
-        followed.publish_with_the_worker_held();
+        let published = followed.publish_with_the_worker_held();
         followed.worker_reads();
 
         followed.worker_wakes();
         followed.store_wakes();
 
+        assert_eq!(followed.view_publication(), Some(published));
         assert_eq!(followed.renders(), drawn + 1);
         assert_eq!(followed.reading_second(), followed.view_second());
     }
@@ -4616,22 +4528,21 @@ mod when_the_store_or_the_worker_wakes_the_page {
     #[gpui::test]
     fn the_timers_tick_takes_a_view_no_reading_came_with(cx: &mut TestAppContext) {
         // Goal: a View whose reading never comes waits no longer than the page's next tick.
-        // Method: hold the worker so that its reading does not come, publish a second, wake the
-        // page as the store does, which leaves the View to the reading, and tick it as its timer
-        // does, and count the page's draws.
-        let mut followed = Followed::open(cx, "energy");
+        // Method: hold the worker of the Battery page, which reads each second, so that its
+        // reading does not come, publish a second, wake the page as the store does, which leaves
+        // the View to the reading, tick it as its timer does, and look at the View the page
+        // holds. The Battery page draws nothing from a View, so the test asserts the View it
+        // took rather than a draw.
+        let mut followed = Followed::open(cx, "battery");
         followed.wait_for_a_keyed_question();
         let earlier = followed.view_publication();
-        let drawn = followed.renders();
         let published = followed.publish_with_the_worker_held();
         followed.store_wakes();
         assert_eq!(followed.view_publication(), earlier);
-        assert_eq!(followed.renders(), drawn);
 
         followed.timer_ticks();
 
         assert_eq!(followed.view_publication(), Some(published));
-        assert_eq!(followed.renders(), drawn + 1);
     }
 
     #[gpui::test]
@@ -4689,30 +4600,6 @@ mod when_the_store_or_the_worker_wakes_the_page {
         page.update(&mut window, LiveDashboard::wake_from_worker);
 
         close_dashboard_window(&mut window, &page);
-    }
-
-    mod when_one_tick_takes_the_reading_and_the_view {
-        use super::*;
-
-        #[gpui::test]
-        fn the_page_builds_its_charts_by_app_once(cx: &mut TestAppContext) {
-            // Goal: a followed page that reads each second builds its charts by App once in a tick
-            // that takes the worker's reading and the store's View of one second, rather than
-            // from the earlier View for the reading and again from the new one. Method: hold the
-            // worker, publish a second, wake the page as the store does, let the worker read the
-            // second, wake the page as the worker does, and count the page's builds.
-            let mut followed = Followed::open(cx, "energy");
-            followed.wait_for_a_keyed_question();
-            let built = followed.builds();
-            followed.publish_with_the_worker_held();
-            followed.store_wakes();
-            followed.worker_reads();
-
-            followed.worker_wakes();
-
-            assert_eq!(followed.builds(), built + 1);
-            assert_eq!(followed.reading_second(), followed.view_second());
-        }
     }
 
     mod when_the_tick_looks_ahead_of_the_pages_reading {
@@ -4915,11 +4802,6 @@ mod when_the_store_or_the_worker_wakes_the_page {
 
         fn renders(&self) -> u64 {
             self.page.read_with(&self.window, |page, _| page.renders)
-        }
-
-        fn builds(&self) -> u64 {
-            self.page
-                .read_with(&self.window, |page, _| page.store_panels.builds)
         }
 
         fn view_second(&self) -> Option<u64> {

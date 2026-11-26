@@ -1253,12 +1253,12 @@ mod when_the_view_draws_the_page_whole {
     }
 
     #[test]
-    fn the_energy_page_reads_its_older_tail_while_the_view_draws_its_chart_by_app() {
-        // Goal: the Energy page, whose chart by App alone the View draws, draws its machine
-        // charts from its reading, so its reading reads the older tail they draw although the
-        // window says the View draws its chart. Method: say the View draws the chart, open the
-        // Energy page on a Store over more minutes sealed before its full detail than its
-        // session reads at once, and read it to the end.
+    fn the_energy_page_leaves_its_older_tail_to_the_view_that_draws_it() {
+        // Goal: the Energy page, whose machine charts the View draws, leaves the older tail they
+        // draw to the View, so its reading reads no tail where the window says the View draws
+        // the page. Method: say the View draws the page, open the Energy page on a Store over
+        // more minutes sealed before its full detail than its session reads at once, and read it
+        // to the end.
         let recording = crate::live_source::tests::SealedRecording::with_a_long_older_kept_tail();
         let (_store, mut adapter) = complete_store_page(&recording, "energy");
         adapter.command.request.earlier = crate::live_source::Earlier::Load;
@@ -1270,10 +1270,7 @@ mod when_the_view_draws_the_page_whole {
         let page = adapter.finished_within(Duration::from_secs(10));
 
         assert_eq!(page.app_chart_source, AppChartSource::View);
-        assert_eq!(
-            page.selection["earlier_trends"].as_array().unwrap().len(),
-            8
-        );
+        assert!(page.selection.get("earlier_trends").is_none());
     }
 
     #[test]

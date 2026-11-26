@@ -242,6 +242,13 @@ impl CompleteMachine {
         self.point.gpu_watts
     }
 
+    /// Each fan's speed, one for each channel the reading counts, `None` where the reading holds
+    /// no fans. A channel the SMC read no speed of holds `None`.
+    #[must_use]
+    pub fn fan_rpm(&self) -> Option<&[Option<f64>]> {
+        self.point.fan_rpm.as_deref()
+    }
+
     /// The unified memory the GPU driver reported in use, `None` where the reading holds no
     /// system group.
     #[must_use]
@@ -533,6 +540,30 @@ impl CompleteMachine {
         };
         point.system.gpu_memory_in_use_bytes = in_use_bytes;
         point.system.gpu_memory_allocated_bytes = allocated_bytes;
+
+        Self::of_point(second, point, budget)
+    }
+
+    /// The complete reading of `second` whose power, `soc_celsius` and thermal state read what the
+    /// second's record holds, whose GPU power is `gpu_watts` and whose fans read `fan_rpm`, one
+    /// speed for each channel, charged to `budget`, so a test outside the viewer can give a second
+    /// the complete reading the Energy page draws.
+    #[must_use]
+    pub fn of_energy(
+        second: &MachineSecond,
+        gpu_watts: Option<f64>,
+        fan_rpm: Vec<Option<f64>>,
+        budget: &Arc<ByteBudget>,
+    ) -> Arc<Self> {
+        assert!(fan_rpm.len() <= usize::from(collector::smc::FANS_MAX));
+        let mut point = Point {
+            power_watts: second.power_watts.map(f64::from),
+            soc_celsius: second.soc_celsius.map(f64::from),
+            gpu_watts,
+            fan_rpm: Some(fan_rpm),
+            ..Point::default()
+        };
+        point.system.thermal_pressure = second.thermal_pressure.map(u64::from);
 
         Self::of_point(second, point, budget)
     }

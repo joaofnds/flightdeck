@@ -9,15 +9,16 @@ use super::super::{JoinedPoints, RecentPoints, empty_panels, overview, panels};
 use super::{Observations, ViewPanelsPoints, overview_point_second, view_panels};
 use crate::data::Panel;
 use crate::live_projection::{
-    CPU_TEMPERATURE_ID, FREQUENCY_ID, GPU_FREQUENCY_ID, GPU_MEMORY_ID, GPU_TEMPERATURE_ID,
-    LOAD_AVERAGE_ID, OPEN_FILES_ID,
+    AREA_MAXIMA_ID, CPU_TEMPERATURE_ID, FANS_ID, FREQUENCY_ID, GPU_FREQUENCY_ID, GPU_MEMORY_ID,
+    GPU_TEMPERATURE_ID, LOAD_AVERAGE_ID, OPEN_FILES_ID, THERMAL_STATE_ID,
 };
 use crate::live_store_fixtures::{
-    cpu_readings, gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates,
+    cpu_readings, fan_rpm, gpu_memory_bytes, gpu_watts, levels, memory_rates, network_rates,
     open_files_percent, overview_panels, reading_at, selection, selection_of_json, storage_rates,
     summary_point, summary_selection, trend_point, view, with_cpu_reading, with_cpu_readings,
-    with_gpu_reading, with_gpu_readings, with_memory_rates, with_memory_reading,
-    with_network_rates, with_network_reading, with_storage_rates, with_storage_reading,
+    with_energy_reading, with_energy_readings, with_gpu_reading, with_gpu_readings,
+    with_memory_rates, with_memory_reading, with_network_rates, with_network_reading,
+    with_storage_rates, with_storage_reading,
 };
 
 /// `place` as a trend point's reach names a reading.
@@ -342,6 +343,41 @@ const CPU: Page = Page {
     states_at_a_refused_second: &[],
 };
 
+const ENERGY: Page = Page {
+    route: "energy",
+    with_reading: with_energy_reading,
+    chart_count: 7,
+    unrecorded: &[
+        (AREA_MAXIMA_ID, "Source SoC group max"),
+        (AREA_MAXIMA_ID, "Voltage regulators"),
+        (AREA_MAXIMA_ID, "Display"),
+        (AREA_MAXIMA_ID, "Board"),
+        (AREA_MAXIMA_ID, "Wireless"),
+        (AREA_MAXIMA_ID, "Ambient"),
+    ],
+    hour: energy_hour,
+    peak_lines: &[
+        ("live-energy", 0),
+        ("live-gpu-power", 0),
+        ("live-power-breakdown", 1),
+        ("live-soc-temperature", 0),
+        (FANS_ID, 0),
+        (FANS_ID, 1),
+        (FANS_ID, 2),
+    ],
+    held_at_a_refused_second: &[("live-energy", 0), ("live-soc-temperature", 0)],
+    missing_at_a_refused_second: &[
+        ("live-gpu-power", 0),
+        ("live-power-breakdown", 0),
+        ("live-power-breakdown", 1),
+        (FANS_ID, 0),
+        (FANS_ID, 1),
+        (FANS_ID, 2),
+    ],
+    // The refused second reads level 4, Sleeping, which the thermal chart draws as Critical.
+    states_at_a_refused_second: &[(THERMAL_STATE_ID, 3.0)],
+};
+
 macro_rules! view_drawn_as_the_readings_draw_it_cases {
     ($($name:ident, $page:expr;)*) => {$(
         #[test]
@@ -368,6 +404,9 @@ view_drawn_as_the_readings_draw_it_cases! {
     the_gpu_charts_of_the_view_draw_as_the_readings_draw_them, GPU;
     // CPU: every line draws a value, the Cores line too, which the readings' levels give.
     the_cpu_charts_of_the_view_draw_as_the_readings_draw_them, CPU;
+    // Energy: every line draws a value, each of three fan channels too, but the six area maxima
+    // recorded nowhere.
+    the_energy_charts_of_the_view_draw_as_the_readings_draw_them, ENERGY;
 }
 
 /// Asserts that `page` draws the same charts from a View as from the trend points of the same
@@ -411,6 +450,118 @@ fn assert_lines_drawn(panels: &[std::rc::Rc<Panel>], unrecorded: &[(&str, &str)]
             }
         }
     }
+}
+
+#[test]
+fn the_fan_chart_of_the_view_draws_every_channel_the_readings_draw() {
+    // Goal: the Energy page's fan chart drawn from the View draws as many channels as the trend
+    // points of the same complete readings draw, past the two a second's record holds. Method:
+    // seconds whose complete readings hold three fan channels, drawn from a View and from their
+    // trend points, and the fan chart of each.
+    let seconds =
+        [9_998, 9_999, 10_000].map(|wall_second| with_energy_reading(reading_at(wall_second, 3)));
+    let view = view(1, &[], &seconds);
+    let expected = panels(
+        "energy",
+        &selection_of_json(&summary_selection(&[], &seconds)),
+        None,
+    )
+    .unwrap();
+
+    let drawn = view_panels("energy", &view, levels().as_ref()).unwrap();
+
+    let fans = panel_named(&drawn, FANS_ID);
+    assert_eq!(fans, panel_named(&expected, FANS_ID));
+    assert_eq!(fans.lines.len(), 3);
+}
+
+#[test]
+fn the_fan_chart_of_the_view_draws_uneven_and_unread_channels_as_the_readings_draw_them() {
+    // Goal: the View's fan chart draws a stopped fan as zero, an unread channel and a second
+    // with no fans as gaps, and as many channels as the longest reading holds, as the trend
+    // points of the same complete readings draw them. Method: a second whose fans read a stopped
+    // zero and an unread channel, a second whose complete reading holds no fans, and a second
+    // with one fan, drawn from a View and from their trend points.
+    let seconds = [
+        with_energy_readings(reading_at(9_998, 3), None, vec![Some(0.0), None]),
+        with_gpu_reading(reading_at(9_999, 3)),
+        with_energy_readings(reading_at(10_000, 3), None, vec![Some(1_200.0)]),
+    ];
+    let view = view(1, &[], &seconds);
+    let expected = panels(
+        "energy",
+        &selection_of_json(&summary_selection(&[], &seconds)),
+        None,
+    )
+    .unwrap();
+
+    let drawn = view_panels("energy", &view, levels().as_ref()).unwrap();
+
+    let fans = panel_named(&drawn, FANS_ID);
+    assert_eq!(fans, panel_named(&expected, FANS_ID));
+    assert_eq!(fans.lines.len(), 2);
+}
+
+#[test]
+fn the_power_breakdown_of_the_view_draws_the_remainders_the_readings_draw() {
+    // Goal: the View's power breakdown draws a measured zero and a negative remainder as they
+    // are, and no remainder where either power is unread, as the trend points of the same
+    // readings draw it. Method: seconds whose system and GPU power are 8 and 2, 0 and 0, 2 and
+    // 5, 4 and unread, and unread and 2, drawn from a View and from their trend points, and the
+    // power breakdown of each.
+    let powers = [
+        (Some(8.0), Some(2.0)),
+        (Some(0.0), Some(0.0)),
+        (Some(2.0), Some(5.0)),
+        (Some(4.0), None),
+        (None, Some(2.0)),
+    ];
+    let seconds = (9_996..=10_000)
+        .zip(powers)
+        .map(|(wall_second, (system, gpu))| {
+            let mut second = reading_at(wall_second, 3);
+            second.power_watts = system;
+            with_energy_readings(second, gpu, Vec::new())
+        })
+        .collect::<Vec<_>>();
+    let view = view(1, &[], &seconds);
+    let expected = panels(
+        "energy",
+        &selection_of_json(&summary_selection(&[], &seconds)),
+        None,
+    )
+    .unwrap();
+
+    let drawn = view_panels("energy", &view, levels().as_ref()).unwrap();
+
+    let breakdown = panel_named(&drawn, "live-power-breakdown");
+    assert_eq!(breakdown, panel_named(&expected, "live-power-breakdown"));
+    assert_eq!(
+        breakdown.lines[0].values,
+        [Some(6.0), Some(0.0), Some(-3.0), None, None]
+    );
+}
+
+#[test]
+fn the_view_refuses_a_power_remainder_that_is_not_finite() {
+    // Goal: the View draws no power breakdown whose remainder overflows, as the readings draw
+    // none, since a finite system and GPU power can still differ by more than a float holds.
+    // Method: a second whose system power is 3e38 and GPU power -3e38, drawn from a View and from
+    // its trend points.
+    let mut second = reading_at(10_000, 3);
+    second.power_watts = Some(3.0e38);
+    let seconds = [with_energy_readings(second, Some(-3.0e38), Vec::new())];
+    let view = view(1, &[], &seconds);
+    let read = panels(
+        "energy",
+        &selection_of_json(&summary_selection(&[], &seconds)),
+        None,
+    );
+
+    let drawn = view_panels("energy", &view, levels().as_ref());
+
+    assert!(read.unwrap_err().contains("power remainder"));
+    assert!(drawn.unwrap_err().contains("power remainder"));
 }
 
 /// The first second a page drawn from a View whose newest second is 10,000 draws in full detail,
@@ -575,6 +726,36 @@ fn cpu_hour() -> Vec<MachineSecond> {
     })
 }
 
+/// The `hour` of the complete readings the Energy page draws.
+fn energy_hour() -> Vec<MachineSecond> {
+    hour(|mut second, wall_second, moment| {
+        // Every reading moves over each stretch, so the reach of each names it.
+        let quarter_degrees = u16::try_from(wall_second % 40).unwrap();
+        second.soc_celsius = Some(f32::from(quarter_degrees) / 4.0 + 45.0);
+        let mut watts = Some(gpu_watts(&second));
+        let mut fans = fan_rpm(&second);
+        if moment == HourSecond::Peak {
+            second.power_watts = Some(500.0);
+            second.soc_celsius = Some(110.0);
+            watts = watts.map(|watts| watts * 10.0);
+            fans = fans
+                .into_iter()
+                .map(|rpm| rpm.map(|rpm| rpm * 4.0))
+                .collect();
+        }
+        if moment == HourSecond::AfterBreak {
+            watts = None;
+        }
+        // The third fan reads none over the older stretch from 7,200, so that stretch reaches
+        // no reading of it, rather than a stopped fan.
+        if (7_200..7_210).contains(&wall_second) {
+            fans[2] = None;
+        }
+
+        with_energy_readings(second, watts, fans)
+    })
+}
+
 /// `seconds` by the stretch each lies in, oldest first.
 fn seconds_by_stretch(
     seconds: &[MachineSecond],
@@ -673,6 +854,9 @@ hour_drawn_as_the_readings_draw_it_cases! {
     // CPU: the peaks reach the activity line, both frequency lines, the three load averages,
     // both open files lines and the sensor line.
     the_cpu_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, CPU;
+    // Energy: the peaks reach the system power, GPU power and SoC sensor lines, the stacked power
+    // chart's GPU line, which reaches the system power, and each of three fan channels.
+    the_energy_charts_of_the_view_draw_an_hour_as_the_readings_draw_it, ENERGY;
 }
 
 /// Asserts that `page` draws its hour, peaks included, from a View as from the trend points
@@ -757,6 +941,10 @@ refused_second_drawn_as_it_holds_cases! {
     // CPU: the activity, the sensor and the Cores line the second's logical CPUs give are held,
     // and the clocks, load averages and open files only a complete reading holds are missing.
     at_a_refused_second_the_cpu_charts_draw_what_the_second_holds, CPU;
+    // Energy: the system power and SoC sensor the second holds itself are held, the GPU power,
+    // the remainder and every fan channel only a complete reading holds are missing, and the
+    // thermal chart draws the second's state.
+    at_a_refused_second_the_energy_charts_draw_what_the_second_holds, ENERGY;
 }
 
 /// Asserts that at a refused second `page` draws what the second holds itself, as the worker

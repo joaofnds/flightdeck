@@ -6,22 +6,33 @@
 
 use collector::machine::Pressure;
 use collector::ring::RunIdentity;
+use collector::smc::FANS_MAX;
 use model::rates::number;
 pub use model::summary::MachinePlace;
 use model::summary::{CategoryHighest, Highest, RateHighest};
 
 use super::{
-    MachineSecond, MemoryRate, NetworkRate, PointRate, STRETCHES_HELD_MAX, STRETCHES_MAX,
-    StorageRate,
+    CompleteMachine, MachineSecond, MemoryRate, NetworkRate, PointRate, STRETCHES_HELD_MAX,
+    STRETCHES_MAX, StorageRate,
 };
 
 const _: () = {
     // `Stretches::new` allocates a stretch for each closed stretch the store holds, for each it
     // takes while a View holds their buffers, and for the open one, and each stretch owns one
-    // `MachineStretch`, so the Mac's readings cost a store about 1.1 MiB.
-    assert!(size_of::<MachineStretch>() <= 3_008);
+    // `MachineStretch`, so the Mac's readings cost a store about 1.3 MiB.
+    assert!(size_of::<MachineStretch>() <= 3_648);
     let allocated = STRETCHES_MAX + STRETCHES_HELD_MAX + 1;
-    assert!(allocated * size_of::<MachineStretch>() <= 1_131_008);
+    assert!(allocated * size_of::<MachineStretch>() <= 1_371_648);
+};
+
+/// The most fan channels the collector reads, `FANS_MAX`, so a stretch keeps a series of each
+/// and a chart draws no more.
+pub const FAN_CHANNELS_MAX: usize = 10;
+const _: () = {
+    // A const cannot widen `FANS_MAX` through `usize::from`, so the count is compared byte by
+    // byte: its low byte is `FANS_MAX` and it has no other.
+    assert!(FAN_CHANNELS_MAX.to_le_bytes()[0] == FANS_MAX);
+    assert!(FAN_CHANNELS_MAX < 256);
 };
 
 pub type Gauge = Highest<MachinePlace>;
@@ -74,6 +85,11 @@ pub struct MachineStretch {
     pub open_files: Gauge,
     pub open_files_percent: Gauge,
     pub fan_mean_rpm: Gauge,
+    /// Each fan channel's speed, channel 0 first, as a second's complete reading holds it
+    /// (`CompleteMachine::fan_rpm`). Each reads none at a second without one, the first two
+    /// too though the second's record holds them, since the reader draws no fan at such a
+    /// second and the stretch's peaks must match what it draws.
+    pub fan_rpm: [Gauge; FAN_CHANNELS_MAX],
     pub pressure: Category,
     pub thermal_pressure: Category,
 }
@@ -112,6 +128,11 @@ impl MachineStretch {
             .push(second.gpu_memory_allocated_bytes().map(number), place);
         self.fan_mean_rpm
             .push(second.fan_mean_rpm.map(f64::from), place);
+        let fans = second.complete().and_then(CompleteMachine::fan_rpm);
+        for (channel, series) in self.fan_rpm.iter_mut().enumerate() {
+            let rpm = fans.and_then(|fans| fans.get(channel).copied().flatten());
+            series.push(rpm, place);
+        }
         self.thermal_pressure.push(second.thermal_pressure, place);
     }
 

@@ -1,12 +1,9 @@
 //! The page drawn from the store's newest View, which the window takes each tick. While they
-//! follow the newest second, Overview, Memory, Network, Storage, GPU and CPU draw their machine
-//! charts and readouts from it. Overview also draws its CPU, memory, energy and disk charts by
-//! App, its top Apps and its hardware figure from it, Memory its chart of resident memory by App
-//! and its top Apps, Storage its chart of disk bytes by App and its top Apps, GPU its chart of GPU
-//! time by App and its top Apps, and CPU its chart of CPU time by App, its top Apps and the bars
-//! and heatmap of its logical CPUs. The Energy page draws only its chart by App from it while it
-//! follows the newest second, and a chosen second, a hover's reading and every other chart draw
-//! from the worker's readings.
+//! follow the newest second or hold one, the pages `store_panels_machine` names draw their
+//! machine charts and readouts from it, with the charts by App and top Apps each shows, and
+//! Overview its hardware figure and CPU the bars and heatmap of its logical CPUs too. A second
+//! the page shows with no hold, as one inspected or typed as a clock time, and a hover of a
+//! second the View does not hold draw from the worker's readings.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -293,8 +290,7 @@ pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     /// The page whose machine charts they are, with its charts by App under that page's titles,
-    /// or none where they are only the charts by App a page that draws no machine chart from the
-    /// View draws.
+    /// or none before the first View.
     machine: Option<&'static str>,
     /// The wall seconds of the range the charts by App chose the Apps they draw over, or none
     /// before the first View.
@@ -302,12 +298,8 @@ pub(super) struct StorePanels {
     panels: Vec<Rc<Panel>>,
     /// The wall second of each point of `panels`, in the order of their positions.
     seconds: Vec<u64>,
-    /// The charts by App `apps` and `histories` were built for, which the page shows only on a
-    /// page that draws the same charts. It names none before the first View and on a page that
-    /// draws no chart by App, as Network.
-    charts: AppCharts,
-    /// The charts by App the View draws, of resident memory and of `APP_METRICS`, those `charts`
-    /// names, leaving out each it holds too little for.
+    /// The charts by App the View draws, of resident memory and of `APP_METRICS`, those
+    /// `charts` names, leaving out each it holds too little for.
     apps: Vec<Rc<Panel>>,
     /// The histories `apps` draw, one for each chart `charts` names, until the page builds the
     /// charts of a newer View, which takes them. A build that fails after taking them leaves
@@ -362,21 +354,23 @@ impl StorePanels {
         self.builds
     }
 
-    /// Whether these are the charts drawn for the page `route`: for its kind of page, with the
-    /// charts by App it draws.
+    /// Whether these are the charts drawn for the page `route`: for its kind of page, which
+    /// names the charts by App it draws too.
     fn drawn_for(&self, route: &str) -> bool {
-        if self.machine != store_panels_machine(route) {
-            return false;
-        }
+        self.machine == store_panels_machine(route)
+    }
 
-        self.charts == AppCharts::of(route)
+    /// The charts by App `apps` and `histories` were built for, those of the page `machine`
+    /// names, or none before the first View.
+    fn charts(&self) -> AppCharts {
+        self.machine.map_or_else(AppCharts::default, AppCharts::of)
     }
 }
 
 impl LiveDashboard {
     /// Takes `view`, the store's newest, and draws from it the charts the page draws from the
-    /// store, the machine charts of Overview, Memory, Network, Storage, GPU and CPU among them.
-    /// Answers whether the page changed.
+    /// store, the machine charts of each page `store_panels_machine` names among them. Answers
+    /// whether the page changed.
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
         // While the CPU page shows the bars of a View, it builds the logical CPUs of a newer one
         // before it puts any of that View in place, so a View that cannot build them waits aside
@@ -454,9 +448,6 @@ impl LiveDashboard {
             if let Some(view) = waiting {
                 self.store_view_place(view);
             }
-        }
-        if !store_view_draws_machine(&self.request.route) {
-            return self.draw_store_view_apps();
         }
         let Some(version) = self.drawn_store_view().map(|view| view.version) else {
             if self.draw_store_view_remnant() {
@@ -603,55 +594,6 @@ impl LiveDashboard {
                         .followed_store_view()
                         .is_some_and(|view| view.version == logical_cpus.version)
             })
-    }
-
-    /// Puts the page's chart by App drawn from the store's View in place of the worker's, on a
-    /// page that draws no machine chart from the View but draws a chart by App from it, drawing
-    /// the charts once for each View while no hover holds the page still. Answers whether it put
-    /// the chart in place.
-    fn draw_store_view_apps(&mut self) -> bool {
-        let Some(version) = self.drawable_store_view().map(|view| view.version) else {
-            if self.draw_store_view_remnant() {
-                return true;
-            }
-            return self.draw_store_view_apps_left();
-        };
-        let Some(window) = self.view_window() else {
-            unreachable!("a page other than Overview draws from the View once the worker read it");
-        };
-        let chosen_over = WallSeconds {
-            first: window.first,
-            last: window.first + window.span - 1,
-        };
-
-        let drawn = &self.store_panels;
-        if self.preview.is_some() {
-            // A hover holds the charts where the pointer found them until it ends, so a reply
-            // of the page's own that it takes gets back the charts drawn before it.
-            if !drawn.drawn_for(&self.request.route) || drawn.version.is_none() {
-                return false;
-            }
-        } else if drawn.version != Some(version)
-            || drawn.chosen_over != Some(chosen_over)
-            || !drawn.drawn_for(&self.request.route)
-        {
-            // The App charts of the last View give the new ones the points both Views hold.
-            let older = std::mem::take(&mut self.store_panels.histories);
-            let Some(view) = self.store_view.clone() else {
-                unreachable!("taking the App charts leaves the drawn View as it was");
-            };
-            let charts = AppCharts::of(&self.request.route);
-            let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
-            let mut panels =
-                draw_store_view_panels_apps(&view, charts, older, &cohorts, chosen_over);
-            for panel in &mut panels.apps {
-                super::zoom_panel(panel, window);
-            }
-            self.store_view_built(panels);
-        }
-        let route = self.request.route.clone();
-        draw_store_view_splice_apps(&route, &mut self.panels, &self.store_panels.apps);
-        true
     }
 
     /// Puts the charts the page drew from the View it let go of in place of the worker's, where
@@ -802,7 +744,7 @@ impl LiveDashboard {
             snapshot.app_attribution_history =
                 history.map(|shared| Arc::new(Presentation::Shared(shared)));
         }
-        if self.store_panels.charts.shows_resident() {
+        if self.store_panels.charts().shows_resident() {
             let history = histories.resident.clone();
             snapshot.resident_history =
                 history.map(|shared| Arc::new(Presentation::Shared(shared)));
@@ -928,20 +870,9 @@ impl LiveDashboard {
             .is_some_and(|preview| preview.held.is_none())
     }
 
-    /// What the page kept of the View it let go of, while it draws its machine charts from
-    /// that in place of a View, and its readouts and hardware figure while no hover is shown.
-    fn drawn_remnant(&self) -> Option<&Remnant> {
-        if !store_view_draws_machine(&self.request.route) {
-            return None;
-        }
-
-        self.kept_remnant()
-    }
-
     /// What the page kept of the View it let go of, while it draws the charts it drew from that
-    /// View, machine charts or charts by App, in place of a View: where the page draws charts
-    /// from the store, on the kind of page the charts were drawn for, whatever hover is shown,
-    /// since a hover holds the charts still.
+    /// View in place of a View: where the page draws charts from the store, on the kind of page
+    /// the charts were drawn for, whatever hover is shown, since a hover holds the charts still.
     fn kept_remnant(&self) -> Option<&Remnant> {
         let remnant = self.store_panels.remnant.as_ref()?;
         assert!(self.store_view.is_none());
@@ -955,44 +886,28 @@ impl LiveDashboard {
         Some(remnant)
     }
 
-    /// The store's newest View, while a page `store_view_draws_machine` names shows the live Mac
-    /// following the newest second, or is opening before the worker's first reading, whatever
-    /// hover is shown. The View is no older than the worker's reading, unless that reading left
-    /// the page's charts by App to the View.
-    pub(super) fn followed_store_view(&self) -> Option<&View> {
-        if !store_view_draws_machine(&self.request.route) {
-            return None;
-        }
-
-        self.drawable_store_view()
-    }
-
     /// Whether the page shows the charts it drew from the store, which `store_panels` holds, its
-    /// machine charts or its charts by App or both: from the View `drawn_store_view` names on a
-    /// page drawn from the View, from the View it follows on another page, whose charts a hover
-    /// holds still, or from what it kept of a View it let go of.
+    /// machine charts with its charts by App: from the View `drawn_store_view` names, or from
+    /// what it kept of a View it let go of.
     fn store_panels_shown(&self) -> bool {
-        // A page keeps the charts drawn for a page whose machine charts or charts by App differ
-        // from its own until it draws its own, which a hover holds back.
+        // A page keeps the charts drawn for another kind of page until it draws its own, which a
+        // hover holds back.
         if !self.store_panels.drawn_for(&self.request.route) {
             return false;
         }
-        let machine = store_panels_machine(&self.request.route);
         if self.kept_remnant().is_some() {
             return true;
         }
-        if machine.is_some() {
-            return self.drawn_store_view().is_some();
-        }
 
-        self.drawable_store_view().is_some()
+        self.drawn_store_view().is_some()
     }
 
-    /// The store's newest View, on any page that draws charts from it, its machine charts or a
-    /// chart by App, which `followed_store_view` gives on a page drawn from the View. It is none
-    /// while it is older than the worker's reading, unless that reading left the page's charts
-    /// by App to it. A page other than Overview draws from it once the worker read the page.
-    fn drawable_store_view(&self) -> Option<&View> {
+    /// The store's newest View, while a page drawn from the View shows the live Mac following
+    /// the newest second or holding one, or is opening before the worker's first reading,
+    /// whatever hover is shown. It is none while it is older than the worker's reading, unless
+    /// that reading left the page's charts by App or older seconds to it. A page other than
+    /// Overview draws from it once the worker read the page.
+    pub(super) fn followed_store_view(&self) -> Option<&View> {
         if !self.draws_from_store_view() {
             return None;
         }
@@ -1046,12 +961,12 @@ impl LiveDashboard {
         view_newest.wall_ns / NANOSECONDS_PER_SECOND < readings_last
     }
 
-    /// Whether the page draws charts from the store: a page that draws its machine charts or a
-    /// chart by App from it, once the worker read it where it is not Overview, on the live Mac,
-    /// following the newest second or holding one.
+    /// Whether the page draws charts from the store: a page that draws its machine charts from
+    /// it, once the worker read it where it is not Overview, on the live Mac, following the
+    /// newest second or holding one.
     fn draws_from_store_view(&self) -> bool {
         let route = self.request.route.as_str();
-        if !store_view_draws_machine(route) && !store_view_draws_apps(route) {
+        if !store_view_draws_machine(route) {
             return false;
         }
         if route != "overview" && self.snapshot.is_none() {
@@ -1135,7 +1050,7 @@ impl LiveDashboard {
     /// the worker's: where it reads its charts by App from those it drew, on a page that draws a
     /// chart by App from the View.
     fn store_panels_histories_read(&self) -> bool {
-        if !self.store_panels.charts.any() {
+        if !self.store_panels.charts().any() {
             return false;
         }
 
@@ -1227,7 +1142,7 @@ impl LiveDashboard {
     /// the View the charts were drawn from.
     pub(crate) fn store_view_last_second(&self) -> Option<u64> {
         let Some(view) = self.drawn_store_view() else {
-            return self.drawn_remnant().map(|remnant| remnant.last);
+            return self.kept_remnant().map(|remnant| remnant.last);
         };
         if self.store_view_hover_shown() {
             return self.store_panels.seconds.last().copied();
@@ -1282,7 +1197,7 @@ impl LiveDashboard {
             if self.shown_preview().is_some() {
                 return None;
             }
-            return self.drawn_remnant().map(|remnant| &remnant.newest);
+            return self.kept_remnant().map(|remnant| &remnant.newest);
         };
         let Some(preview) = self.shown_preview() else {
             return view.seconds.last().map(AsRef::as_ref);
@@ -1299,7 +1214,7 @@ impl LiveDashboard {
     /// The wall second of each second the store's View holds of its live span, oldest first, or
     /// none where the page draws no chart from the View.
     pub(crate) fn store_view_wall_seconds(&self) -> Vec<u64> {
-        let Some(view) = self.drawable_store_view() else {
+        let Some(view) = self.followed_store_view() else {
             return Vec::new();
         };
 
@@ -1312,7 +1227,7 @@ impl LiveDashboard {
     /// The second whose point the charts of the store's View draw for a hover of `second`, or
     /// none where they draw no point for it or the page draws no chart from the View.
     pub(crate) fn store_view_point_second(&self, second: u64) -> Option<u64> {
-        let view = self.drawable_store_view()?;
+        let view = self.followed_store_view()?;
 
         match crate::live_projection::overview_point_second(view, second) {
             Ok(shown) => shown,
@@ -1329,7 +1244,7 @@ impl LiveDashboard {
     /// starts there, which the charts by App draw at it. None where the View holds no identity
     /// of `second`, as in a gap, and where the page draws no chart from the View.
     pub(crate) fn store_view_target(&self, second: u64) -> Option<Target> {
-        let view = self.drawable_store_view()?;
+        let view = self.followed_store_view()?;
         let at_second = |held: &Arc<MachineSecond>| held.wall_ns / NANOSECONDS_PER_SECOND == second;
 
         assert_eq!(view.apps.len(), view.seconds.len());
@@ -1495,6 +1410,7 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
         "network_tx_bps": second.network.map(|traffic| traffic.sent_bps),
         "soc_celsius": second.soc_celsius,
         "fan_rpm": second.fan_rpm,
+        "thermal_pressure": second.thermal_pressure,
         "battery": second.battery.as_ref().map(|battery| json!({
             "charge_percent": battery.charge_percent, "power_watts": battery.power_watts})),
     })
@@ -1651,11 +1567,6 @@ fn store_view_draws_app_chart(route: &str, id: &str) -> bool {
     Metric::from_route(route) == Some(metric)
 }
 
-/// Whether the page `route` draws any chart by App from the store's View.
-fn store_view_draws_apps(route: &str) -> bool {
-    AppCharts::of(route).any()
-}
-
 /// The charts by App of `view` that `charts` names, which draw on lines of their own the Apps
 /// `cohorts` chose for each over the wall seconds `chosen_over` and take the points of the
 /// seconds they share with `older`, under the titles a page other than Overview gives them.
@@ -1704,7 +1615,6 @@ fn draw_store_view_panels_apps(
     StorePanels {
         version: Some(view.version),
         chosen_over: Some(chosen_over),
-        charts,
         apps,
         histories,
         ..StorePanels::default()

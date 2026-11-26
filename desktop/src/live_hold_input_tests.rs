@@ -946,44 +946,6 @@ fn a_step_past_the_first_second_of_a_held_window_on_overview_stays_at_that_secon
 }
 
 #[gpui::test]
-fn a_step_past_the_last_second_of_a_held_window_on_the_energy_page_reads_nothing(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a keyboard step while a second is held stops at the last second of the window the
-    // charts were drawn in, rather than selecting a later second the recording holds, which
-    // would read it and lay the window around it. Method: the Energy page, which draws only its
-    // chart by App from the View, over readings that end 100 seconds before the recording's
-    // newest, a click a second before their last on its chart by App, a step a second right on
-    // that chart and then another, then the second the page's readings show, the commands the
-    // reader was sent, and the page's window.
-    let last = HOUR_NEWEST - 100;
-    let mut harness = InputHarness::open_route(cx, "energy");
-    harness.driver.show_hour_at_fifteen_minutes_up_to(last);
-    harness
-        .driver
-        .hover_second_on("live-power-apps-plot", last - 1);
-    harness
-        .driver
-        .click_second_on("live-power-apps-plot", last - 1);
-    harness
-        .driver
-        .leave_plot("live-power-apps-plot", PlotExit::Top);
-    harness.driver.step_on_apps("live-power-apps-plot", "right");
-    let commands = harness.driver.reader_commands();
-
-    harness.driver.press("right");
-
-    assert_eq!(harness.driver.shown_reading_second(), Some(last));
-    assert_eq!(harness.driver.reader_commands(), commands);
-    let drawn = TimeWindow {
-        first: last - 899,
-        span: 900,
-    };
-    assert_eq!(harness.driver.view_window(), Some(drawn));
-    harness.teardown();
-}
-
-#[gpui::test]
 fn a_step_past_the_last_second_read_on_the_cpu_page_holds_the_next_second_the_view_drew(
     cx: &mut TestAppContext,
 ) {

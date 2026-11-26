@@ -453,10 +453,10 @@ fn hovering_the_older_part_of_the_hour_on_the_cpu_page_shows_each_apps_mean_over
 
 #[gpui::test]
 fn hovering_a_recent_second_on_the_cpu_page_reads_the_workers_chart_there(cx: &mut TestAppContext) {
-    // Goal: on a page that draws only its charts by App from the View, a hover names the second
-    // as the View holds it and the worker's charts still find their reading of it. Method: the
-    // CPU page over the View of the hour, a minute's range, and the pointer on 9,999 of the
-    // worker's CPU chart, which the worker and the View both read, 99.5% busy.
+    // Goal: on a page drawn from the View, a hover names the second as the View holds it and
+    // the worker's charts still find their reading of it. Method: the CPU page over the View of
+    // the hour, a minute's range, and the pointer on 9,999 of the worker's CPU chart, which the
+    // worker and the View both read, 99.5% busy.
     let (view, _) = hour();
     let mut harness = InputHarness::open_route(cx, "cpu");
     harness.driver.show_store_view(view);

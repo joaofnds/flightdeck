@@ -586,16 +586,6 @@ impl Worker {
             .store(source == AppChartSource::View, Ordering::Release);
     }
 
-    /// The second of the reading the reader left for the window and the window has not taken.
-    #[cfg(test)]
-    pub(crate) fn output_second(&self) -> Option<u64> {
-        let mailbox = self.mailbox().unwrap();
-        let Some(Update::Ready(snapshot)) = &mailbox.output else {
-            return None;
-        };
-        snapshot.selection["second"].as_u64()
-    }
-
     /// What `read` reads of the reading the reader left for the window and the window has not
     /// taken.
     #[cfg(test)]
@@ -1306,17 +1296,17 @@ pub(crate) fn earlier_left_to_view(request: &Request, source: AppChartSource) ->
 
 /// Whether the page `route` draws its machine charts and readouts from the store's View, and its
 /// top Apps where it shows any, while it follows the live Mac's newest second, so its reader
-/// rests. Overview, Memory, Network, Storage, GPU and CPU do. Every gate that lets a page draw from
-/// the View, rest its reader on it and resume from it asks this, so a page joins them by being
-/// named here. Resting the reader and resuming also ask `store_view_draws_whole_page`, since
-/// the CPU page reads its logical CPUs where the View could not build them.
+/// rests. The pages `store_panels_machine` names do. Every gate that lets a page draw from the
+/// View, rest its reader on it and resume from it asks this, so a page joins them by being named
+/// there. Resting the reader and resuming also ask `store_view_draws_whole_page`,
+/// since the CPU page reads its logical CPUs where the View could not build them.
 pub(crate) fn store_view_draws_machine(route: &str) -> bool {
     store_panels_machine(route).is_some()
 }
 
 /// The page whose machine charts the charts drawn for the page `route` are, which is `route`
-/// where it draws machine charts from the store's View, and none where it draws only charts by
-/// App from it. This is the one list of the pages drawn from the View.
+/// where it draws machine charts from the store's View, and none elsewhere. This is the one list
+/// of the pages drawn from the View.
 pub(crate) fn store_panels_machine(route: &str) -> Option<&'static str> {
     match route {
         "overview" => Some("overview"),
@@ -1325,6 +1315,7 @@ pub(crate) fn store_panels_machine(route: &str) -> Option<&'static str> {
         "storage" => Some("storage"),
         "gpu" => Some("gpu"),
         "cpu" => Some("cpu"),
+        "energy" => Some("energy"),
         _ => None,
     }
 }

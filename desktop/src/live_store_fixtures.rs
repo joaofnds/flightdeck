@@ -6,6 +6,7 @@ use std::sync::Arc;
 use collector::machine::Pressure;
 use collector::recording::identity_text;
 use collector::ring::Identity;
+use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 use viewer::store::{
     AppsSecond, MachineSecond, MemoryRate, MemorySecond, NetworkRate, StorageRate, Traffic, View,
@@ -299,6 +300,49 @@ pub fn with_gpu_readings(
 ) -> MachineSecond {
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
     let complete = viewer::store::CompleteMachine::of_gpu(&second, watts, memory_bytes, &budget);
+    second.complete = viewer::store::CompleteMachineState::Available(complete);
+    second
+}
+
+/// `second` with a complete reading of the power, `soc_celsius` and thermal state it holds, the GPU
+/// power `with_gpu_reading` gives it and the three fan channels `fan_rpm` gives it, as the store
+/// holds a second it read. Its GPU power and fans differ from those of every other second, while
+/// its power and `soc_celsius` are those `reading_at` gives it, which repeat.
+pub fn with_energy_reading(second: MachineSecond) -> MachineSecond {
+    let watts = Some(gpu_watts(&second));
+    let fans = fan_rpm(&second);
+
+    with_energy_readings(second, watts, fans)
+}
+
+/// The three fan channels `with_energy_reading` gives `second`, past the two its record holds.
+pub fn fan_rpm(second: &MachineSecond) -> Vec<Option<f64>> {
+    let wall_second = f64::from(u32::try_from(second.wall_ns / NANOSECONDS_PER_SECOND).unwrap());
+
+    vec![
+        Some(wall_second + 1_000.5),
+        Some(wall_second + 1_400.5),
+        Some(wall_second + 1_800.5),
+    ]
+}
+
+/// `second` with a complete reading of the power, `soc_celsius` and thermal state it holds, the GPU
+/// power `gpu_watts` and the fan channels `fan_rpm`, the first two of which its record then holds.
+pub fn with_energy_readings(
+    mut second: MachineSecond,
+    gpu_watts: Option<f64>,
+    fan_rpm: Vec<Option<f64>>,
+) -> MachineSecond {
+    let channel = |index: usize| {
+        fan_rpm
+            .get(index)
+            .copied()
+            .flatten()
+            .and_then(|rpm| rpm.to_f32())
+    };
+    second.fan_rpm = [channel(0), channel(1)];
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    let complete = viewer::store::CompleteMachine::of_energy(&second, gpu_watts, fan_rpm, &budget);
     second.complete = viewer::store::CompleteMachineState::Available(complete);
     second
 }
