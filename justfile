@@ -13,6 +13,15 @@ test_packages := "--workspace"
 default:
     @just --list
 
+# Cargo removes no unit a newer build supersedes, and a dependency update or a new toolchain
+# gives every unit built on it a new hash, so without it the target directory keeps every copy.
+# Every recipe that builds runs it first. CI skips it, since each job's runner is discarded.
+# It builds in a directory of its own, so a release build never waits on a debug one for it.
+# Remove the build output no build has read for two days.
+sweep:
+    [ -n "${CI:-}" ] || cargo run --locked --quiet -p sweep --target-dir target/sweep \
+        --config 'build.build-dir="target/sweep"' -- --target target
+
 # Opening brings a running Flightdeck forward instead of the new build, so quit it first.
 
 # Build, package and open the desktop app.
@@ -22,7 +31,7 @@ dev: bundle
 # The app's own check runs on this release build, since a debug build of the app made for the
 # check alone took CI's desktop job 86 seconds. The release profile keeps every assertion.
 # Build the app with its collector and persister helpers, check it, and package them as one bundle.
-bundle:
+bundle: sweep
     cargo build --locked --release -p collector -p persister --bin collector --bin recorder --bin persister
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
     desktop/target/release/flightdeck --check
@@ -103,18 +112,18 @@ fmt:
     rustfmt --edition 2024 --check persistence/src/worker/registered/kill_fault.rs
 
 # Lint the root workspace.
-clippy:
+clippy: sweep
     cargo clippy --locked --workspace --all-targets -- --deny warnings
     cargo clippy --locked -p persistence --all-targets --features kill-every-pair,long-recording -- --deny warnings
     cargo clippy --locked -p viewer --all-targets --features read-benchmark -- --deny warnings
 
 # Test the root workspace.
-test:
+test: sweep
     cargo build --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --locked {{test_packages}} --no-fail-fast -- {{test_arguments}}
 
 # Opt-in optimized maximum native event fidelity and worker resource observations.
-test-event-capacity:
+test-event-capacity: sweep
     cargo clippy --locked -p persister --features event-capacity --test event_stream -- --deny warnings
     cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --release --locked -p persister --features event-capacity --test event_stream -- --include-ignored --no-capture --test-threads=1
@@ -123,7 +132,7 @@ test-event-capacity:
 # process's footprint. A change to how the live store holds its seconds runs the recipe before
 # and after, on the same recording, and compares the times, the bytes and the digests printed.
 # Opt-in cost of each read of the live store on a recording: just read-benchmark <a recording>
-read-benchmark recording:
+read-benchmark recording: sweep
     for test in reads_of_the_live_span_cost \
         reads_of_a_context_that_follows_the_newest_second_cost \
         reads_of_a_context_fixed_on_an_earlier_second_cost taking_a_second_costs \
@@ -141,7 +150,7 @@ read-benchmark recording:
 # 12,000 processes are the most an M5 Pro lists. 6,000 make fewer App parts than a reader takes
 # and more than a seal keeps, so they fail where a seal comes to keep them. 4,096 keep theirs.
 # Seal generated minutes of 12,000, 6,000 and 4,096 processes across a killed persister.
-test-process-capacity:
+test-process-capacity: sweep
     cargo build --release --locked -p persister --bin persister
     cargo run --release --locked -p persister --bin seal_bench -- \
         --windows 3 --processes 12000 --persister target/release/persister --restart-after-windows 1
@@ -156,13 +165,13 @@ desktop-fmt:
 
 # The control socket builds only with the automation feature, so lint with it as well.
 # Lint the desktop workspace.
-desktop-clippy:
+desktop-clippy: sweep
     cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets -- --deny warnings
     cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets --features automation \
         -- --deny warnings
 
 # Test the desktop workspace, then check its text backend.
-desktop-test:
+desktop-test: sweep
     cargo test --locked --manifest-path desktop/Cargo.toml
     cargo test --locked --manifest-path desktop/Cargo.toml --features automation --bin flightdeck
     cargo run --locked --manifest-path desktop/Cargo.toml --bin text_backend_check -- --check
@@ -170,12 +179,12 @@ desktop-test:
 # It shows what a change to sealing costs, and fails only when the run does, never on a
 # number, since a shared machine's numbers vary.
 # Seal six generated minutes through the persister's worker and print each window's CPU time.
-seal-bench:
+seal-bench: sweep
     cargo run --locked --release -p persister --bin seal_bench -- \
         --windows 6 --processes 1050 --derive apps
 
 # Report the lines the tests of each workspace run, as HTML under its target/llvm-cov/html.
-coverage:
+coverage: sweep
     cargo llvm-cov --locked --workspace --html
     cargo llvm-cov --locked --manifest-path desktop/Cargo.toml --html
 
